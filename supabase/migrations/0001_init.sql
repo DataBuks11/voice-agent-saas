@@ -1,8 +1,7 @@
 -- 0001_init: multi-tenant SaaS + vector search + RLS
 -- Run in Supabase SQL editor or via supabase CLI.
--- Only the "vector" extension is needed. gen_random_uuid() is built into
--- PostgreSQL 13+ on Supabase already provides gen_random_uuid(), so no extra
--- extension is required besides vector.
+-- Only the "vector" extension is needed; gen_random_uuid() is built into
+-- PostgreSQL 13+ on Supabase, so no extra extension is required.
 create extension if not exists vector;
 
 -- Workspaces / memberships
@@ -170,7 +169,7 @@ returns boolean language sql stable as $$
   select exists (select 1 from memberships m where m.workspace_id = wid and m.user_id = auth.uid())
 $$;
 
--- Policies: members canCRUD rows in their workspaces. Service role bypasses RLS.
+-- Policies: members can CRUD rows in their workspaces. Service role bypasses RLS.
 do $$
 declare t text;
 begin
