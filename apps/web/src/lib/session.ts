@@ -5,16 +5,38 @@ export interface Workspace {
   role?: string;
 }
 
-const LS_USER = "vas.userId";
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name?: string | null;
+}
+
+const LS_TOKEN = "vas.token";
+const LS_USER = "vas.user";
 const LS_WS = "vas.workspace";
 
-export function getUserId(): string {
-  let id = localStorage.getItem(LS_USER);
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(LS_USER, id);
+export function getToken(): string | null {
+  return localStorage.getItem(LS_TOKEN);
+}
+
+export function setSession(token: string, user: AuthUser): void {
+  localStorage.setItem(LS_TOKEN, token);
+  localStorage.setItem(LS_USER, JSON.stringify(user));
+}
+
+export function getUser(): AuthUser | null {
+  const raw = localStorage.getItem(LS_USER);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as AuthUser;
+  } catch {
+    return null;
   }
-  return id;
+}
+
+export function clearSession(): void {
+  localStorage.removeItem(LS_TOKEN);
+  localStorage.removeItem(LS_USER);
 }
 
 export function getWorkspace(): Workspace | null {

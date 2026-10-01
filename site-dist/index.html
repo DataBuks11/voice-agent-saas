@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Voice Agent OS - multi-tenant AI voice agents with retrieval-augmented knowledge, built for production." />
+    <title>Intelligence Designed To Evolve</title>
+    <link rel="icon" href="assets/logo.webp" type="image/webp" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link href="https://db.onlinewebfonts.com/c/8cb707a9b8a73f8a7403336b861c3074?family=BubbledotICG-FinePos" rel="stylesheet" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+      integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A=="
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    />
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg" aria-hidden="true">
+      <video class="bg-video" autoplay muted loop playsinline>
+        <source
+          src="https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260809_012548_ef22562c-c0ae-4816-ad9d-f8922af4e6a7.mp4"
+          type="video/mp4"
+        />
+      </video>
+    </div>
+
+    <div class="page">
+      <header class="header">
+        <a class="logo" href="/" aria-label="Voice Agent OS home">
+          <img src="assets/logo.webp" alt="" width="52" height="52" />
+        </a>
+
+        <nav class="nav" aria-label="Primary">
+          <a href="/" class="active">Home</a>
+          <a href="/app/">Product</a>
+          <a href="/app/knowledge">Knowledge</a>
+          <a href="mailto:hello@voiceagent.dev">Contact</a>
+        </nav>
+
+        <a class="signin" href="/app/">Sign in</a>
+
+        <button class="burger" type="button" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open menu">
+          <span></span><span></span><span></span>
+        </button>
+      </header>
+
+      <main class="hero">
+        <div class="trust anim" style="--d: 0.05s">
+          <div class="avatars">
+            <span class="avatar a1"><span class="avatar-inner"><i class="fa-brands fa-python"></i></span></span>
+            <span class="avatar a2"><span class="avatar-inner"><i class="fa-brands fa-node-js"></i></span></span>
+            <span class="avatar a3"><span class="avatar-inner"><i class="fa-brands fa-docker"></i></span></span>
+          </div>
+          <span class="trust-pill">Powered By An Open Source Stack</span>
+        </div>
+
+        <h1 class="headline">
+          <span class="line line-1">Voice Agents</span>
+          <span class="line line-2">Built To Scale</span>
+        </h1>
+
+        <p class="subhead anim" style="--d: 0.28s">
+          Deploy multi-tenant voice agents that reason, retrieve and speak &mdash;<br />
+          with pgvector RAG, citations and production-grade APIs.
+        </p>
+
+        <a class="cta anim-pulse" style="--d: 0.4s" href="/app/">Get Started</a>
+      </main>
+
+      <footer class="stats" aria-label="Platform metrics">
+        <div class="stat anim" style="--d: 0.5s" data-target="150" data-suffix="ms" data-decimals="0">
+          <span class="stat-icon">&lt;</span>
+          <span class="stat-value"><span class="num">0</span><span class="suffix">ms</span></span>
+          <span class="stat-label">Retrieval Latency</span>
+        </div>
+        <div class="stat anim" style="--d: 0.58s" data-target="99.99" data-suffix="%" data-decimals="2">
+          <span class="stat-icon">%</span>
+          <span class="stat-value"><span class="num">0</span><span class="suffix">%</span></span>
+          <span class="stat-label">Platform Uptime</span>
+        </div>
+        <div class="stat anim" style="--d: 0.66s" data-target="24" data-suffix="/7" data-decimals="0">
+          <span class="stat-icon">*</span>
+          <span class="stat-value"><span class="num">0</span><span class="suffix">/7</span></span>
+          <span class="stat-label">Autonomous Runtime</span>
+        </div>
+        <div class="stat anim" style="--d: 0.74s" data-target="1536" data-suffix="" data-decimals="0">
+          <span class="stat-icon">#</span>
+          <span class="stat-value"><span class="num">0</span><span class="suffix"></span></span>
+          <span class="stat-label">Vector Dimensions</span>
+        </div>
+      </footer>
+    </div>
+
+    <div class="menu-overlay" id="menu-overlay" hidden></div>
+    <nav class="mobile-menu" id="mobile-menu" aria-label="Mobile" hidden>
+      <a href="/" class="active">Home</a>
+      <a href="/app/">Product</a>
+      <a href="/app/knowledge">Knowledge</a>
+      <a href="mailto:hello@voiceagent.dev">Contact</a>
+      <a href="/app/" class="m-signin">Sign in</a>
+    </nav>
+
+    <script src="main.js"></script>
+  </body>
+</html>

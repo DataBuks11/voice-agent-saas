@@ -1,7 +1,7 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError, type WorkspaceLite } from "../lib/api";
-import { getUserId, setWorkspace } from "../lib/session";
+import { setWorkspace } from "../lib/session";
 
 export function SetupPage() {
   const nav = useNavigate();
@@ -13,7 +13,7 @@ export function SetupPage() {
 
   React.useEffect(() => {
     api
-      .listWorkspaces(getUserId())
+      .listWorkspaces()
       .then((r) => setExisting(r.items))
       .catch(() => undefined);
   }, []);
@@ -25,7 +25,7 @@ export function SetupPage() {
     try {
       if (mode === "create") {
         if (name.trim().length < 2) throw new Error("workspace name too short");
-        const ws = await api.createWorkspace(name.trim(), getUserId());
+        const ws = await api.createWorkspace(name.trim());
         setWorkspace({ id: ws.id, name: ws.name, createdAt: ws.createdAt, role: ws.role });
       } else {
         const picked = existing.find((w) => w.id === selectedJoin);

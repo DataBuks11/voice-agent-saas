@@ -1,4 +1,4 @@
-import { getUserId, getWorkspace } from "./session";
+import { getWorkspace, getToken, type AuthUser } from "./session";
 
 const BASE = (import.meta.env.VITE_API_URL ?? "http://localhost:3001").replace(/\/$/, "");
 
@@ -60,9 +60,10 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const ws = getWorkspace();
+  const token = getToken();
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    "x-user-id": getUserId(),
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
     ...(ws ? { "x-workspace-id": ws.id } : {}),
     ...((init.headers as Record<string, string>) ?? {}),
   };
@@ -89,10 +90,14 @@ const get = <T>(path: string): Promise<T> => request<T>(path);
 export const api = {
   base: BASE,
   health: () => get<{ ok: boolean; service: string; ts: string }>("/health"),
-  createWorkspace: (name: string, userId: string) =>
-    post<{ id: string; name: string; createdAt: string; role: string }>("/v1/workspaces", { name, userId }),
-  listWorkspaces: (userId: string) =>
-    get<{ items: WorkspaceLite[]; total: number }>(`/v1/workspaces?userId=${encodeURIComponent(userId)}`),
+  register: (email: string, password: string, name?: string) =>
+    post<{ token: string; user: AuthUser }>("/v1/auth/register", { email, password, ...(name ? { name } : {}) }),
+  login: (email: string, password: string) =>
+    post<{ token: string; user: AuthUser }>("/v1/auth/login", { email, password }),
+  me: () => get<{ user: AuthUser }>("/v1/auth/me"),
+  createWorkspace: (name: string) =>
+    post<{ id: string; name: string; createdAt: string; role: string }>("/v1/workspaces", { name }),
+  listWorkspaces: () => get<{ items: WorkspaceLite[]; total: number }>(`/v1/workspaces`),
   listAgents: () => get<{ items: AgentRow[]; total: number }>("/v1/agents?workspaceId=" + getWorkspace()!.id),
   createAgent: (body: { name: string; language: string; tone: string; systemPrompt: string; fallbackResponse: string }) =>
     post<AgentRow>("/v1/agents", { workspaceId: getWorkspace()!.id, ...body }),

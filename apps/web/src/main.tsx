@@ -2,13 +2,16 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, NavLink, useLocation, Navigate } from "react-router-dom";
 import "./styles.css";
-import { getWorkspace, clearWorkspace, getUserId } from "./lib/session";
+import { getWorkspace, clearWorkspace, getToken, clearSession, getUser } from "./lib/session";
 import { api } from "./lib/api";
+import { LoginPage } from "./pages/Login";
 import { SetupPage } from "./pages/Setup";
 import { DashboardPage } from "./pages/Dashboard";
 import { AgentsPage } from "./pages/Agents";
 import { KnowledgePage } from "./pages/Knowledge";
 import { ConversationsPage } from "./pages/Conversations";
+
+const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 export interface Toast {
   id: number;
@@ -26,6 +29,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = React.useState<Toast[]>([]);
   const [health, setHealth] = React.useState<"checking" | "up" | "down">("checking");
   const ws = getWorkspace();
+  const user = getUser();
   const loc = useLocation();
 
   const push = React.useCallback((t: Omit<Toast, "id">) => {
@@ -68,16 +72,26 @@ function Shell({ children }: { children: React.ReactNode }) {
           ))}
           <div className="nav-section">Runtime</div>
           <a className="nav-link" href={`${api.base}/health`} target="_blank" rel="noreferrer">
-            <span className="ico">◍</span> API health
+            <span className="ico">◍</span>
+            API health
           </a>
           <div className="sidebar-footer">
             <div className="ws-chip">
               <span className="ws-dot" />
               <span>{ws?.name ?? "no workspace"}</span>
             </div>
-            {ws ? <div className="brand-sub mono" style={{ marginTop: 4 }}>{ws.id.slice(0, 8)}…</div> : null}
-            <button className="link-btn" onClick={() => { clearWorkspace(); location.href = "/"; }}>
-              Switch workspace
+            <div className="brand-sub mono" style={{ marginTop: 4 }}>
+              {user?.email ?? ""}
+            </div>
+            <button
+              className="link-btn"
+              onClick={() => {
+                clearSession();
+                clearWorkspace();
+                location.href = BASENAME + "/login";
+              }}
+            >
+              Sign out
             </button>
           </div>
         </aside>
@@ -88,7 +102,7 @@ function Shell({ children }: { children: React.ReactNode }) {
               <span className={`badge ${health === "up" ? "ok" : health === "down" ? "danger" : "muted"}`}>
                 {health === "checking" ? "checking api…" : health === "up" ? "api online" : "api offline"}
               </span>
-              <span className="badge muted">user {getUserId().slice(0, 8)}</span>
+              <span className="badge muted">{user?.email ?? "signed out"}</span>
             </div>
           </header>
           <main className="content">{children}</main>
@@ -103,19 +117,21 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Guarded({ children }: { children: React.ReactNode }) {
-  if (!getWorkspace()) return <Navigate to="/setup" replace />;
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  if (!getToken()) return <Navigate to={BASENAME + "/login"} replace />;
+  if (!getWorkspace()) return <Navigate to={BASENAME + "/setup"} replace />;
   return <>{children}</>;
 }
 
 createRoot(document.getElementById("root")!).render(
-  <BrowserRouter>
+  <BrowserRouter basename={BASENAME}>
     <Routes>
+      <Route path="/login" element={<LoginPage />} />
       <Route path="/setup" element={<SetupPage />} />
-      <Route path="/" element={<Shell><Guarded><DashboardPage /></Guarded></Shell>} />
-      <Route path="/agents" element={<Shell><Guarded><AgentsPage /></Guarded></Shell>} />
-      <Route path="/knowledge" element={<Shell><Guarded><KnowledgePage /></Guarded></Shell>} />
-      <Route path="/conversations" element={<Shell><Guarded><ConversationsPage /></Guarded></Shell>} />
+      <Route path="/" element={<Shell><RequireAuth><DashboardPage /></RequireAuth></Shell>} />
+      <Route path="/agents" element={<Shell><RequireAuth><AgentsPage /></RequireAuth></Shell>} />
+      <Route path="/knowledge" element={<Shell><RequireAuth><KnowledgePage /></RequireAuth></Shell>} />
+      <Route path="/conversations" element={<Shell><RequireAuth><ConversationsPage /></RequireAuth></Shell>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   </BrowserRouter>,
