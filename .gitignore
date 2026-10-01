@@ -13,3 +13,5 @@ __pycache__/
 *.pyc
 coverage/
 apps/web/dist/
+
+local_cache/
