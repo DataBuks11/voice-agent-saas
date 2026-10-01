@@ -1,0 +1,109 @@
+import React from "react";
+import { useNavigate } from "react-router-dom";
+import { api, ApiError, type WorkspaceLite } from "../lib/api";
+import { getUserId, setWorkspace } from "../lib/session";
+
+export function SetupPage() {
+  const nav = useNavigate();
+  const [mode, setMode] = React.useState<"create" | "join">("create");
+  const [name, setName] = React.useState("");
+  const [existing, setExisting] = React.useState<WorkspaceLite[]>([]);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    api
+      .listWorkspaces(getUserId())
+      .then((r) => setExisting(r.items))
+      .catch(() => undefined);
+  }, []);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      if (mode === "create") {
+        if (name.trim().length < 2) throw new Error("workspace name too short");
+        const ws = await api.createWorkspace(name.trim(), getUserId());
+        setWorkspace({ id: ws.id, name: ws.name, createdAt: ws.createdAt, role: ws.role });
+      } else {
+        const picked = existing.find((w) => w.id === selectedJoin);
+        if (!picked) throw new Error("select a workspace");
+        setWorkspace({ id: picked.id, name: picked.name, createdAt: picked.createdAt, role: picked.role });
+      }
+      nav("/");
+      location.reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : (err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const [selectedJoin, setSelectedJoin] = React.useState<string>("");
+
+  return (
+    <div className="setup-wrap">
+      <div className="setup-card card">
+        <div className="brand" style={{ padding: "0 0 18px" }}>
+          <div className="brand-logo">VA</div>
+          <div>
+            <div className="brand-name">Voice Agent OS</div>
+            <div className="brand-sub">create or pick a workspace to continue</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+          <button className={`btn btn-sm ${mode === "create" ? "btn-primary" : ""}`} onClick={() => setMode("create")} type="button">
+            New workspace
+          </button>
+          <button className={`btn btn-sm ${mode === "join" ? "btn-primary" : ""}`} onClick={() => setMode("join")} type="button">
+            Existing ({existing.length})
+          </button>
+        </div>
+
+        <form onSubmit={submit}>
+          {mode === "create" ? (
+            <div className="field">
+              <label>Workspace name</label>
+              <input
+                className="input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Acme Hair Salon"
+                autoFocus
+              />
+            </div>
+          ) : (
+            <div className="field">
+              <label>Your workspaces</label>
+              {existing.length === 0 ? (
+                <div className="hint">No workspace yet for this browser — create one.</div>
+              ) : (
+                <select className="select" value={selectedJoin} onChange={(e) => setSelectedJoin(e.target.value)}>
+                  <option value="">Select workspace…</option>
+                  {existing.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name} ({w.role})
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
+
+          {error ? <div className="badge danger" style={{ marginBottom: 12 }}>{error}</div> : null}
+
+          <button className="btn btn-primary" style={{ width: "100%" }} disabled={busy}>
+            {busy ? <span className="spinner" /> : mode === "create" ? "Create workspace" : "Open workspace"}
+          </button>
+        </form>
+
+        <p className="hint mt">
+          Auth: local workspace identity for now — Supabase Auth (email/OTP) lands next milestone.
+        </p>
+      </div>
+    </div>
+  );
+}

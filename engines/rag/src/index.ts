@@ -87,3 +87,39 @@ export class HashEmbeddingsProvider implements EmbeddingsProvider {
     });
   }
 }
+
+export interface EmbeddingsProviderOptions {
+  apiKey: string;
+  model?: string;
+  dimensions?: number;
+  baseUrl?: string;
+}
+
+/** OpenAI-compatible /embeddings endpoint (works with OpenAI, Azure-compatible, local gateways). */
+export class OpenAiCompatibleEmbeddings implements EmbeddingsProvider {
+  name: string;
+  constructor(private opts: EmbeddingsProviderOptions) {
+    this.name = `openai-compatible:${opts.model ?? "text-embedding-3-small"}`;
+  }
+  get dimensions(): number {
+    return this.opts.dimensions ?? 1536;
+  }
+  async embed(texts: string[]): Promise<number[][]> {
+    if (!texts.length) return [];
+    const base = (this.opts.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
+    const res = await fetch(`${base}/embeddings`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.apiKey}` },
+      body: JSON.stringify({ model: this.opts.model ?? "text-embedding-3-small", input: texts }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`embeddings request failed (${res.status}): ${detail.slice(0, 300)}`);
+    }
+    const json = (await res.json()) as { data: { index: number; embedding: number[] }[] };
+    return json.data
+      .slice()
+      .sort((a, b) => a.index - b.index)
+      .map((d) => d.embedding);
+  }
+}
