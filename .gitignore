@@ -17,3 +17,4 @@ apps/web/dist/
 local_cache/
 .vercel
 .env*
+site-dist/
