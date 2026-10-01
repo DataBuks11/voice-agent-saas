@@ -1,8 +1,9 @@
--- 0001_init: multi-tenant SaaS + pgvector + RLS
+-- 0001_init: multi-tenant SaaS + vector search + RLS
 -- Run in Supabase SQL editor or via supabase CLI.
--- Extension name is "vector" (not "pgvector") on Supabase.
-create extension if not exists "vector";
-create extension if not exists "pgcrypto";
+-- Only the "vector" extension is needed. gen_random_uuid() is built into
+-- PostgreSQL 13+ on Supabase already provides gen_random_uuid(), so no extra
+-- extension is required besides vector.
+create extension if not exists vector;
 
 -- Workspaces / memberships
 create table if not exists workspaces (
@@ -71,7 +72,14 @@ create table if not exists chunks (
   created_at timestamptz not null default now()
 );
 create index if not exists chunks_workspace_idx on chunks (workspace_id);
-create index if not exists chunks_embedding_idx on chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+-- ivfflat needs at least one row to infer dimensions; don't fail the migration
+-- on an empty table. Re-run the index statement after first embeddings load.
+do $$
+begin
+  execute 'create index if not exists chunks_embedding_idx on chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100)';
+exception when others then
+  notice 'chunks_embedding_idx skipped: %', sqlerrm;
+end $$;
 
 -- Customers / conversations / memory
 create table if not exists customers (

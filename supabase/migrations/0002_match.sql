@@ -1,5 +1,5 @@
 -- 0002_match: workspace-filtered vector search RPC used by the API retrieval layer.
--- Run AFTER 0001_init.sql (requires pgvector enabled + chunks table).
+-- Run AFTER 0001_init.sql (requires the vector extension + chunks table).
 
 create or replace function match_chunks(
   p_workspace_id uuid,
