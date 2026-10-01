@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { runMigrations } from "../lib/migrate.js";
-import { getEmbedder } from "../lib/embeddings.js";
+import { getEmbedder, getLastEmbeddingError } from "../lib/embeddings.js";
 
 function requireToken(req: FastifyRequest): void {
   const secret = process.env.ADMIN_TOKEN ?? "";
@@ -28,7 +28,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     requireToken(req);
     const provider = await getEmbedder().catch((e) => ({ name: `error: ${e.message}`, dimensions: 0 }));
     return reply.send({
-      embeddings: { provider: provider.name, dimensions: provider.dimensions },
+      embeddings: { provider: provider.name, dimensions: provider.dimensions, lastCreateError: getLastEmbeddingError() },
       llm: {
         baseUrl: process.env.LLM_BASE_URL || "(default openai)",
         model: process.env.LLM_MODEL || "",

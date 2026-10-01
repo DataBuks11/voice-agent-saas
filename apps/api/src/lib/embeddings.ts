@@ -51,6 +51,10 @@ export function warmupEmbeddings(): void {
   getEmbedder().catch(() => undefined);
 }
 
+export function getLastEmbeddingError(): string | null {
+  return lastCreateError;
+}
+
 /** Embed in batches to stay under request size limits; returns vectors in input order. */
 export async function embedAll(texts: string[], batchSize = 32): Promise<number[][]> {
   const provider = await getEmbedder();
