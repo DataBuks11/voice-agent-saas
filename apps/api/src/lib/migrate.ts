@@ -15,7 +15,7 @@ export interface MigrationResult {
  * 0001/0002 are baselined when the schema already exists (applied manually).
  */
 export async function runMigrations(connectionString: string): Promise<MigrationResult> {
-  const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: false } });
+  const client = new pg.Client({ connectionString });
   await client.connect();
   const applied: string[] = [];
   const skipped: string[] = [];

@@ -14,7 +14,7 @@ if (!url) {
   process.exit(1);
 }
 
-const client = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+const client = new pg.Client({ connectionString: url });
 await client.connect();
 try {
   await client.query(`create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())`);

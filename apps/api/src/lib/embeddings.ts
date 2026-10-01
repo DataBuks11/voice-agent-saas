@@ -6,6 +6,7 @@ import {
 } from "@voice-agent/rag";
 
 let providerPromise: Promise<EmbeddingsProvider> | null = null;
+let lastCreateError: string | null = null;
 
 /**
  * Embeddings provider (decided once per process, then cached):
@@ -34,7 +35,8 @@ async function createProvider(): Promise<EmbeddingsProvider> {
     await local.init();
     return local;
   } catch (err) {
-    console.warn(`[embeddings] local semantic model failed, using hash-stub: ${(err as Error).message}`);
+    lastCreateError = (err as Error).message;
+    console.warn(`[embeddings] local semantic model failed, using hash-stub: ${lastCreateError}`);
     return new HashEmbeddingsProvider(dimensions);
   }
 }
