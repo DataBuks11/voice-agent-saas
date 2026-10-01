@@ -7,19 +7,31 @@ export interface TenantContext {
 }
 
 /**
- * Resolve tenant from headers:
- *   x-user-id       - authenticated user (Supabase Auth JWT lands here in m3; demo uses local uuid)
- *   x-workspace-id  - active workspace
+ * Resolve tenant from the Authorization bearer JWT + workspace header:
+ *   Authorization: Bearer <jwt>  - authenticated user (simple credential auth)
+ *   x-workspace-id               - active workspace
  * Membership is verified against the memberships table, so RLS-equivalent
  * checks apply even though the server uses the service role.
  */
 export async function requireTenant(req: FastifyRequest): Promise<TenantContext> {
   const headers = req.headers as Record<string, string | undefined>;
-  const userId = headers["x-user-id"];
   const workspaceId = headers["x-workspace-id"];
-  if (!userId) throw Object.assign(new Error("x-user-id header required"), { status: 400 });
+  const userId = await requireUserId(req);
   if (!workspaceId) throw Object.assign(new Error("x-workspace-id header required"), { status: 400 });
   return verifyMembership(userId, workspaceId);
+}
+
+/** Extract user id from `Authorization: Bearer <jwt>` (401 when missing/invalid). */
+export async function requireUserId(req: FastifyRequest): Promise<string> {
+  const headers = req.headers as Record<string, string | undefined>;
+  const auth = headers.authorization ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) throw Object.assign(new Error("Authorization bearer token required"), { status: 401 });
+  const { verifyJwt } = await import("./jwt.js");
+  const { loadConfig } = await import("@voice-agent/config");
+  const payload = verifyJwt(token, loadConfig().JWT_SECRET);
+  if (!payload) throw Object.assign(new Error("invalid or expired token"), { status: 401 });
+  return payload.sub;
 }
 
 export async function verifyMembership(userId: string, workspaceId: string | undefined): Promise<TenantContext> {

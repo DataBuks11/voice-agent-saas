@@ -3,15 +3,27 @@ import { ZodError } from "zod";
 import { loadConfig } from "@voice-agent/config";
 import { createLogger } from "@voice-agent/shared";
 import { healthRoutes } from "./routes/health.js";
+import { authRoutes } from "./routes/auth.js";
+import { adminRoutes } from "./routes/admin.js";
 import { workspaceRoutes } from "./routes/workspaces.js";
 import { agentRoutes } from "./routes/agents.js";
 import { knowledgeRoutes } from "./routes/knowledge.js";
 import { conversationRoutes } from "./routes/conversations.js";
+import { warmupEmbeddings } from "./lib/embeddings.js";
+import { runMigrations } from "./lib/migrate.js";
+
+declare module "fastify" {
+  interface FastifyInstance {
+    jwtSecret: string;
+  }
+}
 
 export function buildServer() {
   const config = loadConfig();
   const log = createLogger("api", config.LOG_LEVEL);
   const app = Fastify({ logger: false });
+
+  app.decorate("jwtSecret", config.JWT_SECRET);
 
   app.addHook("onRequest", (req, _reply, done) => {
     log.info(`${req.method} ${req.url}`);
@@ -19,6 +31,8 @@ export function buildServer() {
   });
 
   app.register(healthRoutes);
+  app.register(authRoutes, { prefix: "/v1" });
+  app.register(adminRoutes, { prefix: "/v1" });
   app.register(workspaceRoutes, { prefix: "/v1" });
   app.register(agentRoutes, { prefix: "/v1" });
   app.register(knowledgeRoutes, { prefix: "/v1" });
@@ -38,6 +52,18 @@ export function buildServer() {
 }
 
 const { app, config, log } = buildServer();
+
+// Apply pending SQL migrations at boot (idempotent; baselines 0001/0002).
+// Never crash the API over schema sync — surface loudly instead.
+runMigrations(process.env.DATABASE_URL ?? "")
+  .then((r) => {
+    if (r.applied.length) log.info(`migrations applied: ${r.applied.join(", ")}`);
+  })
+  .catch((e) => log.error(`migration run failed: ${e.message}`));
+
+// Decide embeddings provider early (downloads the local semantic model at boot).
+warmupEmbeddings();
+
 // Hosting platforms (Render/Railway) inject PORT — respect it over API_PORT.
 const port = Number(process.env.PORT ?? config.API_PORT);
 app.listen({ port, host: config.API_HOST }).then(() => {

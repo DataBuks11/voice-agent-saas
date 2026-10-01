@@ -3,7 +3,7 @@ import { z } from "zod";
 import { normalizeText, parseOkfMarkdown, chunkText } from "@voice-agent/rag";
 import { getSupabase } from "../lib/supabase.js";
 import { requireTenant } from "../lib/tenant.js";
-import { embedAll } from "../lib/embeddings.js";
+import { embedAll, getEmbedder } from "../lib/embeddings.js";
 
 const ingestSchema = z.object({
   workspaceId: z.string().uuid(),
@@ -81,7 +81,7 @@ export async function knowledgeRoutes(app: FastifyInstance): Promise<void> {
       title: body.title,
       metadata,
       chunkCount: chunks.length,
-      embeddingProvider: (await import("../lib/embeddings.js")).getEmbedder().name,
+      embeddingProvider: (await getEmbedder()).name,
       preview: chunks.slice(0, 2).map((c) => ({ tokens: c.tokens, text: c.content.slice(0, 160) })),
     });
   });

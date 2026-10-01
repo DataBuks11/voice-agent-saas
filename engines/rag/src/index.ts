@@ -123,3 +123,44 @@ export class OpenAiCompatibleEmbeddings implements EmbeddingsProvider {
       .map((d) => d.embedding);
   }
 }
+
+/** Pad (or truncate) a vector to the storage dimension; zero-padding preserves cosine similarity. */
+function fitDimensions(vec: number[], dims: number): number[] {
+  if (vec.length === dims) return vec;
+  if (vec.length > dims) return vec.slice(0, dims);
+  return vec.concat(new Array(dims - vec.length).fill(0));
+}
+
+/**
+ * Local semantic embeddings via fastembed (ONNX bge-small-en-v1.5, CPU, no API key).
+ * Native vectors are padded from 384 -> storage dims (default 1536).
+ */
+export class LocalSemanticEmbeddings implements EmbeddingsProvider {
+  name = "local-fastembed-bge-small";
+  private model: import("fastembed").FlagEmbedding | null = null;
+  constructor(
+    public dimensions = 1536,
+    private readonly opts: { cacheDir?: string } = {},
+  ) {}
+
+  async init(): Promise<void> {
+    if (this.model) return;
+    const { FlagEmbedding, EmbeddingModel, ExecutionProvider } = await import("fastembed");
+    this.model = await FlagEmbedding.init({
+      model: EmbeddingModel.BGESmallENV15,
+      executionProviders: [ExecutionProvider.CPU],
+      showDownloadProgress: false,
+      ...(this.opts.cacheDir ? { cacheDir: this.opts.cacheDir } : {}),
+    });
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (!texts.length) return [];
+    await this.init();
+    const out: number[][] = [];
+    for await (const batch of this.model!.embed(texts, 16)) {
+      for (const v of batch) out.push(fitDimensions(v, this.dimensions));
+    }
+    return out;
+  }
+}

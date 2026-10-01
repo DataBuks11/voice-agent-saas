@@ -22,6 +22,8 @@ const envSchema = z.object({
   RAG_TOP_K: z.coerce.number().default(6),
   CONTEXT_MAX_TOKENS: z.coerce.number().default(6000),
   MEMORY_SHORT_TERM_TURNS: z.coerce.number().default(20),
+  JWT_SECRET: z.string().default("dev-secret-change-me"),
+  ADMIN_TOKEN: z.string().default(""),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

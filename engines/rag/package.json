@@ -1,20 +1,19 @@
 {
-    "name":  "@voice-agent/rag",
-    "version":  "0.1.0",
-    "type":  "module",
-    "main":  "./src/index.ts",
-    "scripts":  {
-                    "typecheck":  "tsc --noEmit -p tsconfig.json",
-                    "test":  "vitest run --passWithNoTests"
-                },
-    "dependencies":  {
-                         "@voice-agent/types": "workspace:*",
-                         "@voice-agent/shared": "workspace:*"
-                     },
-    "devDependencies":  {
-                            "typescript":  "^5.5.0",
-                            "vitest":  "^2.0.0"
-                        }
+    "name": "@voice-agent/rag",
+    "version": "0.1.0",
+    "type": "module",
+    "main": "./src/index.ts",
+    "scripts": {
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "vitest run --passWithNoTests"
+    },
+    "dependencies": {
+        "@voice-agent/shared": "workspace:*",
+        "@voice-agent/types": "workspace:*",
+        "fastembed": "^3.0.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.5.0",
+        "vitest": "^2.0.0"
+    }
 }
-
-
