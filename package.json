@@ -17,5 +17,9 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.9.2"
-  }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "start": "pnpm --filter @voice-agent/api start"
 }
