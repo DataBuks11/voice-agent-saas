@@ -77,7 +77,7 @@ do $$
 begin
   execute 'create index if not exists chunks_embedding_idx on chunks using ivfflat (embedding vector_cosine_ops) with (lists = 100)';
 exception when others then
-  notice 'chunks_embedding_idx skipped: %', sqlerrm;
+  raise notice 'chunks_embedding_idx skipped: %', sqlerrm;
 end $$;
 
 -- Customers / conversations / memory
