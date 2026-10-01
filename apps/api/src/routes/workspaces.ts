@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getSupabase } from "../lib/supabase.js";
 import { verifyMembership } from "../lib/tenant.js";
+import { ensureAuthUser } from "../lib/auth.js";
 
 const createWorkspaceSchema = z.object({
   name: z.string().min(1).max(80),
@@ -25,6 +26,7 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
       .single();
     if (wsErr) throw Object.assign(new Error(`workspace create failed: ${wsErr.message}`), { status: 500 });
 
+    await ensureAuthUser(db, body.userId);
     const { error: memErr } = await db
       .from("memberships")
       .insert({ workspace_id: ws.id, user_id: body.userId, role: "owner" });
@@ -58,6 +60,7 @@ export async function workspaceRoutes(app: FastifyInstance): Promise<void> {
     const body = z.object({ userId: z.string().uuid() }).parse((req as { body: unknown }).body);
     const { id } = req.params as { id: string };
     const db = getSupabase();
+    await ensureAuthUser(db, body.userId);
     const { error } = await db.from("memberships").insert({ workspace_id: id, user_id: body.userId, role: "member" });
     if (error && error.code !== "23505") throw Object.assign(new Error(`join failed: ${error.message}`), { status: 500 });
     const ctx = await verifyMembership(body.userId, id);
