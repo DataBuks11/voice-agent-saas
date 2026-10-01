@@ -1,0 +1,10 @@
+{
+  "name": "@voice-agent/types",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "echo \"types: no runtime tests\""
+  }
+}

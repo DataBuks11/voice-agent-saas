@@ -1,0 +1,21 @@
+{
+  "name": "voice-agent-saas",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev:api": "pnpm --filter @voice-agent/api dev",
+    "dev:web": "pnpm --filter @voice-agent/web dev",
+    "dev:voice": "python services/voice/src/main.py",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "test:python": "pytest services/voice/tests -q"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.2"
+  }
+}

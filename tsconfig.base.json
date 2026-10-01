@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "useUnknownInCatchVariables": true,
+    "baseUrl": ".",
+    "paths": {
+      "@voice-agent/types": ["packages/types/src/index.ts"],
+      "@voice-agent/shared": ["packages/shared/src/index.ts"],
+      "@voice-agent/config": ["packages/config/src/index.ts"],
+      "@voice-agent/rag": ["engines/rag/src/index.ts"],
+      "@voice-agent/retrieval": ["engines/retrieval/src/index.ts"],
+      "@voice-agent/reranking": ["engines/reranking/src/index.ts"],
+      "@voice-agent/context": ["engines/context/src/index.ts"],
+      "@voice-agent/decision": ["engines/decision/src/index.ts"],
+      "@voice-agent/memory": ["engines/memory/src/index.ts"],
+      "@voice-agent/harness": ["engines/harness/src/index.ts"],
+      "@voice-agent/orchestration": ["engines/orchestration/src/index.ts"]
+    }
+  }
+}

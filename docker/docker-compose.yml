@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  api:
+    build: { context: .., dockerfile: docker/Dockerfile.api }
+    ports: ["3001:3001"]
+    env_file: [../.env]
+  voice:
+    build: { context: .., dockerfile: docker/Dockerfile.voice }
+    ports: ["7860:7860"]
+    env_file: [../.env]

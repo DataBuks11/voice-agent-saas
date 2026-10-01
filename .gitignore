@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+*.local
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.sqlite*
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+coverage/
+apps/web/dist/
