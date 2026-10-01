@@ -170,10 +170,15 @@ returns boolean language sql stable as $$
 $$;
 
 -- Policies: members can CRUD rows in their workspaces. Service role bypasses RLS.
+-- workspaces has no workspace_id column (PK is id), so it gets its own policy.
+drop policy if exists tenant_isolation on workspaces;
+create policy tenant_isolation on workspaces for all
+  using (is_workspace_member(id)) with check (is_workspace_member(id));
+
 do $$
 declare t text;
 begin
-  foreach t in array array['workspaces','agents','knowledge_sources','documents','chunks','customers','conversations','messages','memories','tools','usage_events','api_keys'] loop
+  foreach t in array array['agents','knowledge_sources','documents','chunks','customers','conversations','messages','memories','tools','usage_events','api_keys'] loop
     execute format('drop policy if exists tenant_isolation on %I', t);
     execute format('create policy tenant_isolation on %I for all using (is_workspace_member(workspace_id)) with check (is_workspace_member(workspace_id))', t);
   end loop;
