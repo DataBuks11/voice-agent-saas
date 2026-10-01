@@ -1,6 +1,7 @@
 -- 0001_init: multi-tenant SaaS + pgvector + RLS
 -- Run in Supabase SQL editor or via supabase CLI.
-create extension if not exists "pgvector";
+-- Extension name is "vector" (not "pgvector") on Supabase.
+create extension if not exists "vector";
 create extension if not exists "pgcrypto";
 
 -- Workspaces / memberships
