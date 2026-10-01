@@ -31,6 +31,8 @@ export function buildServer() {
 }
 
 const { app, config, log } = buildServer();
-app.listen({ port: config.API_PORT, host: config.API_HOST }).then(() => {
-  log.info(`API listening on ${config.API_HOST}:${config.API_PORT}`);
+// Hosting platforms (Render/Railway) inject PORT — respect it over API_PORT.
+const port = Number(process.env.PORT ?? config.API_PORT);
+app.listen({ port, host: config.API_HOST }).then(() => {
+  log.info(`API listening on ${config.API_HOST}:${port}`);
 });
