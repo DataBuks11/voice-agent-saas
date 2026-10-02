@@ -209,6 +209,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       throw Object.assign(new Error("workspaceId does not match x-workspace-id"), { status: 403 });
     }
     const db = getSupabase();
+    const t0 = Date.now();
+    let embedMs = 0;
+    let llmMs = 0;
+    const tEmbed = Date.now();
 
     // Everything independent races in parallel: agent lookup, doc count, short-term
     // history and the query embedding — fast paths just discard what they don't need.
@@ -225,7 +229,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .order("created_at", { ascending: false })
         .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20)),
       embedAll([body.content])
-        .then((vectors) => vectors[0] ?? null)
+        .then((vectors) => {
+          embedMs = Date.now() - tEmbed;
+          return vectors[0] ?? null;
+        })
         .catch((err: Error) => {
           console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
           return null;
@@ -293,12 +300,14 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         customerMemory: [],
         maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
       });
+      const tLlm = Date.now();
       const llmResult = await complete({
         system: systemWithStyle(ctx.systemPrompt),
         context: `${ctx.contextText}\n\n${BOOKING_INSTRUCTIONS}`,
         user: body.content,
         fallback: agent.fallbackResponse,
       });
+      llmMs = Date.now() - tLlm;
       const booking = extractBooking(llmResult.text);
       answerText = booking ? booking.rest : llmResult.text;
       answerSource = llmResult.source;
@@ -335,12 +344,14 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         customerMemory: [],
         maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
       });
+      const tLlm = Date.now();
       const llmResult = await complete({
         system: systemWithStyle(ctx.systemPrompt),
         context: ctx.contextText,
         user: body.content,
         fallback: agent.fallbackResponse,
       });
+      llmMs = Date.now() - tLlm;
       verdict = validateResponse(llmResult.text, retrieved, {
         fallbackResponse: agent.fallbackResponse,
       });
@@ -362,6 +373,20 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     if (saveErr) throw Object.assign(new Error(`message persist failed: ${saveErr.message}`), { status: 500 });
 
     const [savedUser, savedAssistant] = saved ?? [];
+    // Structured turn timing — grep "evt":"turn" in logs to watch latency stages.
+    console.log(
+      JSON.stringify({
+        evt: "turn",
+        conv: conversationId.slice(0, 8),
+        route: decision.route,
+        src: answerSource,
+        ok: verdict.ok,
+        retrieved: retrieved.length,
+        embedMs,
+        llmMs,
+        totalMs: Date.now() - t0,
+      }),
+    );
     return reply.status(201).send({
       conversationId,
       decision,

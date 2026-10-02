@@ -17,6 +17,7 @@ import { runMigrations } from "./lib/migrate.js";
 declare module "fastify" {
   interface FastifyInstance {
     jwtSecret: string;
+    stats: { served: number; blocked: number; startedAt: string };
   }
 }
 
@@ -27,6 +28,7 @@ export function buildServer() {
   const app = Fastify({ logger: false, bodyLimit: Number(process.env.BODY_LIMIT ?? 48 * 1024 * 1024) });
 
   app.decorate("jwtSecret", config.JWT_SECRET);
+  app.decorate("stats", { served: 0, blocked: 0, startedAt: new Date().toISOString() });
 
   const allowedOrigins = (
     process.env.CORS_ORIGINS ?? "https://voice-agent-saas-web.vercel.app,http://localhost:5173,http://localhost:3001"
@@ -47,6 +49,41 @@ export function buildServer() {
     log.info(`${req.method} ${req.url}`);
     done();
   });
+
+  // Sliding-window rate limiter (dependency-free): 600 req/min per IP globally,
+  // 30/min on auth+admin to slow credential stuffing. RATE_LIMIT_DISABLED=1 for tests.
+  const windowMs = 60_000;
+  const globalMax = Number(process.env.RATE_LIMIT_MAX ?? 600);
+  const authMax = Number(process.env.RATE_LIMIT_AUTH_MAX ?? 30);
+  const buckets = new Map<string, { n: number; start: number }>();
+  if (process.env.RATE_LIMIT_DISABLED !== "1") {
+    app.addHook("onRequest", (req, reply, done) => {
+      app.stats.served += 1;
+      const url = req.url.split("?")[0] ?? "";
+      const strict = url.startsWith("/v1/auth/") || url.startsWith("/v1/admin/");
+      if (!strict && (url === "/health" || url.startsWith("/v1/health"))) return done();
+      const key = `${strict ? "auth" : "ip"}:${req.ip}`;
+      const now = Date.now();
+      let b = buckets.get(key);
+      if (!b || now - b.start >= windowMs) {
+        if (buckets.size > 5_000) {
+          for (const [k, v] of buckets) if (now - v.start >= windowMs) buckets.delete(k);
+        }
+        b = { n: 0, start: now };
+        buckets.set(key, b);
+      }
+      b.n += 1;
+      if (b.n > (strict ? authMax : globalMax)) {
+        app.stats.blocked += 1;
+        reply
+          .status(429)
+          .header("retry-after", String(Math.max(1, Math.ceil((b.start + windowMs - now) / 1000))))
+          .send({ error: "rate limit exceeded" });
+        return;
+      }
+      done();
+    });
+  }
 
   app.register(healthRoutes);
   app.register(authRoutes, { prefix: "/v1" });

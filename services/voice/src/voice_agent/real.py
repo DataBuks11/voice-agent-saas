@@ -1,9 +1,12 @@
-"""Keyless production providers: faster-whisper STT, API-backed RAG LLM, piper TTS."""
+"""Providers: local (faster-whisper STT, piper TTS — keyless) or hosted HTTP
+(OpenAI-compatible /audio/transcriptions + /audio/speech — faster, more human)."""
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
+import wave
 
 import httpx
 import numpy as np
@@ -11,6 +14,150 @@ import numpy as np
 from .providers import AudioChunk, LLMProvider, STTProvider, TTSProvider, Transcript
 
 log = logging.getLogger("voice.providers")
+
+_HTTP_OK = ("", "api", "http", "openai", "whisper-compatible", "chatterbox-compatible")
+_LOCAL = ("local", "faster-whisper", "piper")
+
+
+def stt_uses_http() -> bool:
+    """Hosted STT when a key is present unless STT_PROVIDER forces local."""
+    provider = (os.getenv("STT_PROVIDER") or "").strip().lower()
+    if provider in _LOCAL:
+        return False
+    return bool(os.getenv("STT_API_KEY")) and (provider == "" or provider in _HTTP_OK)
+
+
+def tts_uses_http() -> bool:
+    """Hosted TTS when a key is present unless TTS_PROVIDER forces local."""
+    provider = (os.getenv("TTS_PROVIDER") or "").strip().lower()
+    if provider in _LOCAL:
+        return False
+    return bool(os.getenv("TTS_API_KEY")) and (provider == "" or provider in _HTTP_OK)
+
+
+def wav_bytes(pcm16: bytes, sample_rate: int) -> bytes:
+    """PCM16 mono -> WAV container (OpenAI-compatible /audio/transcriptions input)."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm16)
+    return buf.getvalue()
+
+
+def _retry_delay(attempt: int) -> float:
+    return 0.4 * (2 ** attempt)
+
+
+class HttpSTT(STTProvider):
+    """OpenAI-compatible /audio/transcriptions (hosted whisper). ~0.5-1s vs local CPU."""
+
+    name = "http-stt"
+
+    def __init__(self) -> None:
+        self._key = os.environ["STT_API_KEY"]
+        self._base = (os.getenv("STT_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+        self._model = os.getenv("STT_MODEL", "whisper-1")
+        self._language = os.getenv("STT_LANGUAGE", "en")
+        self._client = httpx.AsyncClient(timeout=45.0)
+        log.info("STT ready: http %s @ %s", self._model, self._base)
+
+    async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> Transcript:
+        if sample_rate != 16000:
+            audio = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32)
+            target = int(len(audio) * 16000 / sample_rate)
+            if target < 160:
+                return Transcript(text="", confidence=0.0)
+            audio = np.interp(np.linspace(0, len(audio) - 1, target), np.arange(len(audio)), audio)
+            pcm16 = audio.astype(np.int16).tobytes()
+            sample_rate = 16000
+        if len(pcm16) < 320:
+            return Transcript(text="", confidence=0.0)
+        wav = wav_bytes(pcm16, sample_rate)
+        data = {"model": self._model, "language": self._language}
+        files = {"file": ("audio.wav", wav, "audio/wav")}
+        last_status = 0
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(_retry_delay(attempt - 1))
+            try:
+                r = await self._client.post(
+                    f"{self._base}/audio/transcriptions",
+                    headers={"authorization": f"Bearer {self._key}"},
+                    data=data,
+                    files=files,
+                )
+            except httpx.HTTPError as exc:
+                log.error("STT http error: %s", exc)
+                return Transcript(text="", confidence=0.0)
+            last_status = r.status_code
+            if r.status_code == 429 or r.status_code >= 500:
+                continue
+            break
+        if last_status >= 400:
+            log.error("STT http failed: %s", last_status)
+            return Transcript(text="", confidence=0.0)
+        text = str((r.json() or {}).get("text") or "").strip()
+        return Transcript(text=text, confidence=0.9, language=self._language)
+
+
+class HttpTTS(TTSProvider):
+    """OpenAI-compatible /audio/speech with response_format=pcm (24 kHz PCM16 mono)."""
+
+    name = "http-tts"
+
+    def __init__(self) -> None:
+        self._key = os.environ["TTS_API_KEY"]
+        self._base = (os.getenv("TTS_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+        self._model = os.getenv("TTS_MODEL", "gpt-4o-mini-tts")
+        voice_env = (os.getenv("TTS_VOICE") or "").strip()
+        # "default" is our internal placeholder, not a provider voice name.
+        self._voice = "alloy" if voice_env in ("", "default") else voice_env
+        self._sample_rate = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
+        self._client = httpx.AsyncClient(timeout=60.0)
+        log.info("TTS ready: http %s voice=%s @ %s", self._model, self._voice, self._base)
+
+    async def synthesize(self, text: str, voice: str = "default") -> AudioChunk:
+        payload = {
+            "model": self._model,
+            "voice": self._voice if voice in ("", "default") else voice,
+            "input": text,
+            "response_format": "pcm",
+        }
+        last_status = 0
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(_retry_delay(attempt - 1))
+            try:
+                r = await self._client.post(
+                    f"{self._base}/audio/speech",
+                    json=payload,
+                    headers={"authorization": f"Bearer {self._key}"},
+                )
+            except httpx.HTTPError as exc:
+                log.error("TTS http error: %s", exc)
+                return AudioChunk(pcm16=b"", sample_rate=self._sample_rate)
+            last_status = r.status_code
+            if r.status_code == 429 or r.status_code >= 500:
+                continue
+            break
+        if last_status >= 400:
+            log.error("TTS http failed: %s %s", last_status, r.text[:200])
+            return AudioChunk(pcm16=b"", sample_rate=self._sample_rate)
+        return AudioChunk(pcm16=r.content, sample_rate=self._sample_rate)
+
+
+def build_stt() -> STTProvider:
+    if stt_uses_http():
+        return HttpSTT()
+    return FasterWhisperSTT()
+
+
+def build_tts() -> TTSProvider:
+    if tts_uses_http():
+        return HttpTTS()
+    return PiperTTS()
 
 
 class FasterWhisperSTT(STTProvider):

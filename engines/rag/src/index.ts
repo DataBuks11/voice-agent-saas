@@ -107,25 +107,42 @@ export class OpenAiCompatibleEmbeddings implements EmbeddingsProvider {
   async embed(texts: string[]): Promise<number[][]> {
     if (!texts.length) return [];
     const base = (this.opts.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
-    const res = await fetch(`${base}/embeddings`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.apiKey}` },
-      body: JSON.stringify({
-        model: this.opts.model ?? "text-embedding-3-small",
-        input: texts,
-        // OpenAI `dimensions` / Gemini output_dimensionality — keeps storage dims exact
-        ...(this.opts.dimensions ? { dimensions: this.opts.dimensions } : {}),
-      }),
+    const body = JSON.stringify({
+      model: this.opts.model ?? "text-embedding-3-small",
+      input: texts,
+      // OpenAI `dimensions` / Gemini output_dimensionality — keeps storage dims exact
+      ...(this.opts.dimensions ? { dimensions: this.opts.dimensions } : {}),
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(`embeddings request failed (${res.status}): ${detail.slice(0, 300)}`);
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise((r) => setTimeout(r, 300 * 2 ** (attempt - 1)));
+      let res: Response;
+      try {
+        res = await fetch(`${base}/embeddings`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.apiKey}` },
+          body,
+          signal: AbortSignal.timeout(15000),
+        });
+      } catch (err) {
+        lastError = err as Error;
+        continue;
+      }
+      if (res.status === 429 || res.status >= 500) {
+        lastError = new Error(`embeddings request failed (${res.status})`);
+        continue;
+      }
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`embeddings request failed (${res.status}): ${detail.slice(0, 300)}`);
+      }
+      const json = (await res.json()) as { data: { index: number; embedding: number[] }[] };
+      return json.data
+        .slice()
+        .sort((a, b) => a.index - b.index)
+        .map((d) => d.embedding);
     }
-    const json = (await res.json()) as { data: { index: number; embedding: number[] }[] };
-    return json.data
-      .slice()
-      .sort((a, b) => a.index - b.index)
-      .map((d) => d.embedding);
+    throw lastError ?? new Error("embeddings request failed");
   }
 }
 

@@ -1,4 +1,4 @@
-"""WebSocket voice runtime: mic PCM -> energy VAD -> faster-whisper STT -> API RAG/LLM -> piper TTS."""
+"""WebSocket voice runtime: mic PCM -> energy VAD -> STT -> API RAG/LLM -> TTS."""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +11,8 @@ import httpx
 from websockets.asyncio.server import serve
 
 from .pipeline import VoiceConfig, VoicePipeline
-from .real import ApiLLM, FasterWhisperSTT, PiperTTS, VoiceAuth
+from .providers import STTProvider, TTSProvider
+from .real import ApiLLM, VoiceAuth, build_stt, build_tts
 from .vad import Vad, VadConfig
 
 log = logging.getLogger("voice.server")
@@ -28,18 +29,19 @@ def _split_sentences(text: str) -> list[str]:
     parts = [p.strip() for p in _SENTENCE_SPLIT.split(text) if p.strip()]
     return parts or [text]
 
-_stt: FasterWhisperSTT | None = None
-_tts: PiperTTS | None = None
+_stt: STTProvider | None = None
+_tts: TTSProvider | None = None
 _models_lock = asyncio.Lock()
 
 
-async def shared_models() -> tuple[FasterWhisperSTT, PiperTTS]:
+async def shared_models() -> tuple[STTProvider, TTSProvider]:
     global _stt, _tts
     async with _models_lock:
         if _stt is None:
-            _stt = await asyncio.to_thread(FasterWhisperSTT)
+            _stt = await asyncio.to_thread(build_stt)
         if _tts is None:
-            _tts = await asyncio.to_thread(PiperTTS)
+            _tts = await asyncio.to_thread(build_tts)
+        log.info("providers: stt=%s tts=%s", _stt.name, _tts.name)
         return _stt, _tts
 
 

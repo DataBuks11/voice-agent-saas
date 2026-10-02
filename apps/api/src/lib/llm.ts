@@ -27,7 +27,7 @@ export async function complete(opts: LlmOptions): Promise<LlmResult> {
   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 15000);
   const reasoningEffort = process.env.LLM_REASONING_EFFORT ?? "";
 
-  try {
+  const request = async (): Promise<string> => {
     const res = await fetch(`${base}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
@@ -46,17 +46,29 @@ export async function complete(opts: LlmOptions): Promise<LlmResult> {
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      throw new Error(`llm request failed (${res.status}): ${detail.slice(0, 300)}`);
+      const err = new Error(`llm request failed (${res.status}): ${detail.slice(0, 300)}`);
+      (err as Error & { retryable?: boolean }).retryable = res.status === 429 || res.status >= 500;
+      throw err;
     }
     const json = (await res.json()) as { choices: { message: { content: string } }[] };
     const text = json.choices[0]?.message.content?.trim();
-    if (!text) return { text: groundedAnswer(opts), source: "grounded-fallback" };
-    return { text, source: "llm" };
-  } catch (err) {
-    // Provider down/slow: never fail the turn — degrade to grounded extractive answer.
-    console.error(`llm degraded to grounded fallback: ${(err as Error).message}`);
-    return { text: groundedAnswer(opts), source: "grounded-fallback" };
+    if (!text) throw Object.assign(new Error("llm returned empty content"), { retryable: false });
+    return text;
+  };
+
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return { text: await request(), source: "llm" };
+    } catch (err) {
+      lastErr = err as Error;
+      if (!(err as Error & { retryable?: boolean }).retryable) break;
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 400));
+    }
   }
+  // Provider down/slow: never fail the turn — degrade to grounded extractive answer.
+  console.error(`llm degraded to grounded fallback: ${lastErr?.message}`);
+  return { text: groundedAnswer(opts), source: "grounded-fallback" };
 }
 
 /** Extract the knowledge block out of the built context and return the most relevant slice. */
