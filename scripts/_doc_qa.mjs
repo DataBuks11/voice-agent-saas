@@ -11,7 +11,7 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 
 const API = process.env.API_BASE_URL ?? "https://voice-agent-saas-production-3001.up.railway.app";
-const file = process.argv[2];
+const file = process.argv[2] ?? process.env.DOC_QA_FILE;
 if (!file) {
   console.error("usage: node scripts/_doc_qa.mjs <file.docx|.pdf|.md>");
   process.exit(2);

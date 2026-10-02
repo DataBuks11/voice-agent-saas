@@ -33,7 +33,15 @@ const steps = [
   { name: "voice barge-in", cmd: "python", args: ["scripts/_voice_bargein.py"], env: { VOICE_WS_URL: VOICE_WS, PIPER_VOICE: PIPER } },
   { name: "web app", cmd: "node", args: ["scripts/_web_e2e.mjs"] },
 ];
-if (docArg) steps.push({ name: "document QA", cmd: "node", args: ["scripts/_doc_qa.mjs", docArg] });
+// The path may contain spaces; hand it over as an env var so no shell quoting applies.
+if (docArg) {
+  steps.push({
+    name: "document QA",
+    cmd: "node",
+    args: ["scripts/_doc_qa.mjs"],
+    env: { DOC_QA_FILE: docArg },
+  });
+}
 
 // tsx ships in the api workspace; call its CLI entry directly (the .bin shims
 // are shell scripts and cannot be passed to node directly on Windows).
@@ -50,9 +58,10 @@ const run = (step) =>
   new Promise((resolve) => {
     const started = Date.now();
     const isTsx = step.cmd === "tsx";
+    const quote = (a) => (process.platform === "win32" && /\s/.test(a) ? `"${a}"` : a);
     const child = spawn(
       isTsx ? process.execPath : step.cmd,
-      isTsx ? [TSX, ...step.args] : step.args,
+      isTsx ? [TSX, ...step.args] : step.args.map(quote),
       {
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, ...(step.env ?? {}) },
