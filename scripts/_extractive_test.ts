@@ -13,6 +13,9 @@ const b = extractiveAnswer("tell me about hash values", hits, 0.5);
 check("second doc answered", /md5sum|hash/i.test(b ?? ""), `-> ${b}`);
 const c = extractiveAnswer("what are you doing right now", hits, 0.5);
 check("chit-chat is NOT answered from the doc", c === null, `-> ${c}`);
+check("code fragment rejected", extractiveAnswer("how do I find the student with the highest marks?", [
+  { id: "1", workspaceId: "w", documentId: "d", content: 'printf("File copied successfully.")', tokens: 0, metadata: {}, score: 0.3 },
+], 0.5) === null, "");
 const d = extractiveAnswer("what is the capital of France", hits, 0.5);
 check("unrelated question returns null", d === null, `-> ${d}`);
 console.log(fails === 0 ? "\nEXTRACTIVE PASS" : `\nEXTRACTIVE FAIL (${fails})`);

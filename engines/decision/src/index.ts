@@ -49,11 +49,14 @@ export function ruleFallback(text: string, hasKnowledge: boolean, toolsAvailable
   if (/\b(latest|today|news|price now|weather|search|web)\b/.test(t)) {
     return { route: "web_search", confidence: 0.65, reason: "freshness/external info requested" };
   }
+  // Only unambiguous greetings are answered locally. Acknowledgements like
+  // "okay" / "no problem" are context-dependent mid-call, so the model handles
+  // them instead of a canned line hijacking the conversation.
   if (
-    /\b(hi|hello|thanks|bye|hey|okay|ok|cool|great|nice|perfect|awesome|wonderful|no problem|no worries|got it|alright|welcome|how are you|how's it going)\b/.test(t) &&
+    /^(hi|hello|hey|thanks|thank you|bye|goodbye|good night|how are you|how's it going|who are you|what can you do)\b/i.test(t.trim()) &&
     text.length < 40
   ) {
-    return { route: "small_talk", confidence: 0.8, reason: "greeting/filler pattern" };
+    return { route: "small_talk", confidence: 0.8, reason: "greeting pattern" };
   }
   if (hasKnowledge) {
     return { route: "answer_from_knowledge", confidence: 0.6, reason: "knowledge available, default to grounding" };

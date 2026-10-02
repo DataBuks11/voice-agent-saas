@@ -25,6 +25,10 @@ export function VoicePage() {
   const [agentId, setAgentId] = React.useState<string>("");
   const [elapsed, setElapsed] = React.useState(0);
   const [interim, setInterim] = React.useState("");
+  // "server" = our faster-whisper (accurate, tunable); "browser" = Chrome Web Speech (fast, rougher)
+  const [sttMode, setSttMode] = React.useState<"server" | "browser">(
+    (import.meta.env.VITE_STT_MODE as "server" | "browser") || "server",
+  );
 
   const wsRef = React.useRef<WebSocket | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
@@ -50,9 +54,11 @@ export function VoicePage() {
   const playNodesRef = React.useRef<AudioBufferSourceNode[]>([]);
   const playEndTimerRef = React.useRef<number | null>(null);
 
-  const speechSupported =
+  const browserSttAvailable =
     typeof window !== "undefined" &&
     Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+  const useBrowserStt = sttMode === "browser" && browserSttAvailable;
+  const speechSupported = useBrowserStt;
 
   const active = status === "live" || status === "connecting";
 
@@ -364,7 +370,7 @@ export function VoicePage() {
       const socket = new WebSocket(WS_URL);
       socket.binaryType = "arraybuffer";
       wsRef.current = socket;
-      if (speechSupported) setupRecognition(socket);
+      if (useBrowserStt) setupRecognition(socket);
 
       socket.onopen = () => {
         socket.send(
@@ -430,12 +436,13 @@ export function VoicePage() {
           setStatus("live");
           setVoiceState("listening");
           pushLine("system", `session ready · conversation ${(msg.conversationId as string)?.slice(0, 8)}…`);
-          if (speechSupported && recogRef.current) {
+          if (useBrowserStt && recogRef.current) {
             recogWantedRef.current = true;
             recogPausedRef.current = false;
             pushLine("system", "browser STT active — transcripts sent as text turns (~0.2s)");
             ensureRecog();
           } else {
+            pushLine("system", "server STT active - 16 kHz PCM to our transcriber (most accurate)");
             startMic(socket);
           }
           if (!timerRef.current) {
@@ -580,6 +587,19 @@ export function VoicePage() {
               <button className="btn btn-primary" onClick={toggle}>
                 {active ? "End call" : "Start call"}
               </button>
+              <select
+                className="select"
+                style={{ maxWidth: 190 }}
+                value={sttMode}
+                onChange={(e) => setSttMode(e.target.value as "server" | "browser")}
+                disabled={active}
+                title="Server STT = our accurate transcriber. Browser STT = Chrome's, faster but rougher."
+              >
+                <option value="server">STT: server (accurate)</option>
+                <option value="browser" disabled={!browserSttAvailable}>
+                  STT: browser (fast){browserSttAvailable ? "" : " - unavailable"}
+                </option>
+              </select>
               <button className="btn" onClick={interrupt} disabled={!active || voiceState !== "speaking"}>
                 Interrupt
               </button>

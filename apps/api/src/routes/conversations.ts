@@ -355,24 +355,40 @@ const questionTokens = (text: string): string[] =>
 export function extractiveAnswer(question: string, hits: RetrievalResult[], minRatio: number): string | null {
   if (!hits.length) return null;
   const qTokens = new Set(questionTokens(question));
-  if (!qTokens.size) return null;
-  let best: { text: string; ratio: number } | null = null;
+  if (qTokens.size < 2) return null;
+  const title = String(hits[0]?.metadata?.doc_title ?? "");
+  let best: { text: string; ratio: number; shared: number } | null = null;
   for (const hit of hits.slice(0, 3)) {
     for (const raw of hit.content.split(/(?<=[.!?])\s+|\n+/)) {
-      const sentence = raw.replace(/^[-*#\s]+/, "").trim();
-      if (sentence.length < 30 || sentence.length > 320) continue;
+      let sentence = raw.replace(/^[-*#\s]+/, "").trim();
+      // The retrieved text is prefixed with the document title for context; drop it.
+      if (title && sentence.toLowerCase().startsWith(title.toLowerCase())) {
+        sentence = sentence.slice(title.length).replace(/^\s*[:\-]\s*/, "").trim();
+      }
+      const words = sentence.split(/\s+/).filter(Boolean);
+      if (words.length < 5 || words.length > 45) continue;
+      // Skip code-ish fragments: they read as gibberish when spoken aloud.
+      if (/["'`]\s*[,)]|[{}();]|\w+\s*\(/.test(sentence)) continue;
       const tokens = questionTokens(sentence);
       if (!tokens.length) continue;
       const shared = tokens.filter((t) => qTokens.has(t)).length;
-      if (!shared) continue;
+      if (shared < 2) continue;
       const ratio = shared / Math.min(qTokens.size, tokens.length);
-      if (!best || ratio > best.ratio) best = { text: sentence, ratio };
+      if (!best || ratio > best.ratio) best = { text: sentence, ratio, shared };
     }
   }
   if (!best) return null;
   const threshold = Number(process.env.RAG_EXTRACTIVE_RATIO ?? minRatio);
-  return best.ratio >= threshold ? best.text : null;
+  // Needs either a clear majority of the question's words or an exact-ish match.
+  if (best.ratio < threshold && best.ratio < 0.9) return null;
+  return best.text;
 }
+
+/** Factual-looking content: prices, times, quantities, policies. */
+const looksFactual = (text: string): boolean =>
+  /\d|\brupees?\b|\binr\b|\brs\.?\s?\d|\b(am|pm)\b|\b(price|cost|timing|hours?|open|closed|policy|available|discount|fee|charges?)\b/i.test(
+    text,
+  );
 
 /** Knowledge-sourced one-liner used when the model is too slow for a live call. */
 function groundedFallbackText(opts: { context: string; fallback: string }, fallback: string): string {
@@ -485,9 +501,6 @@ function smallTalkReply(agent: Agent, content: string): string {
   }
   if (/\b(how are you|how's it going|how do you do)\b/.test(t)) {
     return "I'm doing great, thanks for asking! What can I help you with today?";
-  }
-  if (/\b(okay|ok|cool|great|nice|perfect|awesome|wonderful|no problem|no worries|got it|alright|welcome)\b/.test(t)) {
-    return "Happy to help! Is there anything else I can take care of for you?";
   }
   return `Hi, thanks for reaching out to ${agent.name}! This is the front desk — how can I help you today?`;
 }
@@ -993,7 +1006,13 @@ if (retrieved.length === 0 && docCount > 0) {
             answerSource = "llm-ungrounded";
           } else {
             verdict = validateResponse(llmResult.text, retrieved, { fallbackResponse: agent.fallbackResponse });
-            answerText = verdict.safeText;
+            // The harness swaps in the canned refusal when an answer is not grounded.
+            // That is right for facts and wrong for small talk ("what are you
+            // doing"), so a non-factual reply is kept as the model phrased it.
+            if (answerText === agent.fallbackResponse && !looksFactual(llmResult.text)) {
+              answerText = llmResult.text;
+              verdict = { ok: true, confidence: 0.5, issues: ["conversational reply, not knowledge-grounded"], safeText: answerText };
+            }
             answerSource = llmResult.source;
           }
         }
