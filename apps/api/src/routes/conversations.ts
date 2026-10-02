@@ -248,6 +248,34 @@ function saveDeclined(state: CaptureState, declined: string[]): CaptureState {
   };
 }
 
+/**
+ * The moment the flow reaches the appointment slot, offer concrete times instead
+ * of asking an open question — this is what a real receptionist does.
+ */
+async function offerIfSlot(
+  advance: Advance,
+  availability: AvailabilityConfig,
+  part: string | undefined,
+  declined: string[],
+): Promise<Advance> {
+  if (!advance.needsLlmSlot) return advance;
+  const offers = nextOffers(availability, {
+    part: part === "mornings" || part === "afternoons" || part === "evenings" ? part : "any",
+    exclude: declined,
+    limit: 2,
+  });
+  if (!offers.length) return advance;
+  const first = offers[0]!;
+  const next = offerSlot(advance.state, first.iso, spokenSlot(first.iso));
+  return {
+    ...next,
+    reply:
+      offers.length > 1
+        ? `Would ${spokenSlot(first.iso)} or ${spokenSlot(offers[1]!.iso)} work for you?`
+        : `Would ${spokenSlot(first.iso)} work for you?`,
+  };
+}
+
 /** Front-desk vs patient-intake: a call about a patient or a death needs the
  *  intake slots (relative, patient, hospital, callback) rather than a haircut. */
 function pickIntent(text: string): "patient_intake" | "new_patient_booking" {
@@ -704,6 +732,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         advance = null;
       } else {
         advance = await applyAnswer(flow, captureState, body.content, extractionCtx);
+        advance = await offerIfSlot(advance, availability, captureState.data.time_pref, parseDeclined(captureState.data));
         answerText = advance.reply;
       }
 
