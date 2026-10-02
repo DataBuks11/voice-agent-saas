@@ -52,13 +52,16 @@ export function ConversationsPage() {
     setBusy(true);
     const text = input.trim();
     setInput("");
-    setMessages((m) => [...m, { id: `tmp-u-${Date.now()}`, role: "user", content: text, citations: [], createdAt: new Date().toISOString() }]);
+    setMessages((m) => [
+      ...m,
+      { id: `tmp-u-${Date.now()}`, role: "user", content: text, citations: [], createdAt: new Date().toISOString() },
+      // Painted as soon as the SSE connection opens (before the first token) so the
+      // reply feels instant; filled by deltas, replaced by the final turn.
+      { id: "tmp-a", role: "assistant", content: "…", citations: [], createdAt: new Date().toISOString() },
+    ]);
     try {
       const turn = await api.sendStream(active, text, (partial) => {
-        setMessages((m) => {
-          const bubble = { id: "tmp-a", role: "assistant" as const, content: partial, citations: [] as string[], createdAt: new Date().toISOString() };
-          return m.some((x) => x.id === "tmp-a") ? m.map((x) => (x.id === "tmp-a" ? bubble : x)) : [...m, bubble];
-        });
+        setMessages((m) => m.map((x) => (x.id === "tmp-a" ? { ...x, content: partial } : x)));
       });
       setTrace(turn);
       if (turn.toolResults?.length) {
@@ -70,6 +73,7 @@ export function ConversationsPage() {
         turn.answer,
       ]);
     } catch (err) {
+      setMessages((m) => m.filter((x) => !x.id.startsWith("tmp-")));
       toast({ kind: "err", text: (err as Error).message });
     } finally {
       setBusy(false);

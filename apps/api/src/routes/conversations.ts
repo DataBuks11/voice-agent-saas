@@ -250,9 +250,21 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     let llmMs = 0;
     const tEmbed = Date.now();
 
-    // Everything independent races in parallel: agent lookup, doc count, short-term
-    // history and the query embedding — fast paths just discard what they don't need.
-    const [agent, docCountRes, histRows, queryVector] = await Promise.all([
+    // Query embedding starts racing immediately but is only AWAITED when the
+    // decision actually needs retrieval — greetings/fallback never wait on it.
+    const embedPromise = embedAll([body.content])
+      .then((vectors) => {
+        embedMs = Date.now() - tEmbed;
+        return vectors[0] ?? null;
+      })
+      .catch((err: Error) => {
+        console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
+        embedMs = Date.now() - tEmbed;
+        return null;
+      });
+
+    // Agent lookup, doc count and short-term history race in parallel (DB-local).
+    const [agent, docCountRes, histRows] = await Promise.all([
       loadAgent(body.workspaceId, body.agentId),
       db
         .from("documents")
@@ -264,15 +276,6 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: false })
         .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20)),
-      embedAll([body.content])
-        .then((vectors) => {
-          embedMs = Date.now() - tEmbed;
-          return vectors[0] ?? null;
-        })
-        .catch((err: Error) => {
-          console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
-          return null;
-        }),
     ]);
     const docCount = docCountRes.count ?? 0;
     const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
@@ -295,27 +298,30 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       decision.route === "web_search" ||
       toolForRoute === "book_appointment" ||
       (toolForRoute === "get_location" && !agent.location);
-    if (needsRetrieval && docCount > 0 && queryVector) {
-      const { data: hits, error: searchErr } = await db.rpc("match_chunks", {
-        p_workspace_id: body.workspaceId,
-        p_query_embedding: queryVector,
-        p_top_k: Number(process.env.RAG_TOP_K ?? 6),
-        p_filter: {},
-      });
-      if (searchErr) {
-        const err = Object.assign(new Error(`retrieval failed: ${searchErr.message}`), { status: 500 });
-        if (streamed) return streamFail(err as Error);
-        throw err;
+    if (needsRetrieval && docCount > 0) {
+      const queryVector = await embedPromise;
+      if (queryVector) {
+        const { data: hits, error: searchErr } = await db.rpc("match_chunks", {
+          p_workspace_id: body.workspaceId,
+          p_query_embedding: queryVector,
+          p_top_k: Number(process.env.RAG_TOP_K ?? 6),
+          p_filter: {},
+        });
+        if (searchErr) {
+          const err = Object.assign(new Error(`retrieval failed: ${searchErr.message}`), { status: 500 });
+          if (streamed) return streamFail(err as Error);
+          throw err;
+        }
+        retrieved = (hits ?? []).map((h: Record<string, unknown>) => ({
+          id: String(h.id),
+          workspaceId: body.workspaceId,
+          documentId: String(h.document_id),
+          content: String(h.content),
+          tokens: 0,
+          metadata: (h.metadata ?? {}) as Record<string, string | number | boolean>,
+          score: Number(h.score),
+        }));
       }
-      retrieved = (hits ?? []).map((h: Record<string, unknown>) => ({
-        id: String(h.id),
-        workspaceId: body.workspaceId,
-        documentId: String(h.document_id),
-        content: String(h.content),
-        tokens: 0,
-        metadata: (h.metadata ?? {}) as Record<string, string | number | boolean>,
-        score: Number(h.score),
-      }));
     }
 
     let answerText: string;
