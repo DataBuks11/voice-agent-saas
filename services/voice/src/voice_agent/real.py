@@ -282,6 +282,30 @@ class ApiLLM(LLMProvider):
         await self._client.aclose()
 
 
+def _limit_onnx_threads() -> None:
+    """Cap onnxruntime threads — containers see HOST core count but run under a
+    small CPU quota, so default (all cores) oversubscribes badly and synthesis
+    drops to ~0.3x realtime. Idempotent; TTS_ONNX_THREADS overrides."""
+    if getattr(_limit_onnx_threads, "_done", False):
+        return
+    try:
+        import onnxruntime as ort
+
+        cap = int(os.getenv("TTS_ONNX_THREADS", "2"))
+
+        class _LimitedOptions(ort.SessionOptions):  # type: ignore[misc]
+            def __init__(self) -> None:
+                super().__init__()
+                self.intra_op_num_threads = cap
+                self.inter_op_num_threads = 1
+
+        ort.SessionOptions = _LimitedOptions  # type: ignore[misc, assignment]
+        _limit_onnx_threads._done = True  # type: ignore[attr-defined]
+        log.info("onnxruntime threads capped at %d", cap)
+    except Exception:  # noqa: BLE001 - best effort
+        log.warning("could not cap onnxruntime threads")
+
+
 class PiperTTS(TTSProvider):
     name = "piper"
 
@@ -297,6 +321,7 @@ class PiperTTS(TTSProvider):
 
             from piper import PiperVoice
 
+            _limit_onnx_threads()
             t0 = _time.time()
             self._voice = PiperVoice.load(self._voice_path)
             log.info("piper load %.2fs", _time.time() - t0)
