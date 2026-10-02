@@ -11,6 +11,7 @@ import {
   currentSlot,
   offerSlot,
   flowForIntent,
+  parseSlotIso,
   resolveSlotIso,
   startFlow,
   type CaptureState,
@@ -103,6 +104,9 @@ for (const [i, text] of turns.entries()) {
 }
 
 console.log("\n[3] Assertions");
+check("deterministic slot parse: tomorrow at 5 pm", parseSlotIso("tomorrow at 5 pm") !== null, `-> ${parseSlotIso("tomorrow at 5 pm")}`);
+check("deterministic slot parse: Wednesday morning", (parseSlotIso("Wednesday morning") ?? "").endsWith("09:00"), `-> ${parseSlotIso("Wednesday morning")}`);
+check("no slot invented from a bare answer", parseSlotIso("I don't know") === null, `-> ${parseSlotIso("I don't know")}`);
 check("first_name canonicalised from spell-out", state.data.first_name === "Kstest", `-> ${state.data.first_name}`);
 check("last_name from spell-out", state.data.last_name === "Cole", `-> ${state.data.last_name}`);
 check("dob reformatted (via model rescue)", state.data.dob === "October 18, 1990", `-> ${state.data.dob}`);

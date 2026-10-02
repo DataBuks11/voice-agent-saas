@@ -367,6 +367,14 @@ export function resolveSlotIso(spoken: string, now: Date = new Date()): string |
   return `${year}-${pad(month)}-${pad(day)} ${pad(hour)}:${pad(minute)}`;
 }
 
+const SLOT_CUE =
+  /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|tonight|next|\d{1,2}\s*[:.]?\d{0,2}\s*(a\.?m\.?|p\.?m\.?)?|morning|afternoon|evening|mid ?day|noon)\b/i;
+
+export function parseSlotIso(text: string): string | null {
+  if (!SLOT_CUE.test(text)) return null;
+  return resolveSlotIso(text);
+}
+
 export async function extractSlotValue(
   slot: SlotDef,
   text: string,
@@ -406,9 +414,16 @@ export async function extractSlotValue(
     case "digits":
       value = extractDigits(text, slot.digits);
       break;
-    case "slot":
-      value = null; // produced by the LLM offer line
+    case "slot": {
+      // Deterministic first: "tomorrow at 5 pm" / "Wednesday morning" is a
+      // parse, not a judgement call. The model is only asked to *offer* slots.
+      const iso = parseSlotIso(text);
+      if (iso) {
+        value = prettySlot(iso);
+        return { value, present: true, iso };
+      }
       break;
+    }
     default:
       value = extractText(text);
       break;
