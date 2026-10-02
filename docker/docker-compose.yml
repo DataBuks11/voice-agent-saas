@@ -6,5 +6,5 @@ services:
     env_file: [../.env]
   voice:
     build: { context: .., dockerfile: docker/Dockerfile.voice }
-    ports: ["7860:7860"]
+    ports: ["8080:8080"]
     env_file: [../.env]
