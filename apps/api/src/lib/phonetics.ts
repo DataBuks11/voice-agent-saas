@@ -336,11 +336,16 @@ export async function resolveCanonicalName(
   if (!typed) return { canonical: "", confidence: 0, matched: false, via: "none", alternatives: [] };
 
   // Known spellings may be full names; match against each part so a first-name
-  // slot resolves against "Sudhanshu Sharma" -> "Sudhanshu".
-  const known = (opts.known ?? [])
-    .map(cleanName)
-    .filter(Boolean)
-    .flatMap((entry) => (entry.includes(" ") ? entry.split(" ") : [entry]));
+  // slot resolves against "Sudhanshu Sharma" -> "Sudhanshu". Duplicates are
+  // removed so one person cannot look like two ambiguous candidates.
+  const known = [
+    ...new Set(
+      (opts.known ?? [])
+        .map(cleanName)
+        .filter(Boolean)
+        .flatMap((entry) => (entry.includes(" ") ? entry.split(" ") : [entry])),
+    ),
+  ];
 
   if (known.includes(typed)) {
     return { canonical: titleCase(typed), confidence: 1, matched: true, via: "exact", alternatives: [] };

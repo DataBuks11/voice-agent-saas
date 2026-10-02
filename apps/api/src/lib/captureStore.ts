@@ -193,19 +193,26 @@ export async function persistCapture(write: BookingWrite): Promise<{ customerId:
   const data = write.capture.data;
   const first = titleCase(data.first_name ?? "");
   const last = titleCase(data.last_name ?? "");
-  const full = [first, last].filter(Boolean).join(" ");
-  const key = phoneticKey(full);
+  let displayName = [first, last].filter(Boolean).join(" ");
+  const key = phoneticKey(displayName);
 
   let customerId: string | null = null;
-  if (full) {
+  if (displayName) {
     const dedupe = async (usePhonKey: boolean): Promise<string | null> => {
-      const select = db.from("customers").select("id").eq("workspace_id", write.workspaceId);
-      const probe = usePhonKey ? select.eq("phon_key", key) : select.ilike("display_name", full);
+      const select = db.from("customers").select("id,display_name").eq("workspace_id", write.workspaceId);
+      const probe = usePhonKey ? select.eq("phon_key", key) : select.ilike("display_name", displayName);
       const { data: existing } = await probe.limit(1).maybeSingle();
-      if (existing) return String((existing as Record<string, unknown>).id);
+      if (existing) {
+        const found = existing as Record<string, unknown>;
+        // One person, one spelling: the booking carries the stored spelling too,
+        // so "Sudhansu" and "Sudhanshu" never disagree on paper.
+        const canonicalExisting = String(found.display_name ?? "").trim();
+        if (canonicalExisting && canonicalExisting !== displayName) displayName = canonicalExisting;
+        return String(found.id);
+      }
       const row: Record<string, unknown> = {
         workspace_id: write.workspaceId,
-        display_name: full,
+        display_name: displayName,
         phone: data.phone ?? data.contact ?? "",
         metadata: {
           first_name: first,
@@ -241,7 +248,7 @@ export async function persistCapture(write: BookingWrite): Promise<{ customerId:
     workspace_id: write.workspaceId,
     conversation_id: write.conversationId,
     customer_id: customerId,
-    customer_name: full,
+    customer_name: displayName,
     contact: data.phone ?? data.contact ?? "",
     starts_at: write.startsAt,
     notes: write.notes,
