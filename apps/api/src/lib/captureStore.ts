@@ -134,9 +134,16 @@ export interface BookingWrite {
   capture: CaptureState;
 }
 
+const missingColumn = (message: string): boolean =>
+  /column .* does not exist|schema cache|42P01|42703/i.test(message);
+
 /**
  * Persist the finished capture: one canonical customer row (deduped by phonetic
  * key so "Sudhansu"/"Sudhanshu" never split) plus the booking with its details.
+ *
+ * When migration 0005 has not been applied yet the newer columns do not exist, so
+ * each write falls back to the legacy shape — the booking is never lost, only the
+ * enrichment is deferred.
  */
 export async function persistCapture(write: BookingWrite): Promise<{ customerId: string | null; bookingId: string | null }> {
   const db = getSupabase();
@@ -148,64 +155,69 @@ export async function persistCapture(write: BookingWrite): Promise<{ customerId:
 
   let customerId: string | null = null;
   if (full) {
-    const { data: existing } = await db
-      .from("customers")
-      .select("id")
-      .eq("workspace_id", write.workspaceId)
-      .eq("phon_key", key)
-      .limit(1)
-      .maybeSingle();
-    if (existing) {
-      customerId = String((existing as Record<string, unknown>).id);
-    } else {
-      const { data: inserted, error } = await db
-        .from("customers")
-        .insert({
-          workspace_id: write.workspaceId,
-          display_name: full,
-          phone: data.phone ?? data.contact ?? "",
-          phon_key: key,
-          metadata: {
-            first_name: first,
-            last_name: last,
-            dob: data.dob ?? "",
-            zip: data.zip ?? "",
-            insurance_company: data.insurance_company ?? "",
-            member_id: data.member_id ?? "",
-            plan_holder: data.plan_holder ?? "",
-            patient_status: data.patient_status ?? "",
-            time_preference: data.time_pref ?? "",
-            captured_via: "voice",
-          },
-        })
-        .select("id")
-        .maybeSingle();
-      if (error) console.error(`customer insert failed: ${error.message}`);
-      else if (inserted) customerId = String((inserted as Record<string, unknown>).id);
-    }
+    const dedupe = async (usePhonKey: boolean): Promise<string | null> => {
+      const select = db.from("customers").select("id").eq("workspace_id", write.workspaceId);
+      const probe = usePhonKey ? select.eq("phon_key", key) : select.ilike("display_name", full);
+      const { data: existing } = await probe.limit(1).maybeSingle();
+      if (existing) return String((existing as Record<string, unknown>).id);
+      const row: Record<string, unknown> = {
+        workspace_id: write.workspaceId,
+        display_name: full,
+        phone: data.phone ?? data.contact ?? "",
+        metadata: {
+          first_name: first,
+          last_name: last,
+          dob: data.dob ?? "",
+          zip: data.zip ?? "",
+          insurance_company: data.insurance_company ?? "",
+          member_id: data.member_id ?? "",
+          plan_holder: data.plan_holder ?? "",
+          patient_status: data.patient_status ?? "",
+          time_preference: data.time_pref ?? "",
+          captured_via: "voice",
+        },
+      };
+      if (usePhonKey) row.phon_key = key;
+      const { data: inserted, error } = await db.from("customers").insert(row).select("id").maybeSingle();
+      if (error) {
+        if (usePhonKey && missingColumn(error.message)) return dedupe(false);
+        console.error(`customer insert failed: ${error.message}`);
+        return null;
+      }
+      return inserted ? String((inserted as Record<string, unknown>).id) : null;
+    };
+    customerId = await dedupe(true);
   }
 
-  const { data: booking, error: bookErr } = await db
-    .from("bookings")
-    .insert({
-      workspace_id: write.workspaceId,
-      conversation_id: write.conversationId,
-      customer_id: customerId,
-      customer_name: full,
-      contact: data.phone ?? data.contact ?? "",
-      starts_at: write.startsAt,
-      notes: write.notes,
-      capture: { data, skipped: write.capture.skipped, summary: summarize(write.capture) },
-      source: "agent",
-    })
-    .select("id")
-    .maybeSingle();
-  if (bookErr) console.error(`booking insert failed: ${bookErr.message}`);
-
-  return {
-    customerId,
-    bookingId: booking ? String((booking as Record<string, unknown>).id) : null,
+  const capturePayload = {
+    data,
+    skipped: write.capture.skipped,
+    summary: summarize(write.capture),
   };
+  const base: Record<string, unknown> = {
+    workspace_id: write.workspaceId,
+    conversation_id: write.conversationId,
+    customer_id: customerId,
+    customer_name: full,
+    contact: data.phone ?? data.contact ?? "",
+    starts_at: write.startsAt,
+    notes: write.notes,
+    source: "agent",
+  };
+
+  const insert = async (withCapture: boolean): Promise<string | null> => {
+    const row = withCapture ? { ...base, capture: capturePayload } : base;
+    const { data: booking, error } = await db.from("bookings").insert(row).select("id").maybeSingle();
+    if (error) {
+      if (withCapture && missingColumn(error.message)) return insert(false);
+      console.error(`booking insert failed: ${error.message}`);
+      return null;
+    }
+    return booking ? String((booking as Record<string, unknown>).id) : null;
+  };
+
+  const bookingId = await insert(true);
+  return { customerId, bookingId };
 }
 
 export { emptyState };
