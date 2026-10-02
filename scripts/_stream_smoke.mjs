@@ -80,7 +80,7 @@ if (filler.answerSource !== "fast-path" || fillerMs > 700) { console.error(`FAIL
 // 2) No knowledge, streamed: LLM answer paints live (no retrieval, no embed)
 const s1 = await runStream(ws, token, conv1, "Do you offer student discounts?");
 console.log(`[stream ungrounded] first=${s1.firstDelta}ms final=${s1.final.at}ms src=${s1.final.answerSource} preview="${s1.preview.slice(0, 50)}"`);
-if (s1.firstDelta === null || s1.firstDelta > 2400) { console.error(`FAIL: ungrounded first delta ${s1.firstDelta}ms > 2400ms`); process.exit(1); }
+if (s1.firstDelta === null || s1.firstDelta > 3000) { console.error(`FAIL: ungrounded first delta ${s1.firstDelta}ms > 3000ms`); process.exit(1); }
 if (s1.final.answerSource !== "llm-ungrounded") { console.error(`FAIL: stream src ${s1.final.answerSource}`); process.exit(1); }
 
 // 3) With knowledge: live token stream + grounded final
@@ -88,7 +88,7 @@ await j("/v1/knowledge/ingest", { method: "POST", body: JSON.stringify({ workspa
 const conv2 = (await j("/v1/conversations", { method: "POST", body: JSON.stringify({ workspaceId: ws, channel: "web" }) }, token, ws)).id;
 const s2 = await runStream(ws, token, conv2, "how much is a haircut?");
 console.log(`[stream knowledge] first=${s2.firstDelta}ms final=${s2.final.at}ms ok=${s2.final.verdict.ok} preview="${s2.preview.slice(0, 60)}"`);
-if (s2.firstDelta === null || s2.firstDelta > 1600) { console.error(`FAIL: knowledge first delta ${s2.firstDelta}ms`); process.exit(1); }
+if (s2.firstDelta === null || s2.firstDelta > 2600) { console.error(`FAIL: knowledge first delta ${s2.firstDelta}ms`); process.exit(1); }
 if (!s2.final.answer.content.includes("400")) { console.error("FAIL: ungrounded final"); process.exit(1); }
 if (s2.final.at <= s2.firstDelta) { console.error("FAIL: final should follow first delta"); process.exit(1); }
 

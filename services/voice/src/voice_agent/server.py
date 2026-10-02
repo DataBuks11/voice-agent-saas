@@ -12,7 +12,7 @@ from websockets.asyncio.server import serve
 
 from .pipeline import VoiceConfig, VoicePipeline
 from .providers import STTProvider, TTSProvider
-from .real import ApiLLM, VoiceAuth, build_stt, build_tts
+from .real import ApiLLM, VoiceAuth, build_stt, build_tts, set_stt_dictionary
 from .vad import Vad, VadConfig
 
 log = logging.getLogger("voice.server")
@@ -124,6 +124,7 @@ class Session:
 
         stt, tts = await shared_models()
         self.llm = ApiLLM(API_BASE, workspace_id, conversation_id, agent_id=agent_id, auth=auth, token=token)
+        asyncio.create_task(self._load_dictionary(headers))
         cfg = VoiceConfig(
             allow_barge_in=os.getenv("VOICE_ALLOW_BARGE_IN", "true").lower() == "true",
             max_turns=int(os.getenv("VOICE_MAX_CONVERSATION_TURNS", "50")),
@@ -142,6 +143,16 @@ class Session:
         )
         if greeting and greeting.strip().lower() not in {"off", "none", "disabled", "false"}:
             self.greet_task = asyncio.create_task(self._auto_greet(greeting.strip()))
+
+    async def _load_dictionary(self, headers: dict) -> None:
+        """Prime the recogniser with this workspace's names and terms."""
+        try:
+            async with httpx.AsyncClient(base_url=API_BASE, timeout=10.0) as c:
+                r = await c.get("/v1/agents/speech-dictionary", headers=headers)
+                if r.status_code == 200:
+                    set_stt_dictionary(list((r.json() or {}).get("terms") or []))
+        except Exception:  # noqa: BLE001 - biasing is best-effort
+            log.debug("speech dictionary unavailable", exc_info=True)
 
     @staticmethod
     async def _discover_workspace(headers: dict) -> str | None:

@@ -53,8 +53,13 @@ async function extractText(filename: string, buf: Buffer): Promise<string> {
 }
 
 export async function knowledgeRoutes(app: FastifyInstance): Promise<void> {
-  /** normalize -> OKF parse -> chunk -> embed -> persist. Returns chunk count. */
-  async function persistMarkdown(workspaceId: string, documentId: string, markdown: string): Promise<number> {
+  /**
+   * normalize -> OKF parse -> chunk -> embed -> persist.
+   * Each chunk is embedded with its document title in front ("contextual
+   * retrieval"): a bare sentence like "It takes 30 minutes" retrieves far better
+   * when the vector also carries "Acme Pricing FAQ".
+   */
+  async function persistMarkdown(workspaceId: string, documentId: string, markdown: string, title?: string): Promise<number> {
     const db = getSupabase();
     const { metadata, body: clean } = parseOkfMarkdown(markdown);
     const normalized = normalizeText(clean);
@@ -64,14 +69,20 @@ export async function knowledgeRoutes(app: FastifyInstance): Promise<void> {
       metadata as Record<string, string | number | boolean>,
       { workspaceId, documentId },
     );
+    let docTitle = title?.trim() ?? "";
+    if (!docTitle) {
+      const { data: doc } = await db.from("documents").select("title").eq("id", documentId).maybeSingle();
+      docTitle = String((doc as Record<string, unknown> | null)?.title ?? "");
+    }
+    const prefix = docTitle ? `${docTitle}\n` : "";
     if (chunks.length) {
-      const vectors = await embedAll(chunks.map((c) => c.content));
+      const vectors = await embedAll(chunks.map((c) => (prefix ? prefix + c.content : c.content)));
       const rows = chunks.map((c, i) => ({
         workspace_id: workspaceId,
         document_id: documentId,
         content: c.content,
         tokens: c.tokens,
-        metadata: c.metadata,
+        metadata: { ...c.metadata, ...(docTitle ? { doc_title: docTitle } : {}) },
         embedding: vectors[i],
       }));
       const { error: chunkErr } = await db.from("chunks").insert(rows);

@@ -68,6 +68,37 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     return { items, total: items.length };
   });
 
+  /**
+   * Speech dictionary for STT biasing: agent names, document titles and known
+   * customers. Feeding these back into the recogniser fixes names at decode
+   * time ("Sudhansu" -> "Sudhanshu") instead of patching text afterwards.
+   */
+  app.get("/agents/speech-dictionary", async (req) => {
+    const q = (req as { query: Record<string, string> }).query;
+    if (!q.workspaceId) throw Object.assign(new Error("workspaceId required"), { status: 400 });
+    const tenant = await requireTenant(req);
+    const db = getSupabase();
+    const terms = new Set<string>();
+    const add = (v: unknown): void => {
+      const s = String(v ?? "").trim();
+      if (s && s.length <= 48) terms.add(s);
+    };
+    const [agents, docs, customers] = await Promise.all([
+      db.from("agents").select("name").eq("workspace_id", tenant.workspaceId).limit(10),
+      db.from("documents").select("title").eq("workspace_id", tenant.workspaceId).limit(30),
+      db
+        .from("customers")
+        .select("display_name")
+        .eq("workspace_id", tenant.workspaceId)
+        .order("created_at", { ascending: false })
+        .limit(80),
+    ]);
+    for (const row of (agents.data ?? []) as Record<string, unknown>[]) add(row.name);
+    for (const row of (docs.data ?? []) as Record<string, unknown>[]) add(row.title);
+    for (const row of (customers.data ?? []) as Record<string, unknown>[]) add(row.display_name);
+    return { terms: [...terms].slice(0, 120) };
+  });
+
   app.get("/agents/:id", async (req) => {
     const { id } = req.params as { id: string };
     await requireTenant(req);

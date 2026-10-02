@@ -59,7 +59,8 @@ export function VoicePage() {
       if (!SR) return;
       try {
         const rec = new SR();
-        rec.lang = "en-US";
+        const lang = (agents.find((a) => a.id === agentId)?.language ?? "en").toLowerCase();
+        rec.lang = lang.startsWith("hi") ? "hi-IN" : lang.startsWith("es") ? "es-ES" : lang.startsWith("ar") ? "ar-SA" : "en-US";
         rec.continuous = true;
         rec.interimResults = false;
         rec.maxAlternatives = 1;

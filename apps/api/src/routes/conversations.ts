@@ -4,10 +4,24 @@ import type { Agent, ConversationMessage, Decision, RetrievalResult, HarnessVerd
 import { ruleFallback } from "@voice-agent/decision";
 import { buildContext } from "@voice-agent/context";
 import { validateResponse } from "@voice-agent/harness";
+import { KeywordOverlapReranker } from "@voice-agent/reranking";
 import { getSupabase } from "../lib/supabase.js";
 import { requireTenant } from "../lib/tenant.js";
 import { embedAll } from "../lib/embeddings.js";
 import { complete, completeStream } from "../lib/llm.js";
+import {
+  applyAnswer,
+  currentSlot,
+  flowForIntent,
+  isQuestionLike,
+  offerSlot,
+  startFlow,
+  type Advance,
+  type CaptureState,
+  type ExtractionContext,
+  type SlotDef,
+} from "../lib/captureFlow.js";
+import { canonicalName, clearCaptureState, loadCaptureState, persistCapture, saveCaptureState } from "../lib/captureStore.js";
 
 const createConversationSchema = z.object({
   workspaceId: z.string().uuid(),
@@ -72,13 +86,108 @@ function todayInfo(): string {
   }
 }
 
-const systemWithStyle = (base: string) => `${base}\n\n${todayInfo()}\n\n${VOICE_STYLE}`;
+const systemWithStyle = (base: string, language = "en") => {
+  const lang = (language || "en").toLowerCase();
+  const langRule =
+    lang.startsWith("hi")
+      ? "- Reply in natural Hindi (Devanagari is fine), the way a receptionist speaks in India. Keep it to 1-2 short sentences."
+      : lang.startsWith("es")
+        ? "- Reply in natural Spanish, 1-2 short sentences."
+        : lang.startsWith("ar")
+          ? "- Reply in natural Arabic, 1-2 short sentences."
+          : "";
+  return `${base}\n\n${todayInfo()}\n\n${VOICE_STYLE}${langRule ? `\n${langRule}` : ""}`;
+};
 
 /** Workspace has no documents yet — chat like a helpful assistant, never invent business facts. */
 const UNGROUNDED_NOTE = `# Knowledge status
 No business documents have been uploaded yet — there is nothing to look facts up in.
 - Be a warm, natural, helpful general assistant and keep the conversation flowing (like a friendly chatbot).
 - For specific business facts (prices, hours, address, policies, availability), say you'll get those details from the team — never invent them.`;
+
+const SLOT_OFFER_INSTRUCTIONS = `# Slot offering (booking tool, availability step)
+- Offer ONE concrete appointment slot (max two), based only on hours/availability stated in the knowledge above. If nothing is known, ask the customer for a day and time instead — never invent availability.
+- Put each offered slot as its own machine line FIRST, then the spoken sentence:
+OFFER|YYYY-MM-DD HH:MM
+- If the customer already said a day/time, restate it as a single OFFER line and ask them to confirm.
+- Never claim the booking is confirmed here; the customer confirms after hearing it read back.`;
+
+const SLOT_EXTRACT_INSTRUCTIONS = `You extract one captured booking detail from a front-desk call.
+Answer with ONLY compact JSON, no markdown: {"value": <string or null>, "present": true|false}
+- value: exactly what the customer gave, cleaned up (names in proper case, dates as "Month D, YYYY", times as "3:00 p.m.", digits as digits).
+- present false when the customer says they do not have it, or when they ignored the question.`;
+
+interface SlotExtractResult {
+  value?: string | null;
+  present?: boolean;
+}
+
+const parseJsonLoose = (raw: string): unknown => {
+  const cleaned = raw.replace(/```json?/gi, "").replace(/```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+};
+
+/** LLM fallback when regex extraction cannot read the answer (noisy STT, Hinglish). */
+async function slotExtractLlm(slot: SlotDef, text: string, data: Record<string, string>): Promise<SlotExtractResult | null> {
+  const result = await complete({
+    system: SLOT_EXTRACT_INSTRUCTIONS,
+    context: "",
+    user: `Pending question: ${slot.prompt}\nAlready captured: ${JSON.stringify(data)}\nCustomer said: "${text}"`,
+    fallback: "",
+  });
+  if (!result.text) return null;
+  const parsed = parseJsonLoose(result.text) as SlotExtractResult | null;
+  return parsed && typeof parsed === "object" ? parsed : null;
+}
+
+/** LLM turn that offers a concrete appointment slot, parsed back into the flow. */
+async function runSlotOfferTurn(
+  system: string,
+  history: ConversationMessage[],
+  state: CaptureState,
+  userText: string,
+): Promise<{ spoken: string; offers: string[] }> {
+  const transcript = history
+    .slice(-6)
+    .map((m) => `${m.role === "user" ? "Customer" : "Receptionist"}: ${m.content}`)
+    .join("\n");
+  const result = await complete({
+    system: `${system}\n\n${SLOT_OFFER_INSTRUCTIONS}`,
+    context: transcript,
+    user: userText,
+    fallback: "",
+  });
+  const offers: string[] = [];
+  const spoken: string[] = [];
+  for (const line of result.text.split(/\r?\n/)) {
+    const offer = line.trim().match(/^OFFER\|\s*(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s*$/i);
+    if (offer) {
+      offers.push(`${offer[1]} ${offer[2]}`);
+      continue;
+    }
+    if (line.trim()) spoken.push(line.trim());
+  }
+  void state;
+  return { spoken: spoken.join(" "), offers };
+}
+
+function humanSlot(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const date = d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const hh = d.getHours();
+  const mm = d.getMinutes();
+  const suffix = hh >= 12 ? "p.m." : "a.m.";
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  return `${date} at ${h12}${mm ? `:${String(mm).padStart(2, "0")}` : ""} ${suffix}`;
+}
 
 async function loadAgent(workspaceId: string, agentId: string | undefined): Promise<Agent> {
   const db = getSupabase();
@@ -291,8 +400,9 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         return null;
       });
 
-    // Agent lookup, doc count and short-term history race in parallel (DB-local).
-    const [agent, docCountRes, histRows] = await Promise.all([
+    // Agent lookup, doc count, short-term history and any in-progress capture flow
+    // all race in parallel (DB-local).
+    const [agent, docCountRes, histRows, captureState] = await Promise.all([
       loadAgent(body.workspaceId, body.agentId),
       db
         .from("documents")
@@ -303,7 +413,8 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .select("id, role, content, citations, created_at")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: false })
-        .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20)),
+        .limit(Number(process.env.MEMORY_SHORT_TURNS ?? 20)),
+      loadCaptureState(conversationId, body.workspaceId),
     ]);
     const docCount = docCountRes.count ?? 0;
     const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
@@ -340,70 +451,135 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
           if (streamed) return streamFail(err as Error);
           throw err;
         }
-        retrieved = (hits ?? []).map((h: Record<string, unknown>) => ({
-          id: String(h.id),
-          workspaceId: body.workspaceId,
-          documentId: String(h.document_id),
-          content: String(h.content),
-          tokens: 0,
-          metadata: (h.metadata ?? {}) as Record<string, string | number | boolean>,
-          score: Number(h.score),
-        }));
+        retrieved = (hits ?? []).map((h: Record<string, unknown>) => {
+          const meta = (h.metadata ?? {}) as Record<string, string | number | boolean>;
+          const vectorScore = Number(h.score);
+          const title = String(meta.doc_title ?? "");
+          return {
+            id: String(h.id),
+            workspaceId: body.workspaceId,
+            documentId: String(h.document_id),
+            content: title ? `${title}: ${String(h.content)}` : String(h.content),
+            tokens: 0,
+            metadata: { ...meta, vector_score: vectorScore },
+            score: vectorScore,
+          } satisfies RetrievalResult;
+        });
+        // Below-threshold hits are noise, not evidence: grounding on them is how
+        // an agent ends up inventing an answer.
+        const minScore = Number(process.env.RAG_MIN_SCORE ?? 0.32);
+        const strong = retrieved.filter((r) => Number(r.metadata.vector_score) >= minScore);
+        const pool = strong.length ? strong : retrieved.filter((r) => Number(r.metadata.vector_score) >= minScore * 0.8);
+        retrieved = await new KeywordOverlapReranker().rerank(body.content, pool, Number(process.env.RAG_RERANK_TOP_K ?? 4));
+        console.log(
+          `retrieval: hits=${pool.length + (retrieved.length - pool.length)} strong=${strong.length} kept=${retrieved.length} topScore=${retrieved[0]?.metadata.vector_score ?? "n/a"} min=${minScore}`,
+        );
       }
     }
 
-    let answerText: string;
-    let verdict: HarnessVerdict;
-    let answerSource: string;
+    let answerText = "";
+    let verdict: HarnessVerdict = { ok: true, confidence: 1, issues: [], safeText: "" };
+    let answerSource = "";
     let contextInfo = { usedTokens: 0, truncated: false, includedChunkIds: [] as string[] };
     const toolResults: ToolResult[] = [];
 
     const tool = decision.route === "use_tools" ? decision.requiredTools?.[0] : undefined;
 
-    if (decision.route === "small_talk") {
+    // ---- Front-desk capture flow (stateful slot filling with read-back confirmation)
+    const flow = captureState?.active
+      ? flowForIntent(captureState.intent, agent.location ? { office: agent.location } : {})
+      : [];
+    const flowSlot = flow.length ? currentSlot(flow, captureState!) : null;
+    const flowActive = Boolean(flowSlot) || captureState?.status === "confirming";
+    const startsBooking = tool === "book_appointment" && !flowActive;
+    const extractionCtx: ExtractionContext = {
+      canonicalName: async (spoken) => (await canonicalName(body.workspaceId, spoken)).canonical,
+      llm: (slot, text, data) => slotExtractLlm(slot, text, data),
+    };
+
+    if (flowActive && captureState) {
+      const system = systemWithStyle(agent.systemPrompt, agent.language);
+      let advance: Advance | null = null;
+
+      // Availability step needs the model (it must offer real slots).
+      if (flowSlot?.kind === "slot" && captureState.status === "capturing" && !captureState.pendingKey) {
+        const offerTurn = await runSlotOfferTurn(system, history, captureState, body.content);
+        const iso = offerTurn.offers[0];
+        if (iso) {
+          const spoken = humanSlot(iso);
+          advance = offerSlot(captureState, iso, spoken);
+          answerText = `${offerTurn.spoken}`.trim() || `Would ${spoken} work for you?`;
+        } else {
+          advance = await applyAnswer(flow, captureState, body.content, extractionCtx);
+          answerText = advance.reply;
+        }
+      } else if (isQuestionLike(body.content) && !/^(yes|yeah|yep|no|nope|ok|okay|sure)\b/i.test(body.content.trim())) {
+        // Mid-flow question: answer it, keep every captured slot.
+        const ctx = buildContext({
+          agent,
+          businessProfile: {},
+          history,
+          retrieved,
+          customerMemory: [],
+          maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
+        });
+        const llmResult = streamed
+          ? await completeStream({ system, context: ctx.contextText, user: body.content, fallback: agent.fallbackResponse }, writeDelta)
+          : await complete({ system, context: ctx.contextText, user: body.content, fallback: agent.fallbackResponse });
+        answerText = llmResult.text;
+        verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+        answerSource = "llm-capture-pause";
+        advance = null;
+      } else {
+        advance = await applyAnswer(flow, captureState, body.content, extractionCtx);
+        answerText = advance.reply;
+      }
+
+      if (advance) {
+        const nextState = advance.state;
+        await saveCaptureState(conversationId, body.workspaceId, nextState);
+        answerText = answerText || advance.reply;
+        verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+        answerSource = "capture-flow";
+        if (advance.done || !nextState.active) {
+          const startsAt = nextState.pendingIso ?? nextState.data.appointment ?? "";
+          const { customerId, bookingId } = await persistCapture({
+            workspaceId: body.workspaceId,
+            conversationId,
+            customerName: [nextState.data.first_name, nextState.data.last_name].filter(Boolean).join(" "),
+            contact: nextState.data.phone ?? nextState.data.contact ?? "",
+            startsAt,
+            notes: `booked via ${nextState.intent}`,
+            capture: nextState,
+          });
+          console.log(
+            `capture complete: booking=${bookingId ?? "none"} customer=${customerId ?? "none"} skipped=[${nextState.skipped.join(",")}]`,
+          );
+          const calUrl = calendarUrl(
+            `${agent.name} — appointment with ${[nextState.data.first_name, nextState.data.last_name].filter(Boolean).join(" ") || "guest"}`,
+            startsAt || new Date().toISOString().slice(0, 16),
+            `Captured: ${Object.entries(nextState.data).map(([k, v]) => `${k}: ${v}`).join("; ")}`,
+          );
+          if (calUrl) toolResults.push({ type: "calendar", label: "Add to Google Calendar", url: calUrl });
+          await clearCaptureState(conversationId);
+        }
+      }
+      if (!verdict) verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+      writeDelta(answerText);
+    } else if (startsBooking) {
+      const bookingFlowOpts = agent.location ? { office: agent.location } : {};
+      const bookingFlow = flowForIntent("new_patient_booking", bookingFlowOpts);
+      const fresh = startFlow(bookingFlow, "new_patient_booking");
+      await saveCaptureState(conversationId, body.workspaceId, fresh);
+      answerText = currentSlot(bookingFlow, fresh)?.prompt ?? "Of course — let's get you booked.";
+      verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+      answerSource = "capture-flow";
+      writeDelta(answerText);
+    } else if (decision.route === "small_talk") {
       // Fast path: instant, local, no LLM — greetings must reply with zero delay.
       answerText = smallTalkReply(agent, body.content);
       verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
       answerSource = "fast-path";
-      writeDelta(answerText);
-    } else if (tool === "book_appointment") {
-      const ctx = buildContext({
-        agent,
-        businessProfile: {},
-        history,
-        retrieved,
-        customerMemory: [],
-        maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
-      });
-      const tLlm = Date.now();
-      const llmResult = await complete({
-        system: systemWithStyle(ctx.systemPrompt),
-        context: `${ctx.contextText}\n\n${BOOKING_INSTRUCTIONS}`,
-        user: body.content,
-        fallback: agent.fallbackResponse,
-      });
-      llmMs = Date.now() - tLlm;
-      const booking = extractBooking(llmResult.text);
-      answerText = booking ? booking.rest : llmResult.text;
-      answerSource = llmResult.source;
-      contextInfo = { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds };
-      if (booking) {
-        const calUrl = calendarUrl(`${agent.name} — appointment with ${booking.name}`, booking.startsAt, `Contact: ${booking.contact || "-"}`);
-        const { error: bookErr } = await db.from("bookings").insert({
-          workspace_id: body.workspaceId,
-          conversation_id: conversationId,
-          customer_name: booking.name,
-          contact: booking.contact,
-          starts_at: booking.startsAt,
-          notes: "",
-          source: "agent",
-        });
-        if (bookErr) console.error(`booking insert failed: ${bookErr.message}`);
-        if (calUrl) toolResults.push({ type: "calendar", label: "Add to Google Calendar", url: calUrl });
-        if (!answerText) answerText = "You're all set — I've noted your booking details.";
-      }
-      // Tool turns are conversational actions, not factual claims — skip grounding.
-      verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
       writeDelta(answerText);
     } else if (tool === "get_location" && agent.location) {
       answerText = `You can find us at ${agent.location}.`;
@@ -422,7 +598,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
       });
       const opts = {
-        system: systemWithStyle(ctx.systemPrompt),
+        system: systemWithStyle(ctx.systemPrompt, agent.language),
         context: ctx.contextText,
         user: body.content,
         fallback: agent.fallbackResponse,

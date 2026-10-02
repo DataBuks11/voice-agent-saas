@@ -23,6 +23,15 @@ export function ruleFallback(text: string, hasKnowledge: boolean, toolsAvailable
   ) {
     return { route: "use_tools", confidence: 0.75, reason: "booking intent + calendar tool", requiredTools: ["book_appointment"] };
   }
+  // Front-desk phrasing: callers open with the service they want ("a cleaning?",
+  // "I need a check-up", "new patient here") instead of saying "book".
+  if (
+    hasTool("book_appointment") &&
+    /\b(cleaning|clean ?up|check ?up|checkup|consult(ation)?|new patient|existing patient|visit|doctor|dentist|physician|session|therapy|test(s)?|scan|vaccination|follow ?up)\b/.test(t) &&
+    t.length < 220
+  ) {
+    return { route: "use_tools", confidence: 0.62, reason: "front-desk service request + calendar tool", requiredTools: ["book_appointment"] };
+  }
   if (
     hasTool("get_location") &&
     /\b(where are you|address|location|located|directions|map|reach you|find you|reach the|come to)\b/.test(t)

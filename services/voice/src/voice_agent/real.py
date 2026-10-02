@@ -18,6 +18,22 @@ log = logging.getLogger("voice.providers")
 _HTTP_OK = ("", "api", "http", "openai", "whisper-compatible", "chatterbox-compatible")
 _LOCAL = ("local", "faster-whisper", "piper")
 
+# Workspace vocabulary used to bias speech recognition (agent names, known
+# customers). Refreshed per session from the API; empty is harmless.
+_STT_DICTIONARY: list[str] = []
+
+
+def set_stt_dictionary(terms: list[str]) -> None:
+    global _STT_DICTIONARY
+    cleaned = [t.strip() for t in terms if t and t.strip()]
+    _STT_DICTIONARY = cleaned[:120]
+    if cleaned:
+        log.info("stt dictionary loaded: %d terms", len(_STT_DICTIONARY))
+
+
+def stt_dictionary() -> list[str]:
+    return list(_STT_DICTIONARY)
+
 
 def stt_uses_http() -> bool:
     """Hosted STT when a key is present unless STT_PROVIDER forces local."""
@@ -252,7 +268,8 @@ class FasterWhisperSTT(STTProvider):
         size = model_size or os.getenv("STT_MODEL", "base.en")
         self._model = WhisperModel(size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
         self._lock = asyncio.Lock()
-        log.info("STT ready: faster-whisper %s (int8)", size)
+        self._language = (os.getenv("STT_LANGUAGE") or "en").strip() or "en"
+        log.info("STT ready: faster-whisper %s (int8) lang=%s", size, self._language)
 
     async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> Transcript:
         async with self._lock:
@@ -267,12 +284,16 @@ class FasterWhisperSTT(STTProvider):
             if target < 160:
                 return Transcript(text="", confidence=0.0)
             audio = np.interp(np.linspace(0, len(audio) - 1, target), np.arange(len(audio)), audio).astype(np.float32)
+        # Known names/business terms bias the decoder, so a name the caller spelled
+        # out once is transcribed correctly the next time.
+        prompt = ", ".join(stt_dictionary()[:60]) or None
         segments, info = self._model.transcribe(
             audio,
-            language="en",
+            language=self._language,
             beam_size=1,
             vad_filter=True,
             condition_on_previous_text=False,
+            initial_prompt=prompt,
         )
         parts, logprobs = [], []
         for seg in segments:
