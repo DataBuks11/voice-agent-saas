@@ -58,7 +58,7 @@ class VadConfig:
     # Energy gate on top of the neural score, as dograh does with min_volume.
     min_volume: float = 0.006
     # Speech must last this long before it counts as an interruption.
-    barge_in_ms: int = 320
+    barge_in_ms: int = 280
 
 
 class Vad:

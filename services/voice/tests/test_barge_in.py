@@ -33,6 +33,7 @@ class FakeWS:
         self.script = list(script)
         self.sent: list[bytes | str] = []
         self.closed = False
+        self.gate: asyncio.Event | None = None
 
     def __aiter__(self):
         return self
@@ -40,6 +41,9 @@ class FakeWS:
     async def __anext__(self):
         if not self.script:
             raise StopAsyncIteration
+        if self.gate is not None:
+            await self.gate.wait()
+            self.gate = None
         item = self.script.pop(0)
         await asyncio.sleep(0)
         return item
@@ -70,6 +74,7 @@ class StubPipeline:
         self.turns: list[str] = []
 
     async def synthesize(self, text: str):
+        await asyncio.sleep(0.02)  # real TTS takes time; let the test interleave
         class C:
             pcm16 = b"\x00\x01" * 8000
             sample_rate = 16000
@@ -90,6 +95,20 @@ class StubPipeline:
         return "Got it."
 
 
+class StubTTS:
+    name = "stub-tts"
+
+    def __init__(self):
+        self.backup = None
+
+    async def synthesize(self, text: str):
+        class C:
+            pcm16 = b"\x00\x01" * 4000
+            sample_rate = 16000
+
+        return C()
+
+
 class StubSTT:
     name = "stub"
 
@@ -105,7 +124,7 @@ async def _session(script: list[bytes | str]) -> tuple[Session, FakeWS, StubPipe
     session = Session(ws)
     session.started = True  # skip auth/startup
     session.pipeline = StubPipeline()
-    session.vad = Vad(VadConfig(barge_in_ms=320), 16000)
+    session.vad = Vad(VadConfig(barge_in_ms=280), 16000)
     return session, ws, session.pipeline
 
 
@@ -116,7 +135,7 @@ async def test_short_blips_while_speaking_are_ignored(monkeypatch):
     script: list[bytes | str] = [b""] + [frame(150, 0.3) + frame(300, 0.0)] * 6
     session, ws, pipeline = await _session(script)
     session.speaking = True
-    session._echo_guard_until = 0.0  # guard already expired: blips still must not count
+    session._echo_guard_frames = 0  # guard already expired: blips still must not count
     await session.run()
     assert pipeline.barge_ins == 0
     assert "interrupted" not in ws.types()
@@ -128,7 +147,7 @@ async def test_sustained_caller_speech_interrupts_exactly_once(monkeypatch):
     monkeypatch.setattr(srv, "_stt", StubSTT())
     session, ws, pipeline = await _session([frame(1500, 0.3)])
     session.speaking = True
-    session._echo_guard_until = 0.0
+    session._echo_guard_frames = 0
     await session.run()
     assert pipeline.barge_ins == 1  # once, not once per frame
     assert ws.types().count("interrupted") == 1
@@ -142,7 +161,7 @@ async def test_barge_in_utterance_is_queued_once_when_audio_stops(monkeypatch):
     monkeypatch.setattr(srv, "_stt", StubSTT())
     session, ws, pipeline = await _session([])
     session.speaking = True
-    session._echo_guard_until = 0.0
+    session._echo_guard_frames = 0
     session.vad.feed(frame(700, 0.3))
     session._echo_candidate = True
     # the barge-in is detected on the next frame and latched
@@ -157,15 +176,25 @@ async def test_barge_in_utterance_is_queued_once_when_audio_stops(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_echo_onset_inside_guard_window_is_dropped(monkeypatch):
+    """Bleed that starts with our audio and is over quickly must be ignored."""
     monkeypatch.setattr(srv, "_stt", StubSTT())
-    session, ws, pipeline = await _session([frame(900, 0.3)])
+    session, ws, pipeline = await _session([frame(300, 0.3)])
     session.speaking = True
-    import time as _t
-
-    session._echo_guard_until = _t.time() + 30
+    session._echo_guard_frames = srv.ECHO_GUARD_FRAMES  # playback just started
     await session.run()
     assert pipeline.barge_ins == 0
     assert "interrupted" not in ws.types()
+
+
+@pytest.mark.asyncio
+async def test_guard_counts_audio_time_not_wall_clock(monkeypatch):
+    """Bursty/buffered caller audio must not be swallowed by the echo guard."""
+    monkeypatch.setattr(srv, "_stt", StubSTT())
+    session, ws, pipeline = await _session([frame(1500, 0.3)])
+    session.speaking = True
+    session._echo_guard_frames = srv.ECHO_GUARD_FRAMES
+    await session.run()  # delivered instantly: wall-clock never advances
+    assert pipeline.barge_ins == 1
 
 
 @pytest.mark.asyncio
@@ -224,3 +253,31 @@ async def test_idle_watchdog_nudges_then_hangs_up(monkeypatch):
 
 def test_frame_bytes_is_20ms_at_16k():
     assert FRAME_BYTES == 16000 * 2 * 0.02
+
+@pytest.mark.asyncio
+async def test_words_spoken_during_our_audio_are_not_lost(monkeypatch):
+    """The caller talked over our audio; their words must still be answered."""
+    monkeypatch.setattr(srv, "_stt", StubSTT())
+    monkeypatch.setattr(srv, "_tts", StubTTS())
+    session, ws, pipeline = await _session([])
+    ws.script = [frame(1500, 0.3)]
+    ws.gate = asyncio.Event()  # hold the caller's words until we are speaking
+    runner = asyncio.create_task(session.run())
+    # a multi-sentence greeting so "speaking" lasts long enough to interrupt
+    greeting = asyncio.create_task(
+        session._speak("Hello there. Thanks for calling. How can I help you today.")
+    )
+    for _ in range(400):
+        if session.speaking:
+            break
+        await asyncio.sleep(0.001)
+    assert session.speaking is True
+    ws.gate.set()  # caller starts talking over the agent
+    await asyncio.wait_for(greeting, timeout=5)
+    await asyncio.wait_for(runner, timeout=5)
+    assert pipeline.barge_ins == 1
+    assert session.speaking is False
+    # their words were queued for an answer instead of discarded
+    assert session.queue.qsize() == 1
+    kind, _payload = session.queue.get_nowait()
+    assert kind.startswith("audio")

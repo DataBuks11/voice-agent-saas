@@ -20,7 +20,8 @@ log = logging.getLogger("voice.server")
 API_BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:3001").rstrip("/")
 PORT = int(os.getenv("PORT", "8080"))
 SAMPLE_RATE = 16000
-FRAME_BYTES = SAMPLE_RATE // 50 * 2  # 20ms of PCM16 mono
+FRAME_MS = 20  # PCM16 mono, 20 ms per frame
+FRAME_BYTES = SAMPLE_RATE // 1000 * FRAME_MS * 2
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
 
@@ -39,7 +40,9 @@ _models_warmed = False
 STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 
 # Speaker bleed reaches the mic a moment after our audio starts; ignore that window.
-ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.25"))
+ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.18"))
+# Expressed in 20 ms frames so the guard follows audio time, not wall-clock.
+ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
 # How long the endpoint waits for the in-flight model warm-up before answering anyway.
 # Race the draft: if it lands within this window the answer comes from cache,
 # otherwise answer immediately rather than making the caller wait for it.
@@ -143,7 +146,7 @@ class Session:
         self.speaking = False
         self._echo_candidate = False
         # Speaker bleed needs a moment to reach the mic; ignore that onset window.
-        self._echo_guard_until = 0.0
+        self._echo_guard_frames = 0
         self._barge_taken = False
         self.last_activity = __import__("time").time()
         self.call_started = self.last_activity
@@ -279,7 +282,7 @@ class Session:
                 # Mute the microphone for the duration of our own voice.
                 self.speaking = True
                 self._echo_candidate = False
-                self._echo_guard_until = __import__("time").time() + ECHO_GUARD_S
+                self._echo_guard_frames = ECHO_GUARD_FRAMES
                 self.vad.reset()
                 await self.send_json({"type": "speak_start"})
                 started = True
@@ -292,18 +295,34 @@ class Session:
         if started:
             await self.send_json({"type": "audio_end"})
         if started:
-            # Unmute, then discard anything captured during playback.
             self.speaking = False
-            self.vad.reset()
             self._echo_candidate = False
-            self._barge_taken = False
             await self.send_json({"type": "speak_end"})
+            if self._barge_taken:
+                # The buffer holds the caller talking over us: answer it, never drop it.
+                await self._flush_interruption()
+            else:
+                # Pure playback bleed: throw it away.
+                self.vad.reset()
+            self._barge_taken = False
         log.info(
             "stage speak first=%s total=%.2fs greeting=%s",
             f"{t_first - t0:.2f}s" if t_first else "none",
             _time.time() - t0,
             is_greeting,
         )
+
+    async def _flush_interruption(self) -> None:
+        """Transcribe and queue what the caller said while we were speaking."""
+        if self.vad.speech_ms <= 0:
+            self.vad.reset()
+            return
+        pcm = self.vad.take()
+        if not pcm or self.pipeline is None:
+            return
+        await self._drain_draft()
+        await self._stt_delta(True)
+        await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm)
 
     async def _auto_greet(self, text: str) -> None:
         try:
@@ -486,12 +505,14 @@ class Session:
                             # Already handling an interruption: keep buffering the
                             # caller's sentence so it is transcribed once, whole.
                             continue
+                        if self._echo_guard_frames > 0:
+                            # Counted in audio time, not wall-clock, so buffered or
+                            # bursty caller audio is never swallowed by the guard.
+                            self._echo_guard_frames -= 1
+                            self.vad.reset()
+                            continue
                         if event == "speech_start":
-                            if __import__("time").time() < self._echo_guard_until:
-                                self._echo_candidate = False
-                                self.vad.reset()
-                            else:
-                                self._echo_candidate = True
+                            self._echo_candidate = True
                         elif self._echo_candidate and self.vad.sustained():
                             # Interrupt exactly once. The utterance stays in the VAD
                             # so the rest of the sentence is not thrown away.
