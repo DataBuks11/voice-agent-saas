@@ -241,15 +241,30 @@ const NAME_STOPWORDS = new Set([
   "card", "insurance", "id", "zip", "code", "number", "gonna", "lets", "let", "here",
 ]);
 
+const MONTH_WORDS = /january|february|march|april|may|june|july|august|september|october|november|december/i;
+const WEEKDAY_WORDS = /monday|tuesday|wednesday|thursday|friday|saturday|sunday/i;
+
+/** Dates, times and numbers are never names — "January 12th 1990" is a DOB answer. */
+const looksLikeDateOrNumber = (text: string): boolean =>
+  MONTH_WORDS.test(text) ||
+  WEEKDAY_WORDS.test(text) ||
+  /\b(19|20)\d{2}\b/.test(text) ||
+  /\b\d{1,2}\s*(st|nd|rd|th)\b/i.test(text) ||
+  /\b\d{1,2}\s*[:/]\s*\d{2}\b/.test(text) ||
+  /^\W*\d+/.test(text.trim());
+
 const isPlausibleName = (value: string): boolean => {
   const words = value.split(/\s+/).filter(Boolean);
   if (!words.length || words.length > 3) return false;
   if (words.every((w) => NAME_STOPWORDS.has(w))) return false;
   if (words.some((w) => w.length > 22)) return false;
+  if (words.some((w) => /^\d/.test(w))) return false;
+  if (looksLikeDateOrNumber(value)) return false;
   return true;
 };
 
 export function extractName(text: string): string | null {
+  if (looksLikeDateOrNumber(text)) return null;
   const spelled = findSpellOutRun(text);
   if (spelled && isPlausibleName(spelled.letters)) return spelled.letters;
   const stripped = stripLead(text);
@@ -399,6 +414,11 @@ export async function extractSlotValue(
   if (ctx.llm) {
     const fallback = await ctx.llm(slot, text, data);
     if (fallback && fallback.value) {
+      // A name slot only accepts a name — "January 12th 1990" must re-ask, not
+      // silently become someone's surname.
+      if (slot.kind === "name" && !isPlausibleName(fallback.value)) {
+        return { value: null, present: false, iso: null };
+      }
       return { value: fallback.value, present: fallback.present !== false, iso: fallback.iso ?? null };
     }
   }

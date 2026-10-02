@@ -114,6 +114,21 @@ check("closing message mentions name", /Kstest/.test(lastReply), `-> ${lastReply
 
 /* ---- overlap + rejection behaviour ---- */
 console.log("\n[4] Overlap / rejection handling");
+// A date offered where a name is expected must re-ask, not corrupt the record.
+const flowD = flowForIntent("new_patient_booking", { office: "West Covina" });
+let sD = startFlow(flowD, "new_patient_booking");
+for (const t of ["yes", "new patient", "P-R-I-Y-A S-H-A-R-M-A", "yes"]) {
+  sD = (await applyAnswer(flowD, sD, t, { canonicalName: async (n) => n })).state;
+}
+const dateInsteadOfName = await applyAnswer(flowD, sD, "January 12th 1990", { canonicalName: async (n) => n });
+check("date answer rejected as name", dateInsteadOfName.state.step === sD.step && !dateInsteadOfName.state.data.last_name, `step=${dateInsteadOfName.state.step} last_name=${dateInsteadOfName.state.data.last_name ?? "-"}`);
+sD = dateInsteadOfName.state;
+const stillAsking = await applyAnswer(flowD, sD, "January 12th 1990", { canonicalName: async (n) => n });
+check("still asking for the name, not the DOB", /last name/i.test(stillAsking.reply), `-> ${stillAsking.reply}`);
+const nameTurn = await applyAnswer(flowD, stillAsking.state, "S-H-A-R-M-A", { canonicalName: async (n) => n });
+check("real name is read back for confirmation", /sharma/i.test(nameTurn.reply), `-> ${nameTurn.reply}`);
+const dobTurn = await applyAnswer(flowD, nameTurn.state, "yes", { canonicalName: async (n) => n });
+check("confirming the name moves to the DOB slot", /date of birth/i.test(dobTurn.reply), `-> ${dobTurn.reply}`);
 const flow2 = flowForIntent("new_patient_booking", { office: "West Covina" });
 let s2 = startFlow(flow2, "new_patient_booking");
 const seq: [string, string][] = [

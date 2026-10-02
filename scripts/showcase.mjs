@@ -72,11 +72,32 @@ const trunc = (s, n = 110) => (s || "").replace(/\s+/g, " ").slice(0, n);
   step("instant location + maps link", !!maps || (r.json?.answer?.content ?? "").length > 0, `"${trunc(r.json?.answer?.content)}"${maps ? ` · ${maps.url.slice(0, 60)}…` : ""}`, r.ms);
 
   say("5 · Booking → calendar + persisted");
-  r = await call("POST", `/v1/conversations/${cid}/messages`, {
-    workspaceId: ws,
-    content: "Book me tomorrow at 5 PM please — John Doe, 555-0134",
-  });
-  const cal = (r.json?.toolResults ?? []).find((t) => t.type === "calendar");
+  // The front-desk flow captures slot by slot; drive it like a caller would.
+  const bookingScript = [
+    "I'd like to book an appointment tomorrow",
+    "yes",
+    "new patient",
+    "M-A-Y-A P-A-T-E-L",
+    "yes",
+    null,
+    "January 12th 1990",
+    "yes",
+    "a consultation",
+    "afternoons",
+    "tomorrow at 5 pm",
+    "yes",
+    "94107",
+    "self pay",
+    "I don't have my card",
+    "under my own name",
+  ];
+  let cal = null;
+  for (const line of bookingScript) {
+    if (line === null) continue;
+    r = await call("POST", `/v1/conversations/${cid}/messages`, { workspaceId: ws, content: line });
+    const found = (r.json?.toolResults ?? []).find((t) => t.type === "calendar");
+    if (found) cal = found;
+  }
   step("appointment booked", !!cal, `"${trunc(r.json?.answer?.content)}"${cal ? " · Google Calendar link ready" : ""}`, r.ms);
   if (cal) {
     r = await call("GET", `/v1/bookings?workspaceId=${ws}`);
