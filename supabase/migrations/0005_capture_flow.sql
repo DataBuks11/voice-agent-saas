@@ -10,8 +10,8 @@ create table if not exists capture_sessions (
   data jsonb not null default '{}',
   skipped jsonb not null default '[]',
   customer_id uuid references customers(id) on delete set null,
-  created_at timestamstz not null default now(),
-  updated_at timestamstz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 create unique index if not exists capture_sessions_conversation_idx on capture_sessions (conversation_id);
 create index if not exists capture_sessions_workspace_idx on capture_sessions (workspace_id, updated_at desc);
