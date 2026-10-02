@@ -546,7 +546,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
         answerSource = "capture-flow";
         if (advance.done || !nextState.active) {
-          const startsAt = nextState.pendingIso ?? nextState.data.appointment ?? "";
+          const startsAt = nextState.data.appointment_iso ?? nextState.pendingIso ?? nextState.data.appointment ?? "";
           const { customerId, bookingId } = await persistCapture({
             workspaceId: body.workspaceId,
             conversationId,
