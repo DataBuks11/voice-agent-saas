@@ -93,10 +93,14 @@ const trunc = (s, n = 110) => (s || "").replace(/\s+/g, " ").slice(0, n);
     "under my own name",
   ];
   let cal = null;
+  let stepNo = 0;
   for (const line of bookingScript) {
     r = await call("POST", `/v1/conversations/${cid}/messages`, { workspaceId: ws, content: line });
     const found = (r.json?.toolResults ?? []).find((t) => t.type === "calendar");
     if (found) cal = found;
+    if (process.env.SHOWCASE_TRACE) {
+      console.log(`   #${String(++stepNo).padStart(2, "0")} "${line}" -> (${r.json?.answerSource}) "${trunc(r.json?.answer?.content ?? "")}"${found ? " [calendar]" : ""}`);
+    }
   }
   step("appointment booked", !!cal, `"${trunc(r.json?.answer?.content)}"${cal ? " · Google Calendar link ready" : ""}`, r.ms);
   if (cal) {

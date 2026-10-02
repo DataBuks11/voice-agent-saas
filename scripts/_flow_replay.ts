@@ -7,6 +7,7 @@
  */
 import {
   applyAnswer,
+  extractName,
   currentSlot,
   offerSlot,
   flowForIntent,
@@ -30,6 +31,9 @@ const check = (name: string, cond: boolean, extra = ""): void => {
 console.log("\n[1] Phonetics / spell-out / digits");
 check("spell-out K-S-T-E-S-T", decodeSpellOut("K-S-T-E-S-T") === "Kstest", `-> ${decodeSpellOut("K-S-T-E-S-T")}`);
 check("two-part spell-out keeps first group", decodeSpellOut("J-O-H-N D-O-E") === "John", `-> ${decodeSpellOut("J-O-H-N D-O-E")}`);
+check("two-part spell-out takes first name", extractName("M-A-Y-A P-A-T-E-L") === "Maya", `-> ${extractName("M-A-Y-A P-A-T-E-L")}`);
+check("mixed-case spell-out", extractName("M-a-y-a P-a-t-e-l") === "Maya", `-> ${extractName("M-a-y-a P-a-t-e-l")}`);
+check("name containing a month word survives", (extractName("Mayank Patel") ?? "").startsWith("Mayank"), `-> ${extractName("Mayank Patel")}`);
 check("spell-out C-O-L-E", decodeSpellOut("it's going to be cold, C-O-L-E") === "Cole", `-> ${decodeSpellOut("it's going to be cold, C-O-L-E")}`);
 check("digits nine two seven eight zero", digitsFromSpoken("nine two seven eight zero") === "92780", `-> ${digitsFromSpoken("nine two seven eight zero")}`);
 check("spoken year nineteen ninety", digitsFromSpoken("nineteen ninety") === "1990", `-> ${digitsFromSpoken("nineteen ninety")}`);

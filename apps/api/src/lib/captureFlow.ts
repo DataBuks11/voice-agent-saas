@@ -241,8 +241,8 @@ const NAME_STOPWORDS = new Set([
   "card", "insurance", "id", "zip", "code", "number", "gonna", "lets", "let", "here",
 ]);
 
-const MONTH_WORDS = /january|february|march|april|may|june|july|august|september|october|november|december/i;
-const WEEKDAY_WORDS = /monday|tuesday|wednesday|thursday|friday|saturday|sunday/i;
+const MONTH_WORDS = /\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/i;
+const WEEKDAY_WORDS = /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
 
 /** Dates, times and numbers are never names — "January 12th 1990" is a DOB answer. */
 const looksLikeDateOrNumber = (text: string): boolean =>
@@ -263,9 +263,13 @@ const isPlausibleName = (value: string): boolean => {
   return true;
 };
 
+/** Uppercase lone letters so "M-a-y-a P-a-t-e-l" reads as a spelled-out run. */
+const upcaseSpellLetters = (text: string): string =>
+  text.replace(/(^|[\s\-.,])[a-z](?=[\s\-.,]|$)/g, (m, p: string) => `${p}${m.slice(p.length).toUpperCase()}`);
+
 export function extractName(text: string): string | null {
   if (looksLikeDateOrNumber(text)) return null;
-  const spelled = findSpellOutRun(text);
+  const spelled = findSpellOutRun(upcaseSpellLetters(text));
   if (spelled && isPlausibleName(spelled.letters)) return spelled.letters;
   const stripped = stripLead(text);
   const words = stripped.split(/\s+/).filter((w) => /^[\p{L}'-]+$/u.test(w) && w.length <= 22);
