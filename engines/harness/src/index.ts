@@ -9,6 +9,23 @@ export interface HarnessOptions {
 const DEFAULT_BLOCKED = [/ssn|credit card|password/i];
 
 /** Response harness: grounding + policy + fallback. Real checks, no LLM needed. */
+/**
+ * A greeting or an acknowledgement makes no claim about the business, so it must
+ * not be scored against the sources. Flagging "Thank you." as ungrounded made the
+ * agent answer everyday small talk with a canned refusal.
+ */
+const CONVERSATIONAL_OPENERS =
+  /^(hi|hello|hey|thanks|thank you|sure|okay|ok|got it|no problem|no worries|you're welcome|my name|how (can|may) i|is there anything|what can i|feel free|great|awesome|perfect|wonderful|nice|welcome|bye|goodbye|good (morning|afternoon|evening)|i am|i'm|we can|i can|let me know|please (let|tell|ask|share)|of course|absolutely|certainly|sounds good|that'?s (fine|great|ok|okay)|anything else)\b/i;
+
+const FACTUAL_MARKERS =
+  /\d|\b(rupees?|inr|rs\.?|usd|\$|percent|%|am|pm|hours?|open|closed|closed on|policy|price|pricing|cost|fee|charge|discount|slot|appointment|available|availability|address|phone|email|website|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+
+export function isConversational(sentence: string): boolean {
+  const t = sentence.trim();
+  if (!t || FACTUAL_MARKERS.test(t)) return false;
+  return CONVERSATIONAL_OPENERS.test(t);
+}
+
 export function validateResponse(
   answer: string,
   sources: RetrievalResult[],
@@ -25,6 +42,7 @@ export function validateResponse(
   const sourceText = sources.map((s) => s.content.toLowerCase()).join("\n");
   let grounded = 0;
   for (const s of sentences) {
+    if (isConversational(s)) { grounded++; continue; } // no claim to support
     const words = s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3);
     if (!words.length) { grounded++; continue; }
     const hits = words.filter((w) => sourceText.includes(w)).length;
