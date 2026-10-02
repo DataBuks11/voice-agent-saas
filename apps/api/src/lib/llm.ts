@@ -167,7 +167,9 @@ export async function completeStream(opts: LlmOptions, onDelta: (chunk: string) 
     return { text: acc.trim(), source: "llm" };
   }
   console.error(`llm stream degraded to grounded fallback: ${lastErr?.message}`);
-  return { text: groundedAnswer(opts), source: "grounded-fallback" };
+  const fallbackText = groundedAnswer(opts);
+  onDelta(fallbackText);
+  return { text: fallbackText, source: "grounded-fallback" };
 }
 
 /** Extract the knowledge block out of the built context and return the most relevant slice. */

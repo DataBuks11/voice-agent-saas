@@ -210,6 +210,40 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     if (tenant.workspaceId !== body.workspaceId) {
       throw Object.assign(new Error("workspaceId does not match x-workspace-id"), { status: 403 });
     }
+    // Streaming clients get an SSE connection from the first byte: fast paths paint
+    // their whole answer as one delta BEFORE persisting, knowledge turns stream tokens.
+    const streamed = body.stream === true;
+    const writeDelta = (text: string) => {
+      if (!streamed || !text) return;
+      try {
+        reply.raw.write(`data: ${JSON.stringify({ type: "delta", text })}\n\n`);
+      } catch {
+        // client disconnected mid-turn
+      }
+    };
+    if (streamed) {
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+        "x-accel-buffering": "no",
+      });
+    }
+    const streamFail = (err: Error) => {
+      console.error(`streamed turn failed: ${err.message}`);
+      try {
+        reply.raw.write(`data: ${JSON.stringify({ type: "error", message: err.message })}\n\n`);
+      } catch {
+        // client already gone
+      }
+      try {
+        reply.raw.end();
+      } catch {
+        // client already gone
+      }
+      return reply;
+    };
     const db = getSupabase();
     const t0 = Date.now();
     let embedMs = 0;
@@ -268,7 +302,11 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         p_top_k: Number(process.env.RAG_TOP_K ?? 6),
         p_filter: {},
       });
-      if (searchErr) throw Object.assign(new Error(`retrieval failed: ${searchErr.message}`), { status: 500 });
+      if (searchErr) {
+        const err = Object.assign(new Error(`retrieval failed: ${searchErr.message}`), { status: 500 });
+        if (streamed) return streamFail(err as Error);
+        throw err;
+      }
       retrieved = (hits ?? []).map((h: Record<string, unknown>) => ({
         id: String(h.id),
         workspaceId: body.workspaceId,
@@ -285,7 +323,6 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     let answerSource: string;
     let contextInfo = { usedTokens: 0, truncated: false, includedChunkIds: [] as string[] };
     const toolResults: ToolResult[] = [];
-    let streamed = false;
 
     const tool = decision.route === "use_tools" ? decision.requiredTools?.[0] : undefined;
 
@@ -294,6 +331,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       answerText = smallTalkReply(agent, body.content);
       verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
       answerSource = "fast-path";
+      writeDelta(answerText);
     } else if (tool === "book_appointment") {
       const ctx = buildContext({
         agent,
@@ -332,11 +370,13 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       }
       // Tool turns are conversational actions, not factual claims — skip grounding.
       verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+      writeDelta(answerText);
     } else if (tool === "get_location" && agent.location) {
       answerText = `You can find us at ${agent.location}.`;
       toolResults.push({ type: "maps", label: "Open in Google Maps", url: mapsUrl(agent.location) });
       verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
       answerSource = "tool";
+      writeDelta(answerText);
     } else {
       // Knowledge / escalate / web_search / location-without-configured-address.
       const ctx = buildContext({
@@ -360,26 +400,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         answerText = agent.fallbackResponse;
         verdict = { ok: false, confidence: 0, issues: ["no knowledge context retrieved"], safeText: answerText };
         answerSource = "fallback";
+        writeDelta(answerText);
       } else {
-        if (body.stream) {
-          // First token paints live; final event below carries the harness verdict
-          // (which may replace the preview with the safe/fallback text).
-          streamed = true;
-          reply.hijack();
-          reply.raw.writeHead(200, {
-            "content-type": "text/event-stream",
-            "cache-control": "no-cache",
-            connection: "keep-alive",
-            "x-accel-buffering": "no",
-          });
-        }
-        const writeDelta = (d: string) => {
-          try {
-            reply.raw.write(`data: ${JSON.stringify({ type: "delta", text: d })}\n\n`);
-          } catch {
-            // client disconnected mid-stream
-          }
-        };
+        // First token paints live; the final event below carries the harness verdict
+        // (which may replace the preview with the safe/fallback text).
         const tLlm = Date.now();
         const llmResult = streamed ? await completeStream(opts, writeDelta) : await complete(opts);
         llmMs = Date.now() - tLlm;
@@ -388,6 +412,8 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         });
         answerText = verdict.safeText;
         answerSource = llmResult.source;
+        // The final event below carries verdict.safeText — it replaces any streamed
+        // preview on the client when the harness had to fall back.
       }
     }
 
