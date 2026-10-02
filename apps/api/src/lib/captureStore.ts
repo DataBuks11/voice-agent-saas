@@ -85,6 +85,9 @@ export async function saveCaptureState(
     return;
   }
   const db = getSupabase();
+  // Upsert only writes the columns it is given, so the pending fields are always
+  // sent — as null when there is nothing awaiting confirmation. Omitting them
+  // would leave a stale read-back in the row and wedge the flow.
   const row: Record<string, unknown> = {
     conversation_id: conversationId,
     workspace_id: workspaceId,
@@ -94,10 +97,10 @@ export async function saveCaptureState(
     data: state.data,
     skipped: state.skipped,
     updated_at: new Date().toISOString(),
+    pending_key: state.pendingKey ?? null,
+    pending_value: state.pendingValue ?? null,
+    pending_iso: state.pendingIso ?? null,
   };
-  if (state.pendingKey) row.pending_key = state.pendingKey;
-  if (state.pendingValue) row.pending_value = state.pendingValue;
-  if (state.pendingIso) row.pending_iso = state.pendingIso;
   const { error } = await db
     .from("capture_sessions")
     .upsert(row, { onConflict: "conversation_id" });

@@ -17,7 +17,7 @@ const say = async (c) => {
   const r = await j(`/v1/conversations/${conv}/messages`, { method: "POST", body: JSON.stringify({ workspaceId: ws, content: c }) }, token, ws);
   const cap = r.capture;
   const done = cap?.slots?.filter(s => s.state !== "pending").length ?? 0;
-  console.log(`"${c.slice(0, 40)}"\n   -> "${String(r.answer?.content ?? "").slice(0, 110)}"  [slots ${done}/${cap?.slots?.length ?? 0}]`);
+  console.log(`"${c.slice(0, 40)}"\n   -> "${String(r.answer?.content ?? "").slice(0, 100)}"  [slots ${done}/${cap?.slots?.length ?? 0} status=${cap?.status ?? "-"} pending=${cap?.pending ?? "-"} declined=${(cap?.data?.declined_slots ?? "none").slice(0, 40)}]`);
   return r;
 };
 await say("I'd like to book an appointment");
