@@ -142,6 +142,62 @@ export const api = {
     get<{ items: MessageRow[]; total: number }>(`/v1/conversations/${conversationId}/messages?workspaceId=${getWorkspace()!.id}`),
   send: (conversationId: string, content: string) =>
     post<TurnTrace>(`/v1/conversations/${conversationId}/messages`, { workspaceId: getWorkspace()!.id, content }),
+  /**
+   * Streaming turn: SSE deltas stream in as `partial` (live typing preview),
+   * resolves with the full TurnTrace on the final event (harness verdict may
+   * have replaced the preview). Fast paths reply with plain JSON — handled here.
+   */
+  sendStream: async (conversationId: string, content: string, onDelta: (partial: string) => void): Promise<TurnTrace> => {
+    const ws = getWorkspace();
+    const token = getToken();
+    const res = await fetch(`${BASE}/v1/conversations/${conversationId}/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(ws ? { "x-workspace-id": ws.id } : {}),
+      },
+      body: JSON.stringify({ workspaceId: ws!.id, content, stream: true }),
+    });
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.includes("text/event-stream")) {
+      const text = await res.text();
+      let data: unknown = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = { error: text };
+      }
+      if (!res.ok) throw new ApiError((data as { error?: string } | null)?.error ?? `request failed (${res.status})`, res.status);
+      return data as TurnTrace;
+    }
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let final: TurnTrace | null = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop() ?? "";
+      for (const frame of frames) {
+        const line = frame.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        try {
+          const j = JSON.parse(line.slice(5).trim()) as { type?: string; text?: string; message?: string } & TurnTrace;
+          if (j.type === "delta") onDelta(String(j.text ?? ""));
+          else if (j.type === "final") final = j;
+          else if (j.type === "error") throw new ApiError(String(j.message ?? "stream failed"), 500);
+        } catch (err) {
+          if (err instanceof ApiError) throw err;
+          // unparsable frame — skip
+        }
+      }
+    }
+    if (!final) throw new ApiError("stream ended without a final answer", 502);
+    return final;
+  },
 };
 
 export interface WorkspaceLite {

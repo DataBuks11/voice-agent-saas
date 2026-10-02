@@ -7,7 +7,7 @@ import { validateResponse } from "@voice-agent/harness";
 import { getSupabase } from "../lib/supabase.js";
 import { requireTenant } from "../lib/tenant.js";
 import { embedAll } from "../lib/embeddings.js";
-import { complete } from "../lib/llm.js";
+import { complete, completeStream } from "../lib/llm.js";
 
 const createConversationSchema = z.object({
   workspaceId: z.string().uuid(),
@@ -20,6 +20,8 @@ const messageSchema = z.object({
   workspaceId: z.string().uuid(),
   content: z.string().min(1),
   agentId: z.string().uuid().optional(),
+  /** Ask for an SSE stream (first token ~600ms); server falls back to JSON on fast paths. */
+  stream: z.boolean().optional(),
 });
 
 /** Platform tools advertised to the decision engine. */
@@ -283,6 +285,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     let answerSource: string;
     let contextInfo = { usedTokens: 0, truncated: false, includedChunkIds: [] as string[] };
     const toolResults: ToolResult[] = [];
+    let streamed = false;
 
     const tool = decision.route === "use_tools" ? decision.requiredTools?.[0] : undefined;
 
@@ -344,20 +347,48 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         customerMemory: [],
         maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
       });
-      const tLlm = Date.now();
-      const llmResult = await complete({
+      const opts = {
         system: systemWithStyle(ctx.systemPrompt),
         context: ctx.contextText,
         user: body.content,
         fallback: agent.fallbackResponse,
-      });
-      llmMs = Date.now() - tLlm;
-      verdict = validateResponse(llmResult.text, retrieved, {
-        fallbackResponse: agent.fallbackResponse,
-      });
-      answerText = verdict.safeText;
-      answerSource = llmResult.source;
+      };
       contextInfo = { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds };
+      if (retrieved.length === 0) {
+        // Nothing grounded to answer from (no docs / embed failed / no hit):
+        // never call the LLM — instant, hallucination-proof fallback.
+        answerText = agent.fallbackResponse;
+        verdict = { ok: false, confidence: 0, issues: ["no knowledge context retrieved"], safeText: answerText };
+        answerSource = "fallback";
+      } else {
+        if (body.stream) {
+          // First token paints live; final event below carries the harness verdict
+          // (which may replace the preview with the safe/fallback text).
+          streamed = true;
+          reply.hijack();
+          reply.raw.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          });
+        }
+        const writeDelta = (d: string) => {
+          try {
+            reply.raw.write(`data: ${JSON.stringify({ type: "delta", text: d })}\n\n`);
+          } catch {
+            // client disconnected mid-stream
+          }
+        };
+        const tLlm = Date.now();
+        const llmResult = streamed ? await completeStream(opts, writeDelta) : await complete(opts);
+        llmMs = Date.now() - tLlm;
+        verdict = validateResponse(llmResult.text, retrieved, {
+          fallbackResponse: agent.fallbackResponse,
+        });
+        answerText = verdict.safeText;
+        answerSource = llmResult.source;
+      }
     }
 
     const now = new Date().toISOString();
@@ -370,7 +401,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       citations: retrieved.map((r) => r.id),
     };
     const { data: saved, error: saveErr } = await db.from("messages").insert([userMsg, assistantMsg]).select("id, role, content, citations, created_at");
-    if (saveErr) throw Object.assign(new Error(`message persist failed: ${saveErr.message}`), { status: 500 });
+    if (saveErr && !streamed) throw Object.assign(new Error(`message persist failed: ${saveErr.message}`), { status: 500 });
 
     const [savedUser, savedAssistant] = saved ?? [];
     // Structured turn timing — grep "evt":"turn" in logs to watch latency stages.
@@ -385,9 +416,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         embedMs,
         llmMs,
         totalMs: Date.now() - t0,
+        ...(streamed ? { stream: true } : {}),
       }),
     );
-    return reply.status(201).send({
+    const responsePayload = {
       conversationId,
       decision,
       verdict: { ok: verdict.ok, confidence: verdict.confidence, issues: verdict.issues },
@@ -397,6 +429,27 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       toolResults,
       retrieved: retrieved.map((r) => ({ id: r.id, documentId: r.documentId, score: r.score, text: r.content.slice(0, 200) })),
       context: contextInfo,
-    });
+    };
+    if (streamed) {
+      try {
+        if (saveErr) throw new Error(`message persist failed: ${saveErr.message}`);
+        reply.raw.write(`data: ${JSON.stringify({ type: "final", ...responsePayload })}\n\n`);
+      } catch (err) {
+        console.error(`stream finalize failed: ${(err as Error).message}`);
+        try {
+          reply.raw.write(`data: ${JSON.stringify({ type: "error", message: (err as Error).message })}\n\n`);
+        } catch {
+          // client already gone
+        }
+      } finally {
+        try {
+          reply.raw.end();
+        } catch {
+          // client already gone
+        }
+      }
+      return reply;
+    }
+    return reply.status(201).send(responsePayload);
   });
 }

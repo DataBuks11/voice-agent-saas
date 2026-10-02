@@ -52,9 +52,14 @@ export function ConversationsPage() {
     setBusy(true);
     const text = input.trim();
     setInput("");
-    setMessages((m) => [...m, { id: `tmp-${Date.now()}`, role: "user", content: text, citations: [], createdAt: new Date().toISOString() }]);
+    setMessages((m) => [...m, { id: `tmp-u-${Date.now()}`, role: "user", content: text, citations: [], createdAt: new Date().toISOString() }]);
     try {
-      const turn = await api.send(active, text);
+      const turn = await api.sendStream(active, text, (partial) => {
+        setMessages((m) => {
+          const bubble = { id: "tmp-a", role: "assistant" as const, content: partial, citations: [] as string[], createdAt: new Date().toISOString() };
+          return m.some((x) => x.id === "tmp-a") ? m.map((x) => (x.id === "tmp-a" ? bubble : x)) : [...m, bubble];
+        });
+      });
       setTrace(turn);
       if (turn.toolResults?.length) {
         setToolLinks((prev) => ({ ...prev, [turn.answer.id]: turn.toolResults as ToolResultRow[] }));
