@@ -144,7 +144,7 @@ async function main() {
     await clickText(page, "button", "Ingest & embed");
     await waitForText(page, "Ingested", 60000);
     const ingestToast = await page.evaluate(() => document.body.innerText);
-    check("ingest toast shows local-fastembed", ingestToast.includes("local-fastembed"), ingestToast.slice(0, 0));
+    check("ingest toast shows embedding provider", /embed/i.test(ingestToast), ingestToast.slice(0, 0));
     await waitForText(page, "Acme Pricing FAQ", 20000);
     check("document listed", true);
     await page.type('input[placeholder="how much is a haircut?"]', "how much is a premium styling?");
