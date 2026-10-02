@@ -10,6 +10,7 @@ import asyncio
 import io
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -144,14 +145,35 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default=os.getenv("VOICE_URL", "ws://localhost:8080"))
+    ap.add_argument("--url", default=os.getenv("VOICE_URL", "wss://voice-runtime-production-dc24.up.railway.app"))
     ap.add_argument("--api", default=os.getenv("API_BASE_URL", "https://voice-agent-saas-production-3001.up.railway.app"))
     ap.add_argument("--timeout", type=float, default=180.0)
+    ap.add_argument("--mode", choices=["audio", "text", "both"], default=os.getenv("VOICE_E2E_MODE", "both"))
     args = ap.parse_args()
-    token, ws_id = asyncio.run(seed_tenant(args.api))
-    rc1 = asyncio.run(run_session(args.url, args.api, token, ws_id, args.timeout, mode="audio"))
-    rc2 = asyncio.run(run_session(args.url, args.api, token, ws_id, args.timeout, mode="text"))
-    return rc1 or rc2
+
+    # Each mode runs in its own process: a completed audio session leaves the
+    # shared runtime busy long enough to swallow the next connection's frames.
+    if args.mode == "both":
+        token = os.environ.get("VOICE_E2E_TOKEN")
+        ws_id = os.environ.get("VOICE_E2E_WS")
+        if not token or not ws_id:
+            token, ws_id = asyncio.run(seed_tenant(args.api))
+        env = {**os.environ, "VOICE_E2E_TOKEN": token, "VOICE_E2E_WS": ws_id}
+        rc = 0
+        for mode in ("audio", "text"):
+            print(f"\n=== {mode} session ===")
+            child = subprocess.run(
+                [sys.executable, __file__, "--url", args.url, "--api", args.api, "--timeout", str(args.timeout), "--mode", mode],
+                env=env,
+            )
+            rc |= child.returncode
+        return rc
+
+    token = os.environ.get("VOICE_E2E_TOKEN")
+    ws_id = os.environ.get("VOICE_E2E_WS")
+    if not token or not ws_id:
+        token, ws_id = asyncio.run(seed_tenant(args.api))
+    return asyncio.run(run_session(args.url, args.api, token, ws_id, args.timeout, mode=args.mode))
 
 
 if __name__ == "__main__":

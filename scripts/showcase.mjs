@@ -79,7 +79,8 @@ const trunc = (s, n = 110) => (s || "").replace(/\s+/g, " ").slice(0, n);
     "new patient",
     "M-A-Y-A P-A-T-E-L",
     "yes",
-    null,
+    "P-A-T-E-L",
+    "yes",
     "January 12th 1990",
     "yes",
     "a consultation",
@@ -93,7 +94,6 @@ const trunc = (s, n = 110) => (s || "").replace(/\s+/g, " ").slice(0, n);
   ];
   let cal = null;
   for (const line of bookingScript) {
-    if (line === null) continue;
     r = await call("POST", `/v1/conversations/${cid}/messages`, { workspaceId: ws, content: line });
     const found = (r.json?.toolResults ?? []).find((t) => t.type === "calendar");
     if (found) cal = found;
