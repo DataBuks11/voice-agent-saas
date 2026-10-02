@@ -64,6 +64,10 @@ async function main() {
   page.on("response", (r) => {
     if (r.status() >= 400 && !r.url().includes("favicon")) netErrors.push(`${r.status()} ${r.request().method()} ${r.url()}`);
   });
+  page.on("requestfailed", (r) => {
+    const err = r.failure()?.errorText ?? "failed";
+    if (!/ERR_ABORTED/.test(err) && !r.url().includes("favicon")) netErrors.push(`REQFAIL ${r.method()} ${r.url()} (${err})`);
+  });
   page.on("console", (m) => {
     if (m.type() === "error" && !/Failed to load resource/i.test(m.text())) consoleErrors.push(`console: ${m.text()}`);
   });
@@ -153,8 +157,17 @@ async function main() {
     console.log("\n[7] Conversation turn (LLM + harness)");
     await clickText(page, "a.nav-link", "Conversations");
     await page.waitForFunction(() => location.pathname.endsWith("/conversations"), { timeout: 15000 });
+    await page.waitForSelector("button", { timeout: 15000 });
     await clickText(page, "button", "+ New conversation");
-    await page.waitForSelector('input[placeholder="Ask the agent…"]', { timeout: 30000 });
+    try {
+      await page.waitForSelector('input[placeholder="Ask the agent…"]', { timeout: 30000 });
+    } catch {
+      const diag = await page.evaluate(() => ({
+        convos: document.body.innerText.slice(0, 400),
+        toasts: [...document.querySelectorAll(".toast")].map((t) => t.textContent).join(" | "),
+      }));
+      throw new Error(`composer missing — toasts: ${diag.toasts || "(none)"} | body: ${diag.convos.replace(/\n+/g, " / ").slice(0, 200)}`);
+    }
     await page.type('input[placeholder="Ask the agent…"]', "How much is a premium styling and when are you open?");
     await clickText(page, "button", "Send");
     await waitForText(page, "900", 120000); // grounded answer price
