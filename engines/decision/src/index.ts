@@ -19,7 +19,7 @@ export function ruleFallback(text: string, hasKnowledge: boolean, toolsAvailable
   const hasTool = (name: string) => toolsAvailable.includes(name);
   if (
     hasTool("book_appointment") &&
-    /\b(book|booking|booked|appointment|schedule|slot|reserve|reservation)\b/.test(t)
+    /\b(book|booking|booked|appointment|schedule|slot|reserve|reservation|meeting|meet up|meet)\b/.test(t)
   ) {
     return { route: "use_tools", confidence: 0.75, reason: "booking intent + calendar tool", requiredTools: ["book_appointment"] };
   }

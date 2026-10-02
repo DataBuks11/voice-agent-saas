@@ -49,6 +49,9 @@ async def shared_models() -> tuple[STTProvider, TTSProvider]:
             try:
                 await _stt.transcribe(b"\x00" * 3200, SAMPLE_RATE)
                 await _tts.synthesize("Warm up.")
+                backup = getattr(_tts, "backup", None)
+                if backup is not None:
+                    await backup.synthesize("Warm up.")
                 log.info("providers warmed in %.2fs", __import__("time").time() - t0)
             except Exception:  # noqa: BLE001 - warming must never block startup
                 log.exception("provider warm-up failed (continuing)")
@@ -65,7 +68,7 @@ class Session:
         self.llm: ApiLLM | None = None
         self.vad = Vad(VadConfig(), SAMPLE_RATE)
         self.partial = bytearray()
-        self.queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2)
+        self.queue: asyncio.Queue[tuple[str, bytes | str]] = asyncio.Queue(maxsize=2)
         self.worker: asyncio.Task | None = None
         self.interrupted = False
         self.turn_active = False
@@ -197,7 +200,7 @@ class Session:
 
     async def _turn_worker(self) -> None:
         while True:
-            pcm = await self.queue.get()
+            kind, payload = await self.queue.get()
             self.interrupted = False
             self.turn_active = True
             try:
@@ -205,7 +208,10 @@ class Session:
                     await self.send_json({"type": "user", "text": text})
 
                 assert self.pipeline is not None
-                answer = await self.pipeline.handle_audio(pcm, on_transcript=on_transcript)
+                if kind == "text":
+                    answer = await self.pipeline.handle_text(payload, on_transcript=on_transcript)
+                else:
+                    answer = await self.pipeline.handle_audio(payload, on_transcript=on_transcript)
                 if answer and not self.interrupted:
                     await self.send_json({"type": "assistant", "text": answer})
                     await self._speak(answer)
@@ -215,7 +221,7 @@ class Session:
             finally:
                 self.turn_active = False
 
-    async def enqueue_utterance(self, pcm: bytes) -> None:
+    async def enqueue(self, kind: str, payload) -> None:
         if self.turn_active or not self.queue.empty():
             self.interrupted = True
             if self.queue.full():
@@ -223,7 +229,10 @@ class Session:
                     self.queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-        await self.queue.put(pcm)
+        await self.queue.put((kind, payload))
+
+    async def enqueue_utterance(self, pcm: bytes) -> None:
+        await self.enqueue("audio", pcm)
 
     # --- receive loop ---
     async def run(self) -> None:
@@ -257,6 +266,11 @@ class Session:
                 kind = msg.get("type")
                 if kind == "start":
                     await self.start(msg)
+                elif kind == "text":
+                    # Browser Web Speech API transcript — STT already done client-side.
+                    text = str(msg.get("text") or "").strip()
+                    if text and self.started and self.pipeline is not None:
+                        await self.enqueue("text", text)
                 elif kind == "interrupt":
                     self.interrupted = True
                     if self.pipeline is not None:

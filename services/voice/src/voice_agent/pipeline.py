@@ -50,14 +50,30 @@ class VoicePipeline:
         if not tr.text:
             log.info("stage stt %.2fs (empty)", t_stt - t0)
             return ""
-        self.state.add("user", tr.text)
+        return await self._complete_turn(tr.text, on_transcript, t0=t0, t_stt=t_stt)
+
+    async def handle_text(self, text: str, on_transcript=None) -> str:
+        """Browser-side STT (Web Speech API) arrives as text — skip server STT entirely."""
+        import time as _time
+
+        t0 = _time.time()
+        if not text.strip():
+            return ""
+        return await self._complete_turn(text, on_transcript, t0=t0, t_stt=None)
+
+    async def _complete_turn(self, text: str, on_transcript, t0=None, t_stt=None) -> str:
+        import time as _time
+
+        self.state.add("user", text)
         if on_transcript is not None:
-            result = on_transcript(tr.text)
+            result = on_transcript(text)
             if result is not None and hasattr(result, "__await__"):
                 await result
-        answer = await self.llm.complete(system="You are a helpful voice assistant.", context=self.state.history_text(), user=tr.text)
-        t_llm = _time.time()
-        log.info("stage stt %.2fs llm %.2fs", t_stt - t0, t_llm - t_stt)
+        answer = await self.llm.complete(system="You are a helpful voice assistant.", context=self.state.history_text(), user=text)
+        if t_stt is not None:
+            log.info("stage stt %.2fs llm %.2fs", t_stt - t0, _time.time() - t_stt)
+        elif t0 is not None:
+            log.info("stage text llm %.2fs", _time.time() - t0)
         self.state.add("assistant", answer)
         self.interrupted = False
         return answer

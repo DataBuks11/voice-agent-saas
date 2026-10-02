@@ -75,15 +75,22 @@ async def seed_tenant(api: str) -> tuple[str, str]:
         return token, ws_id
 
 
-async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float) -> int:
-    pcm = await asyncio.to_thread(speak_to_pcm16, QUESTION)
-    silence = b"\x00" * (16000 * 2)  # 1s endpoint silence
-    print(f"[audio] utterance {len(pcm)} bytes (~{len(pcm)/2/16000:.1f}s)")
+async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float, mode: str = "audio") -> int:
+    if mode == "text":
+        pcm = None
+        print(f"[text] {QUESTION!r} (browser-STT turn — server STT skipped)")
+    else:
+        pcm = await asyncio.to_thread(speak_to_pcm16, QUESTION)
+        silence = b"\x00" * (16000 * 2)  # 1s endpoint silence
+        print(f"[audio] utterance {len(pcm)} bytes (~{len(pcm)/2/16000:.1f}s)")
     t0 = time.time()
     got = {"user": None, "assistant": None, "audio": 0, "ready": None, "errors": []}
     async with websockets.connect(url, max_size=2**24, open_timeout=30) as ws:
         await ws.send(json.dumps({"type": "start", "token": token, "workspaceId": ws_id}))
-        await ws.send(pcm + silence)
+        if mode == "text":
+            await ws.send(json.dumps({"type": "text", "text": QUESTION}))
+        else:
+            await ws.send(pcm + silence)
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -131,7 +138,7 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
         print("FAIL: no TTS audio"); ok = False
     if got["errors"]:
         print(f"FAIL: errors {got['errors']}"); ok = False
-    print("VOICE E2E PASS" if ok else "VOICE E2E FAIL")
+    print(f"VOICE E2E[{mode}] " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
 
@@ -142,7 +149,9 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=180.0)
     args = ap.parse_args()
     token, ws_id = asyncio.run(seed_tenant(args.api))
-    return asyncio.run(run_session(args.url, args.api, token, ws_id, args.timeout))
+    rc1 = asyncio.run(run_session(args.url, args.api, token, ws_id, args.timeout, mode="audio"))
+    rc2 = asyncio.run(run_session(args.url, args.api, token, ws_id, args.timeout, mode="text"))
+    return rc1 or rc2
 
 
 if __name__ == "__main__":

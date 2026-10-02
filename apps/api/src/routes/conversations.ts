@@ -74,6 +74,12 @@ function todayInfo(): string {
 
 const systemWithStyle = (base: string) => `${base}\n\n${todayInfo()}\n\n${VOICE_STYLE}`;
 
+/** Workspace has no documents yet — chat like a helpful assistant, never invent business facts. */
+const UNGROUNDED_NOTE = `# Knowledge status
+No business documents have been uploaded yet — there is nothing to look facts up in.
+- Be a warm, natural, helpful general assistant and keep the conversation flowing (like a friendly chatbot).
+- For specific business facts (prices, hours, address, policies, availability), say you'll get those details from the team — never invent them.`;
+
 async function loadAgent(workspaceId: string, agentId: string | undefined): Promise<Agent> {
   const db = getSupabase();
   const query = db.from("agents").select().eq("workspace_id", workspaceId);
@@ -416,26 +422,30 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         fallback: agent.fallbackResponse,
       };
       contextInfo = { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds };
-      if (retrieved.length === 0) {
-        // Nothing grounded to answer from (no docs / embed failed / no hit):
+      if (retrieved.length === 0 && docCount > 0) {
+        // Docs exist but nothing was retrieved (embed failed / no hit):
         // never call the LLM — instant, hallucination-proof fallback.
         answerText = agent.fallbackResponse;
         verdict = { ok: false, confidence: 0, issues: ["no knowledge context retrieved"], safeText: answerText };
         answerSource = "fallback";
         writeDelta(answerText);
       } else {
-        // First token paints live; the final event below carries the harness verdict
-        // (which may replace the preview with the safe/fallback text).
+        // Ungrounded (no docs yet): chat like a normal assistant, never invent facts.
+        // Grounded (retrieved > 0): stream live, harness verdict replaces preview if needed.
+        const ungrounded = docCount === 0;
+        const llmOpts = ungrounded ? { ...opts, system: `${opts.system}\n\n${UNGROUNDED_NOTE}` } : opts;
         const tLlm = Date.now();
-        const llmResult = streamed ? await completeStream(opts, writeDelta) : await complete(opts);
+        const llmResult = streamed ? await completeStream(llmOpts, writeDelta) : await complete(llmOpts);
         llmMs = Date.now() - tLlm;
-        verdict = validateResponse(llmResult.text, retrieved, {
-          fallbackResponse: agent.fallbackResponse,
-        });
-        answerText = verdict.safeText;
-        answerSource = llmResult.source;
-        // The final event below carries verdict.safeText — it replaces any streamed
-        // preview on the client when the harness had to fall back.
+        answerText = llmResult.text;
+        if (ungrounded) {
+          verdict = { ok: true, confidence: 0.5, issues: ["ungrounded — no documents uploaded"], safeText: answerText };
+          answerSource = "llm-ungrounded";
+        } else {
+          verdict = validateResponse(llmResult.text, retrieved, { fallbackResponse: agent.fallbackResponse });
+          answerText = verdict.safeText;
+          answerSource = llmResult.source;
+        }
       }
     }
 

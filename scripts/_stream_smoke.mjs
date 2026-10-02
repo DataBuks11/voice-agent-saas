@@ -62,17 +62,19 @@ async function runStream(ws, token, conv, content) {
 const { token } = await j("/v1/auth/register", { method: "POST", body: JSON.stringify({ email, password: pass, name: "Stream" }) });
 const ws = (await j("/v1/workspaces", { method: "POST", body: JSON.stringify({ name: "StreamWS" }) }, token)).id;
 
-// 1) No knowledge, JSON (harness contract): instant fallback, no LLM
+// 1) No knowledge, JSON: direct LLM chatbot (never refusal-fallback)
 const conv1 = (await j("/v1/conversations", { method: "POST", body: JSON.stringify({ workspaceId: ws, channel: "web" }) }, token, ws)).id;
 const t1 = Date.now();
 const plain = await j(`/v1/conversations/${conv1}/messages`, { method: "POST", body: JSON.stringify({ workspaceId: ws, content: "How much is a haircut?" }) }, token, ws);
-console.log(`[json fallback] ${Date.now() - t1}ms src=${plain.answerSource} ok=${plain.verdict.ok}`);
-if (plain.answerSource !== "fallback") { console.error("FAIL: expected fallback source"); process.exit(1); }
+console.log(`[json ungrounded] ${Date.now() - t1}ms src=${plain.answerSource} ok=${plain.verdict.ok}`);
+if (plain.answerSource !== "llm-ungrounded") { console.error(`FAIL: expected llm-ungrounded, got ${plain.answerSource}`); process.exit(1); }
+if (String(plain.answer?.content ?? "").length < 10) { console.error("FAIL: empty ungrounded answer"); process.exit(1); }
 
-// 2) No knowledge, streamed: answer paints BEFORE persist
+// 2) No knowledge, streamed: LLM answer paints live (no retrieval, no embed)
 const s1 = await runStream(ws, token, conv1, "Do you offer student discounts?");
-console.log(`[stream fallback] first=${s1.firstDelta}ms final=${s1.final.at}ms src=${s1.final.answerSource} preview="${s1.preview.slice(0, 50)}"`);
-if (s1.firstDelta === null || s1.firstDelta > 900) { console.error(`FAIL: fallback first delta ${s1.firstDelta}ms > 900ms`); process.exit(1); }
+console.log(`[stream ungrounded] first=${s1.firstDelta}ms final=${s1.final.at}ms src=${s1.final.answerSource} preview="${s1.preview.slice(0, 50)}"`);
+if (s1.firstDelta === null || s1.firstDelta > 1400) { console.error(`FAIL: ungrounded first delta ${s1.firstDelta}ms > 1400ms`); process.exit(1); }
+if (s1.final.answerSource !== "llm-ungrounded") { console.error(`FAIL: stream src ${s1.final.answerSource}`); process.exit(1); }
 
 // 3) With knowledge: live token stream + grounded final
 await j("/v1/knowledge/ingest", { method: "POST", body: JSON.stringify({ workspaceId: ws, title: "Acme Pricing FAQ", markdown: "# Prices\nStandard haircut is 400 INR and takes 30 minutes.\nBeard trim is 150 INR.\nOpening hours are 9am to 8pm, Monday to Saturday." }) }, token, ws);
@@ -83,4 +85,4 @@ if (s2.firstDelta === null || s2.firstDelta > 1600) { console.error(`FAIL: knowl
 if (!s2.final.answer.content.includes("400")) { console.error("FAIL: ungrounded final"); process.exit(1); }
 if (s2.final.at <= s2.firstDelta) { console.error("FAIL: final should follow first delta"); process.exit(1); }
 
-console.log(`STREAM SMOKE PASS (fallback paint ${s1.firstDelta}ms, knowledge first token ${s2.firstDelta}ms, full ${s2.final.at}ms)`);
+console.log(`STREAM SMOKE PASS (ungrounded paint ${s1.firstDelta}ms, knowledge first token ${s2.firstDelta}ms, full ${s2.final.at}ms)`);

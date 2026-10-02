@@ -30,12 +30,22 @@ export function VoicePage() {
   const micCtxRef = React.useRef<AudioContext | null>(null);
   const micNodeRef = React.useRef<ScriptProcessorNode | null>(null);
   const playCtxRef = React.useRef<AudioContext | null>(null);
-  const playSrcRef = React.useRef<AudioBufferSourceNode | null>(null);
   const chunksRef = React.useRef<Uint8Array[]>([]);
   const rateRef = React.useRef<number | null>(null);
   const pingRef = React.useRef<number | null>(null);
   const timerRef = React.useRef<number | null>(null);
   const lineIdRef = React.useRef(1);
+  const recogRef = React.useRef<any>(null);
+  const recogWantedRef = React.useRef(false);
+  const recogPausedRef = React.useRef(false);
+  const recogActiveRef = React.useRef(false);
+  const playNextRef = React.useRef<number | null>(null);
+  const playNodesRef = React.useRef<AudioBufferSourceNode[]>([]);
+  const playEndTimerRef = React.useRef<number | null>(null);
+
+  const speechSupported =
+    typeof window !== "undefined" &&
+    Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
   const active = status === "live" || status === "connecting";
 
@@ -43,12 +53,97 @@ export function VoicePage() {
     setLines((prev) => [...prev, { id: lineIdRef.current++, role, text }].slice(-60));
   }, []);
 
+  const setupRecognition = React.useCallback(
+    (socket: WebSocket) => {
+      const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (!SR) return;
+      try {
+        const rec = new SR();
+        rec.lang = "en-US";
+        rec.continuous = true;
+        rec.interimResults = false;
+        rec.maxAlternatives = 1;
+        rec.onresult = (ev: any) => {
+          for (let i = ev.resultIndex; i < ev.results.length; i++) {
+            const r = ev.results[i];
+            if (!r.isFinal) continue;
+            const text = String(r[0]?.transcript ?? "").trim();
+            if (text && socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "text", text }));
+            }
+          }
+        };
+        rec.onerror = (ev: any) => {
+          const err = String(ev?.error ?? "");
+          if (err === "not-allowed" || err === "service-not-allowed") {
+            pushLine("system", "browser speech blocked — falling back to server whisper");
+            recogWantedRef.current = false;
+            startMic(socket);
+          } else if (err !== "no-speech" && err !== "aborted" && err !== "network") {
+            pushLine("system", `speech recognition: ${err}`);
+          }
+        };
+        rec.onend = () => {
+          recogActiveRef.current = false;
+          if (recogWantedRef.current && !recogPausedRef.current) {
+            try {
+              rec.start();
+              recogActiveRef.current = true;
+            } catch {
+              /* next result cycle retries */
+            }
+          }
+        };
+        recogRef.current = rec;
+      } catch (err) {
+        pushLine("system", `speech recognition init failed: ${(err as Error).message}`);
+      }
+    },
+    [pushLine],
+  );
+
+  const ensureRecog = React.useCallback(() => {
+    if (!recogWantedRef.current || recogPausedRef.current || recogActiveRef.current || !recogRef.current) return;
+    try {
+      recogRef.current.start();
+      recogActiveRef.current = true;
+    } catch {
+      /* already started */
+    }
+  }, []);
+
+  const pauseRecog = React.useCallback(() => {
+    recogPausedRef.current = true;
+    if (recogActiveRef.current && recogRef.current) {
+      try {
+        recogRef.current.stop();
+      } catch {
+        /* noop */
+      }
+      recogActiveRef.current = false;
+    }
+  }, []);
+
+  const resumeRecog = React.useCallback(() => {
+    recogPausedRef.current = false;
+    ensureRecog();
+  }, [ensureRecog]);
+
   React.useEffect(() => {
     api.listAgents().then((r) => setAgents(r.items)).catch(() => undefined);
     return () => undefined;
   }, []);
 
   const teardown = React.useCallback(() => {
+    recogWantedRef.current = false;
+    recogPausedRef.current = false;
+    recogActiveRef.current = false;
+    try {
+      recogRef.current?.stop();
+    } catch {
+      /* noop */
+    }
+    recogRef.current = null;
     if (pingRef.current) window.clearInterval(pingRef.current);
     if (timerRef.current) window.clearInterval(timerRef.current);
     pingRef.current = null;
@@ -69,12 +164,18 @@ export function VoicePage() {
     }
     micNodeRef.current = null;
     micCtxRef.current = null;
-    try {
-      playSrcRef.current?.stop();
-    } catch {
-      /* noop */
+    for (const n of playNodesRef.current) {
+      try {
+        n.onended = null;
+        n.stop();
+      } catch {
+        /* noop */
+      }
     }
-    playSrcRef.current = null;
+    playNodesRef.current = [];
+    playNextRef.current = null;
+    if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
+    playEndTimerRef.current = null;
     try {
       playCtxRef.current?.close();
     } catch {
@@ -91,18 +192,87 @@ export function VoicePage() {
   React.useEffect(() => teardown, [teardown]);
 
   const stopPlayback = React.useCallback(() => {
-    try {
-      if (playSrcRef.current) {
-        playSrcRef.current.onended = null;
-        playSrcRef.current.stop();
+    for (const n of playNodesRef.current) {
+      try {
+        n.onended = null;
+        n.stop();
+      } catch {
+        /* noop */
       }
-    } catch {
-      /* noop */
     }
-    playSrcRef.current = null;
+    playNodesRef.current = [];
+    playNextRef.current = null;
+    if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
+    playEndTimerRef.current = null;
     chunksRef.current = [];
     rateRef.current = null;
-  }, []);
+    resumeRecog();
+  }, [resumeRecog]);
+
+  const finishPlayback = React.useCallback(() => {
+    if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
+    playEndTimerRef.current = null;
+    playNodesRef.current = [];
+    playNextRef.current = null;
+    chunksRef.current = [];
+    rateRef.current = null;
+    setVoiceState((s) => (s === "speaking" ? "listening" : s));
+    resumeRecog();
+  }, [resumeRecog]);
+
+  const schedulePlayEnd = (ms: number) => {
+    if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
+    playEndTimerRef.current = window.setTimeout(() => finishPlayback(), Math.max(50, ms));
+  };
+
+  /** Incremental playback: schedule complete 4096-sample blocks as bytes stream in
+   *  (first audio paints before the whole reply is synthesized). */
+  const flushAudio = (final: boolean) => {
+    const rate = rateRef.current;
+    if (!rate) return;
+    const parts = chunksRef.current;
+    const total = parts.reduce((s, p) => s + p.byteLength, 0);
+    if (total < 2) return;
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      merged.set(p, off);
+      off += p.byteLength;
+    }
+    chunksRef.current = [];
+    const blockSize = 8192; // 4096 samples @ any rate
+    const processLen = final
+      ? merged.byteLength - (merged.byteLength % 2)
+      : Math.floor(merged.byteLength / blockSize) * blockSize;
+    if (processLen === 0) {
+      chunksRef.current = [merged];
+      return;
+    }
+    const block = merged.subarray(0, processLen);
+    const leftover = merged.subarray(processLen);
+    if (leftover.byteLength) chunksRef.current = [new Uint8Array(leftover)];
+    try {
+      const ctx = playCtxRef.current ?? new AudioContext();
+      playCtxRef.current = ctx;
+      void ctx.resume();
+      const pcm = new Int16Array(block.buffer, block.byteOffset, block.byteLength / 2);
+      const buffer = ctx.createBuffer(1, pcm.length, rate);
+      const ch = buffer.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+      const node = ctx.createBufferSource();
+      node.buffer = buffer;
+      node.connect(ctx.destination);
+      const now = ctx.currentTime;
+      if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.05;
+      node.start(playNextRef.current);
+      playNextRef.current += buffer.duration;
+      playNodesRef.current.push(node);
+      if (final) schedulePlayEnd((playNextRef.current - ctx.currentTime) * 1000 + 150);
+    } catch (err) {
+      pushLine("system", `playback failed: ${(err as Error).message}`);
+      finishPlayback();
+    }
+  };
 
   const start = async () => {
     const ws = getWorkspace();
@@ -127,6 +297,7 @@ export function VoicePage() {
       const socket = new WebSocket(WS_URL);
       socket.binaryType = "arraybuffer";
       wsRef.current = socket;
+      if (speechSupported) setupRecognition(socket);
 
       socket.onopen = () => {
         socket.send(
@@ -153,7 +324,10 @@ export function VoicePage() {
       socket.onmessage = (ev) => {
         if (typeof ev.data !== "string") {
           const buf = ev.data as ArrayBuffer;
-          if (rateRef.current != null) chunksRef.current.push(new Uint8Array(buf));
+          if (rateRef.current != null) {
+            chunksRef.current.push(new Uint8Array(buf));
+            flushAudio(false);
+          }
           return;
         }
         let msg: Record<string, unknown>;
@@ -167,7 +341,14 @@ export function VoicePage() {
           setStatus("live");
           setVoiceState("listening");
           pushLine("system", `session ready · conversation ${(msg.conversationId as string)?.slice(0, 8)}…`);
-          startMic(socket);
+          if (speechSupported && recogRef.current) {
+            recogWantedRef.current = true;
+            recogPausedRef.current = false;
+            pushLine("system", "browser STT active — transcripts sent as text turns (~0.2s)");
+            ensureRecog();
+          } else {
+            startMic(socket);
+          }
           if (!timerRef.current) {
             const t0 = Date.now();
             timerRef.current = window.setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
@@ -179,11 +360,16 @@ export function VoicePage() {
         } else if (type === "assistant") {
           pushLine("assistant", msg.text as string);
         } else if (type === "audio_start") {
-          rateRef.current = Number(msg.sampleRate ?? 22050);
+          rateRef.current = Number(msg.sampleRate ?? 24000);
           chunksRef.current = [];
+          playNextRef.current = null;
+          if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
+          playEndTimerRef.current = null;
           setVoiceState("speaking");
+          pauseRecog();
         } else if (type === "audio_end") {
-          playChunks();
+          if (chunksRef.current.length === 0 && playNodesRef.current.length === 0) finishPlayback();
+          else flushAudio(true);
         } else if (type === "pong") {
           /* keepalive */
         } else if (type === "error") {
@@ -222,65 +408,12 @@ export function VoicePage() {
     }
   };
 
-  const playChunks = () => {
-    const rate = rateRef.current;
-    const parts = chunksRef.current;
-    rateRef.current = null;
-    chunksRef.current = [];
-    if (!rate || parts.length === 0) {
-      setVoiceState("listening");
-      return;
-    }
-    const total = parts.reduce((s, p) => s + p.byteLength, 0);
-    const merged = new Uint8Array(total);
-    let off = 0;
-    for (const p of parts) {
-      merged.set(p, off);
-      off += p.byteLength;
-    }
-    try {
-      const ctx = playCtxRef.current ?? new AudioContext();
-      playCtxRef.current = ctx;
-      void ctx.resume();
-      const pcm = new Int16Array(merged.buffer, merged.byteOffset, merged.byteLength / 2);
-      const buffer = ctx.createBuffer(1, pcm.length, rate);
-      const ch = buffer.getChannelData(0);
-      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-      stopPlaybackSrcOnly();
-      const node = ctx.createBufferSource();
-      node.buffer = buffer;
-      node.connect(ctx.destination);
-      node.onended = () => {
-        if (playSrcRef.current === node) {
-          playSrcRef.current = null;
-          setVoiceState((s) => (s === "speaking" ? "listening" : s));
-        }
-      };
-      playSrcRef.current = node;
-      node.start();
-    } catch (err) {
-      pushLine("system", `playback failed: ${(err as Error).message}`);
-      setVoiceState("listening");
-    }
-  };
-
-  const stopPlaybackSrcOnly = () => {
-    try {
-      if (playSrcRef.current) {
-        playSrcRef.current.onended = null;
-        playSrcRef.current.stop();
-      }
-    } catch {
-      /* noop */
-    }
-    playSrcRef.current = null;
-  };
-
   const interrupt = () => {
     const socket = wsRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "interrupt" }));
     stopPlayback();
     setVoiceState("listening");
+    resumeRecog();
     pushLine("system", "barge-in sent — agent stopped talking");
   };
 
@@ -306,8 +439,9 @@ export function VoicePage() {
       <div className="page-head">
         <h2>Voice</h2>
         <p>
-          Talk to your agent out loud. Mic streams 16 kHz PCM over WebSocket → whisper transcribes →
-          pgvector RAG answers → piper speaks. Interrupt anytime — just talk over it.
+          Talk to your agent out loud. The browser transcribes your speech in ~0.2s (Web Speech API,
+          server whisper as fallback) → Gemini answers → an American neural voice speaks. Tap
+          Interrupt to barge in.
         </p>
       </div>
 
@@ -356,8 +490,8 @@ export function VoicePage() {
 
             <div className="voice-hints">
               <span className="pipe-step">headphones = cleanest barge-in</span>
-              <span className="pipe-step">first reply ≈ 5–9s (STT + grounded turn + TTS)</span>
-              <span className="pipe-step">answers grounded in your knowledge</span>
+              <span className="pipe-step">first reply ≈ 2–4s (speech → gemini → tts)</span>
+              <span className="pipe-step">browser STT ≈ 0.2s · answers grounded in your knowledge</span>
             </div>
 
             <div className="voice-log">
@@ -385,9 +519,9 @@ export function VoicePage() {
             <div className="trace-item">
               <div className="k">1 · In-browser call</div>
               <div className="v">
-                Press <strong>Start call</strong>, allow the mic, and speak. VAD detects your utterance,
-                whisper transcribes it, and the RAG turn plays back through piper.{" "}
-                <strong>Interrupt</strong> (or just talk over) stops playback.
+                Press <strong>Start call</strong>, allow the mic, and speak — the browser transcribes
+                you in ~0.2s and the agent replies out loud.{" "}
+                <strong>Interrupt</strong> stops playback mid-sentence.
               </div>
             </div>
             <div className="trace-item">
@@ -399,18 +533,17 @@ export function VoicePage() {
               <div className="k">3 · Raw WebSocket</div>
               <div className="v mono">wss://voice-runtime-production-dc24.up.railway.app</div>
               <div className="hint">
-                send {"{type:start, token, workspaceId}"} then binary PCM16 @ 16 kHz; receive
-                {" ready/user/assistant/audio_start"} + binary TTS @ 22.05 kHz.
+                send {"{type:start, token, workspaceId}"} then either {"{type:text, text}"} turns or
+                binary PCM16 @ 16 kHz; receive {" ready/user/assistant/audio_start"} + binary TTS
+                {" (rate announced in audio_start)"}.
               </div>
             </div>
             <div className="trace-item">
               <div className="k">Pipeline</div>
               <div className="v">
-                <span className="badge muted">mic 16k pcm</span>{" "}
-                <span className="badge muted">energy vad</span>{" "}
-                <span className="badge muted">whisper</span>{" "}
+                <span className="badge muted">web speech stt ~0.2s</span>{" "}
                 <span className="badge muted">gemini-2.5-flash</span>{" "}
-                <span className="badge muted">sentence tts</span>
+                <span className="badge muted">american neural tts</span>
               </div>
             </div>
           </div>

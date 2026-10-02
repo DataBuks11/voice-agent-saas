@@ -154,10 +154,93 @@ def build_stt() -> STTProvider:
     return FasterWhisperSTT()
 
 
+def _mp3_to_pcm16(mp3: bytes) -> tuple[bytes, int]:
+    """edge-tts streams MP3 @ 24 kHz → decode to PCM16 mono."""
+    import io
+
+    import av
+    import numpy as np
+
+    container = av.open(io.BytesIO(mp3))
+    sr = int(container.streams.audio[0].sample_rate or 24000)
+    frames = list(container.decode(audio=0))
+    if not frames:
+        return b"", 24000
+    data = np.concatenate([f.to_ndarray().reshape(-1) for f in frames])
+    if data.dtype != np.int16:
+        data = (np.clip(data, -1.0, 1.0) * 32767.0).astype(np.int16)
+    if sr != 24000:
+        n = int(len(data) * 24000 / sr)
+        data = np.interp(np.linspace(0, len(data) - 1, n), np.arange(len(data)), data).astype(np.int16)
+    return data.tobytes(), 24000
+
+
+class EdgeTTS(TTSProvider):
+    """Microsoft Edge neural voices (en-US-AvaNeural etc) — natural American tone, no API key."""
+
+    name = "edge-tts"
+
+    def __init__(self) -> None:
+        self._voice = (os.getenv("EDGE_TTS_VOICE") or "en-US-AvaNeural").strip()
+        self._rate = (os.getenv("EDGE_TTS_RATE") or "-5%").strip()
+        self._timeout = float(os.getenv("EDGE_TTS_TIMEOUT_S", "30"))
+
+    async def synthesize(self, text: str, voice: str = "default") -> AudioChunk:
+        import edge_tts
+
+        target = self._voice if voice in ("", "default") else voice
+        buf = bytearray()
+
+        async def _run() -> None:
+            comm = edge_tts.Communicate(text, target, rate=self._rate)
+            async for chunk in comm.stream():
+                if chunk.get("type") == "audio":
+                    buf.extend(chunk.get("data") or b"")
+
+        await asyncio.wait_for(_run(), timeout=self._timeout)
+        if not buf:
+            log.error("edge-tts returned no audio for voice=%s", target)
+            return AudioChunk(pcm16=b"", sample_rate=24000)
+        pcm, sr = await asyncio.to_thread(_mp3_to_pcm16, bytes(buf))
+        return AudioChunk(pcm16=pcm, sample_rate=sr)
+
+
+class FallbackTTS(TTSProvider):
+    """Prefer the natural neural voice; first failure flips to the local backup for the session."""
+
+    def __init__(self, primary: TTSProvider, backup: TTSProvider) -> None:
+        self.primary = primary
+        self.backup = backup
+        self.failed = False
+        self.name = primary.name
+
+    async def synthesize(self, text: str, voice: str = "default") -> AudioChunk:
+        if not self.failed:
+            try:
+                chunk = await self.primary.synthesize(text, voice)
+                if chunk.pcm16:
+                    return chunk
+                raise RuntimeError(f"{self.primary.name} returned empty audio")
+            except Exception as exc:  # noqa: BLE001 - provider swap must be seamless
+                log.warning("tts primary failed (%s) — switching to %s for this session", exc, self.backup.name)
+                self.failed = True
+                self.name = self.backup.name
+        return await self.backup.synthesize(text, voice)
+
+
 def build_tts() -> TTSProvider:
     if tts_uses_http():
         return HttpTTS()
-    return PiperTTS()
+    provider = (os.getenv("TTS_PROVIDER") or "").strip().lower()
+    if provider in _LOCAL:
+        return PiperTTS()
+    backup = PiperTTS()
+    try:
+        edge = EdgeTTS()
+    except Exception:  # noqa: BLE001 - edge-tts missing → local voice
+        log.warning("edge-tts unavailable — using piper")
+        return backup
+    return FallbackTTS(edge, backup)
 
 
 class FasterWhisperSTT(STTProvider):
