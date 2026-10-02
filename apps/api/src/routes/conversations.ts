@@ -210,46 +210,45 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     }
     const db = getSupabase();
 
-    const [agent, docCountRes] = await Promise.all([
+    // Everything independent races in parallel: agent lookup, doc count, short-term
+    // history and the query embedding — fast paths just discard what they don't need.
+    const [agent, docCountRes, histRows, queryVector] = await Promise.all([
       loadAgent(body.workspaceId, body.agentId),
       db
         .from("documents")
         .select("id", { count: "exact", head: true })
         .eq("workspace_id", body.workspaceId),
-    ]);
-    const docCount = docCountRes.count ?? 0;
-    const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
-
-    // Fast paths (greeting / instant location) never build a context — skip the history query.
-    const earlyTool = decision.route === "use_tools" ? decision.requiredTools?.[0] : undefined;
-    const needsHistory = decision.route !== "small_talk" && !(earlyTool === "get_location" && !!agent.location);
-    let history: ConversationMessage[] = [];
-    if (needsHistory) {
-      const { data: histRows } = await db
+      db
         .from("messages")
         .select("id, role, content, citations, created_at")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: false })
-        .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20));
-      history = (histRows ?? [])
-        .reverse()
-        .map((m) => ({
-          id: String(m.id),
-          conversationId,
-          role: m.role as ConversationMessage["role"],
-          content: String(m.content),
-          citations: (m.citations ?? []) as string[],
-          createdAt: String(m.created_at),
-        }));
-    }
+        .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20)),
+      embedAll([body.content]).catch((err: Error) => {
+        console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
+        return null;
+      }),
+    ]);
+    const docCount = docCountRes.count ?? 0;
+    const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
+
+    const history: ConversationMessage[] = (histRows.data ?? [])
+      .reverse()
+      .map((m) => ({
+        id: String(m.id),
+        conversationId,
+        role: m.role as ConversationMessage["role"],
+        content: String(m.content),
+        citations: (m.citations ?? []) as string[],
+        createdAt: String(m.created_at),
+      }));
 
     let retrieved: RetrievalResult[] = [];
     const needsRetrieval =
       decision.route === "answer_from_knowledge" ||
       decision.route === "web_search" ||
       (decision.route === "use_tools" && decision.requiredTools?.[0] === "book_appointment");
-    if (needsRetrieval && docCount > 0) {
-      const [queryVector] = await embedAll([body.content]);
+    if (needsRetrieval && docCount > 0 && queryVector) {
       const { data: hits, error: searchErr } = await db.rpc("match_chunks", {
         p_workspace_id: body.workspaceId,
         p_query_embedding: queryVector,

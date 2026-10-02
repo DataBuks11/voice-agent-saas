@@ -110,7 +110,12 @@ export class OpenAiCompatibleEmbeddings implements EmbeddingsProvider {
     const res = await fetch(`${base}/embeddings`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.apiKey}` },
-      body: JSON.stringify({ model: this.opts.model ?? "text-embedding-3-small", input: texts }),
+      body: JSON.stringify({
+        model: this.opts.model ?? "text-embedding-3-small",
+        input: texts,
+        // OpenAI `dimensions` / Gemini output_dimensionality — keeps storage dims exact
+        ...(this.opts.dimensions ? { dimensions: this.opts.dimensions } : {}),
+      }),
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
