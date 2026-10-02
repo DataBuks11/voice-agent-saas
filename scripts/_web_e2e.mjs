@@ -46,7 +46,7 @@ async function shot(page, name) {
 }
 
 async function waitForText(page, text, timeout = 20000) {
-  await page.waitForFunction((t) => document.body.innerText.includes(t), { timeout }, text);
+  await page.waitForFunction((t) => document.body.innerText.toLowerCase().includes(t.toLowerCase()), { timeout }, text);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -60,8 +60,12 @@ async function main() {
     defaultViewport: { width: 1440, height: 900 },
   });
   const page = await browser.newPage();
+  const netErrors = [];
+  page.on("response", (r) => {
+    if (r.status() >= 400 && !r.url().includes("favicon")) netErrors.push(`${r.status()} ${r.request().method()} ${r.url()}`);
+  });
   page.on("console", (m) => {
-    if (m.type() === "error") consoleErrors.push(`console: ${m.text()}`);
+    if (m.type() === "error" && !/Failed to load resource/i.test(m.text())) consoleErrors.push(`console: ${m.text()}`);
   });
   page.on("pageerror", (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
@@ -79,7 +83,8 @@ async function main() {
 
     // 2. Sign in link → login (no double /app)
     console.log("\n[2] Sign in link");
-    await Promise.all([page.waitForNavigation({ timeout: 20000 }), clickText(page, "a", "Sign in")]);
+    await clickText(page, "a", "Sign in");
+    await page.waitForFunction(() => location.pathname.endsWith("/login"), { timeout: 20000 });
     check("url is /app/login", page.url().endsWith("/app/login"), page.url());
     check("no double /app", !page.url().includes("/app/app"));
     await waitForText(page, "sign in to your console");
@@ -112,6 +117,7 @@ async function main() {
     await waitForText(page, "api online", 20000).catch(() => undefined);
     const healthText = await page.evaluate(() => document.body.innerText);
     check("api online badge (CORS works)", healthText.includes("api online"), healthText.includes("api offline") ? "api offline" : "");
+    await page.waitForSelector("a.nav-link", { timeout: 15000 });
     await shot(page, "04-dashboard");
 
     // 5. Agents
@@ -148,7 +154,7 @@ async function main() {
     await clickText(page, "a.nav-link", "Conversations");
     await page.waitForFunction(() => location.pathname.endsWith("/conversations"), { timeout: 15000 });
     await clickText(page, "button", "+ New conversation");
-    await sleep(800);
+    await page.waitForSelector('input[placeholder="Ask the agent…"]', { timeout: 30000 });
     await page.type('input[placeholder="Ask the agent…"]', "How much is a premium styling and when are you open?");
     await clickText(page, "button", "Send");
     await waitForText(page, "900", 120000); // grounded answer price
@@ -167,28 +173,33 @@ async function main() {
 
     // 9. Re-login → setup (pick existing workspace)
     console.log("\n[9] Re-login + existing workspace");
+    await waitForText(page, "sign in to your console", 30000);
+    await page.waitForSelector('input[type="email"]', { timeout: 30000 });
     await page.type('input[type="email"]', email);
     await page.type('input[type="password"]', "Passw0rd!2026");
     await page.click(".setup-card form button");
     await page.waitForFunction(() => location.pathname.endsWith("/setup"), { timeout: 30000 });
     await waitForText(page, "Existing (");
     await clickText(page, "button", "Existing (");
-    await page.select("select.select", await page.evaluate(() => document.querySelector("select.select").options[1]?.value ?? ""));
+    await page.waitForFunction(() => (document.querySelector("select.select")?.options.length ?? 0) > 1, { timeout: 20000 });
+    const wsValue = await page.evaluate(() => document.querySelector("select.select").options[1].value);
+    await page.select("select.select", wsValue);
     await clickText(page, "button", "Open workspace");
     await page.waitForFunction(() => /\/app\/?$/.test(location.pathname), { timeout: 30000 });
     check("re-login → dashboard", true);
     await shot(page, "09-relogin");
 
-    // 10. Deep link without session state? (still logged in here) → new page incognito check
-    console.log("\n[10] Deep-link redirect (fresh page, no token)");
-    const fresh = await browser.newPage();
+    // 10. Deep link without session (isolated context = no localStorage)
+    console.log("\n[10] Deep-link redirect (fresh context, no token)");
+    const ctx = await browser.createBrowserContext().catch(() => browser.createIncognitoBrowserContext());
+    const fresh = await ctx.newPage();
     fresh.on("pageerror", (e) => consoleErrors.push(`pageerror(fresh): ${e.message}`));
     await fresh.goto(`${BASE}/app/knowledge`, { waitUntil: "networkidle2", timeout: 60000 });
     await fresh.waitForFunction(() => location.pathname.endsWith("/login") || location.pathname === "/app", { timeout: 20000 }).catch(() => undefined);
     const freshUrl = fresh.url();
     check("deep link lands on login (no /app/app)", freshUrl.endsWith("/app/login"), freshUrl);
     check("deep link page not blank", await fresh.evaluate(() => document.body.innerText.length > 20));
-    await fresh.close();
+    await ctx.close().catch(() => undefined);
 
     // 11. Mobile viewport smoke (landing burger)
     console.log("\n[11] Mobile landing");
@@ -211,6 +222,11 @@ async function main() {
   console.log(`\nconsole/page errors: ${benign.length}`);
   benign.slice(0, 10).forEach((e) => console.log(`  ${e}`));
   if (benign.length) failures++;
+  if (netErrors.length) {
+    failures++;
+    console.log(`network errors: ${netErrors.length}`);
+    netErrors.slice(0, 10).forEach((e) => console.log(`  ${e}`));
+  }
 
   console.log(`\n${failures === 0 ? "WEB E2E PASS ✅" : `WEB E2E FAIL (${failures}) ❌`}`);
   console.log(`screenshots: ${SHOTS}`);
