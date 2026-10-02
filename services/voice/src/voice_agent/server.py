@@ -36,7 +36,10 @@ _models_warmed = False
 
 # How much speech to accumulate before running a speculative transcript
 # (draft). ~700ms keeps the draft warm without flooding the transcriber.
-STT_CHUNK_BYTES = max(4000, int(float(os.getenv("STT_CHUNK_MS", "700")) * 32))
+STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
+
+# Don't speculate on short replies ("yes", "okay") - it only burns CPU.
+STT_DRAFT_MIN_BYTES = int(float(os.getenv("STT_DRAFT_MIN_MS", "1600")) * 32)
 
 # Short acknowledgements are synthesised once at boot and replayed from memory, so
 # the customer hears "Got it" within milliseconds of finishing their sentence
@@ -117,7 +120,9 @@ class Session:
         self.turn_active = False
         self.started = False
         self._drafting = False
-        self._drafted_for = b""
+        self._draft_task: asyncio.Task | None = None
+        self._stt_consumed = 0
+        self._hyp_parts: list[str] = []
         self.hypothesis = ""
         self.start_error_sent = False
         self.greet_task: asyncio.Task | None = None
@@ -298,29 +303,50 @@ class Session:
             finally:
                 self.turn_active = False
 
-    async def _stream_hypothesis(self, pcm: bytes) -> None:
-        """Transcribe the audio heard so far and warm the answer for it.
+    async def _stt_delta(self, final: bool) -> str:
+        """Transcribe only the audio since the last delta and stitch the pieces.
 
-        Runs while the caller is still talking, so by the time they finish the
-        model has already answered their sentence — the real turn then returns
-        from cache instead of paying ~2s of first-token latency.
+        Re-transcribing the whole utterance at the endpoint was the slowest part of
+        a turn; deltas of ~0.7s are ~4x faster and the stitched hypothesis is what
+        gets answered.
         """
-        if self.pipeline is None or self.interrupted or len(pcm) < 6000:
-            return pcm
-        if self._drafting:
-            return pcm
-        self._drafting = True
+        if self.pipeline is None:
+            return ""
+        buffered = self.vad.peek()
+        start = self._stt_consumed
+        if len(buffered) <= start:
+            return self.hypothesis
+        chunk = buffered[start:]
+        if len(chunk) < STT_CHUNK_BYTES and not final:
+            return self.hypothesis
+        self._stt_consumed = len(buffered)
+        text = ""
         try:
-            text = await self.pipeline.transcribe(pcm)
-            if text and len(text.split()) >= 3:
-                self.hypothesis = text
-                await self.send_json({"type": "partial", "text": text})
-                await self.draft_text(text)
-        except Exception:  # noqa: BLE001 - drafting is best-effort
-            log.debug("streaming hypothesis failed", exc_info=True)
-        finally:
-            self._drafting = False
-        return pcm
+            text = await self.pipeline.transcribe(chunk)
+        except Exception:  # noqa: BLE001 - fall back to a full pass below
+            log.debug("delta stt failed", exc_info=True)
+        if not text and final:
+            try:
+                text = await self.pipeline.transcribe(buffered)
+            except Exception:  # noqa: BLE001 - last resort
+                log.debug("full stt fallback failed", exc_info=True)
+        if text:
+            self._hyp_parts.append(text)
+            self.hypothesis = " ".join(self._hyp_parts).strip()
+            if len(self.hypothesis.split()) >= 3:
+                await self.send_json({"type": "partial", "text": self.hypothesis})
+                if not final:
+                    await self.draft_text(self.hypothesis)
+        return self.hypothesis
+
+    async def _drain_draft(self) -> None:
+        task = self._draft_task
+        if task is not None and not task.done():
+            try:
+                await task
+            except Exception:  # noqa: BLE001 - drafting is best-effort
+                log.debug("draft task failed", exc_info=True)
+        self._draft_task = None
 
     async def draft_text(self, text: str) -> None:
         """Warm the answer for a partial transcript without speaking or persisting."""
@@ -397,20 +423,25 @@ class Session:
                     if event == "speech_start":
                         # Immediate UI feedback: the orb reacts while the caller is
                         # still speaking, not only after transcription finishes.
-                        self._drafted_for = b""
+                        self._hyp_parts = []
+                        self._stt_consumed = 0
+                        self.hypothesis = ""
                         await self.send_json({"type": "hearing"})
-                        asyncio.create_task(self._stream_hypothesis(self.vad.peek()))
                     elif event == "endpoint":
                         pcm = self.vad.take()
                         if pcm and self.pipeline is not None:
-                            await self._stream_hypothesis(pcm)
+                            await self._drain_draft()
+                            await self._stt_delta(True)
                             kind_now = "audio-draft" if self.hypothesis else "audio"
                             await self.enqueue(kind_now, pcm)
                     else:
                         buffered = self.vad.peek()
-                        if len(buffered) - len(self._drafted_for) >= STT_CHUNK_BYTES:
-                            self._drafted_for = buffered
-                            asyncio.create_task(self._stream_hypothesis(buffered))
+                        if (
+                            len(buffered) >= STT_DRAFT_MIN_BYTES
+                            and len(buffered) - self._stt_consumed >= STT_CHUNK_BYTES
+                            and self._draft_task is None
+                        ):
+                            self._draft_task = asyncio.create_task(self._stt_delta(False))
             else:
                 try:
                     msg = json.loads(message)
