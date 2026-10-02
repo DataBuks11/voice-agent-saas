@@ -91,7 +91,9 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
             except asyncio.TimeoutError:
                 break
             if isinstance(msg, bytes):
-                got["audio"] += len(msg)
+                # Pre-answer audio = auto-greeting; only the answer's TTS counts.
+                if got["assistant"]:
+                    got["audio"] += len(msg)
                 continue
             data = json.loads(msg)
             kind = data.get("type")
@@ -104,10 +106,12 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
                 got["assistant"] = data.get("text")
                 print(f"[llm] {got['assistant']!r}  (+{time.time()-t0:.1f}s)")
             elif kind == "audio_start":
-                print(f"[tts] start sr={data.get('sampleRate')}")
+                if got["assistant"]:
+                    print(f"[tts] start sr={data.get('sampleRate')}")
             elif kind == "audio_end":
-                print(f"[tts] end ({got['audio']} bytes)  (+{time.time()-t0:.1f}s)")
-                break
+                if got["assistant"] and got["audio"] > 0:
+                    print(f"[tts] end ({got['audio']} bytes)  (+{time.time()-t0:.1f}s)")
+                    break
             elif kind == "error":
                 got["errors"].append(data)
                 print(f"[error] {data}")

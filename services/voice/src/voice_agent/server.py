@@ -32,15 +32,27 @@ def _split_sentences(text: str) -> list[str]:
 _stt: STTProvider | None = None
 _tts: TTSProvider | None = None
 _models_lock = asyncio.Lock()
+_models_warmed = False
 
 
 async def shared_models() -> tuple[STTProvider, TTSProvider]:
-    global _stt, _tts
+    global _stt, _tts, _models_warmed
     async with _models_lock:
         if _stt is None:
             _stt = await asyncio.to_thread(build_stt)
         if _tts is None:
             _tts = await asyncio.to_thread(build_tts)
+        if not _models_warmed:
+            # First real turn must not pay lazy-init cost (onnx session, thread
+            # pools, HF revision) — run one throwaway STT+TTS at boot instead.
+            t0 = __import__("time").time()
+            try:
+                await _stt.transcribe(b"\x00" * 3200, SAMPLE_RATE)
+                await _tts.synthesize("Warm up.")
+                log.info("providers warmed in %.2fs", __import__("time").time() - t0)
+            except Exception:  # noqa: BLE001 - warming must never block startup
+                log.exception("provider warm-up failed (continuing)")
+            _models_warmed = True
         log.info("providers: stt=%s tts=%s", _stt.name, _tts.name)
         return _stt, _tts
 
@@ -59,6 +71,7 @@ class Session:
         self.turn_active = False
         self.started = False
         self.start_error_sent = False
+        self.greet_task: asyncio.Task | None = None
 
     # --- wire helpers (serialize sends: audio + json interleave) ---
     async def send_json(self, obj: dict) -> None:
@@ -118,6 +131,14 @@ class Session:
         self.worker = asyncio.create_task(self._turn_worker())
         await self.send_json({"type": "ready", "conversationId": conversation_id, "workspaceId": workspace_id})
         log.info("session ready: workspace=%s conversation=%s", workspace_id, conversation_id)
+        # Instant greeting: the agent speaks the moment the call connects —
+        # no mic round-trip needed to feel "answered". VOICE_GREETING=off disables.
+        greeting = os.getenv(
+            "VOICE_GREETING",
+            "Hi, thanks for calling! Go ahead whenever you're ready.",
+        )
+        if greeting and greeting.strip().lower() not in {"off", "none", "disabled", "false"}:
+            self.greet_task = asyncio.create_task(self._auto_greet(greeting.strip()))
 
     @staticmethod
     async def _discover_workspace(headers: dict) -> str | None:
@@ -129,6 +150,40 @@ class Session:
             return items[0]["id"] if items else None
 
     # --- turn loop ---
+    async def _speak(self, text: str, *, is_greeting: bool = False) -> None:
+        """Sentence-streamed TTS: synthesize + ship sentence by sentence so
+        first audio leaves before the whole reply is rendered."""
+        started = False
+        for sentence in _split_sentences(text):
+            if self.interrupted:
+                break
+            # A queued user utterance cancels the greeting so answers never overlap.
+            if is_greeting and self.turn_active:
+                break
+            chunk = await self.pipeline.synthesize(sentence) if self.pipeline else None
+            if not chunk or not chunk.pcm16:
+                continue
+            if not started:
+                await self.send_json(
+                    {"type": "audio_start", "sampleRate": chunk.sample_rate, "encoding": "pcm16le"}
+                )
+                started = True
+            data = chunk.pcm16
+            for i in range(0, len(data), 16384):
+                if self.interrupted or (is_greeting and self.turn_active):
+                    break
+                await self.send_bytes(data[i : i + 16384])
+        if started:
+            await self.send_json({"type": "audio_end"})
+
+    async def _auto_greet(self, text: str) -> None:
+        try:
+            if self.turn_active:
+                return
+            await self._speak(text, is_greeting=True)
+        except Exception:  # noqa: BLE001 - greeting is best-effort
+            log.exception("auto greeting failed")
+
     async def _turn_worker(self) -> None:
         while True:
             pcm = await self.queue.get()
@@ -142,27 +197,7 @@ class Session:
                 answer = await self.pipeline.handle_audio(pcm, on_transcript=on_transcript)
                 if answer and not self.interrupted:
                     await self.send_json({"type": "assistant", "text": answer})
-                    # Sentence-streamed TTS: synthesize + ship sentence by sentence so
-                    # first audio leaves before the whole reply is rendered.
-                    started = False
-                    for sentence in _split_sentences(answer):
-                        if self.interrupted:
-                            break
-                        chunk = await self.pipeline.synthesize(sentence)
-                        if not chunk.pcm16:
-                            continue
-                        if not started:
-                            await self.send_json(
-                                {"type": "audio_start", "sampleRate": chunk.sample_rate, "encoding": "pcm16le"}
-                            )
-                            started = True
-                        data = chunk.pcm16
-                        for i in range(0, len(data), 16384):
-                            if self.interrupted:
-                                break
-                            await self.send_bytes(data[i : i + 16384])
-                    if started:
-                        await self.send_json({"type": "audio_end"})
+                    await self._speak(answer)
             except Exception as exc:  # noqa: BLE001 - surface to client
                 log.exception("turn failed")
                 await self.send_json({"type": "error", "reason": "turn_failed", "message": str(exc)})
@@ -219,6 +254,12 @@ class Session:
                     await self.send_json({"type": "pong"})
 
     async def close(self) -> None:
+        if self.greet_task:
+            self.greet_task.cancel()
+            try:
+                await self.greet_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if self.worker:
             self.worker.cancel()
             try:
