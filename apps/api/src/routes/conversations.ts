@@ -668,18 +668,19 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
 
       // Availability step: the engine decides which slots exist, so the agent can
       // never invent availability; the model only speaks the offer.
+      // Any refusal of a proposed time counts: "no" as well as "too late".
       const appointmentRejected =
         captureState.status === "confirming" &&
         captureState.pendingKey === "appointment" &&
-        isSlotRejection(body.content) &&
-        Boolean(captureState.pendingIso);
+        Boolean(captureState.pendingIso) &&
+        (isSlotRejection(body.content) || /^(no|nope|nah)/i.test(body.content.trim()));
       if (appointmentRejected && captureState.pendingIso) {
         // "That's too late" / "anything earlier?" -> remember it and re-offer.
         const declined = parseDeclined(captureState.data);
         declined.push(captureState.pendingIso);
         const pref = parseSlotPreference(body.content, null);
-        const offered = await engineOffer(availability, pref, declined, captureState.data.time_pref ?? "any");
         const rejected = saveDeclined(captureState, declined);
+        const offered = await engineOffer(availability, pref, declined, captureState.data.time_pref ?? "any");
         await saveCaptureState(conversationId, body.workspaceId, rejected);
         if (offered.length) {
           advance = offerSlot(rejected, offered[0]!.iso, spokenSlot(offered[0]!.iso));
