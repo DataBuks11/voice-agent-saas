@@ -12,7 +12,8 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
-    "test:python": "pytest services/voice/tests -q"
+    "test:python": "pytest services/voice/tests -q",
+    "verify": "node scripts/_verify.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
