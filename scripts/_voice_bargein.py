@@ -149,6 +149,7 @@ async def send_audio(sock, pcm: bytes) -> None:
 
 
 async def main() -> int:
+    barge_mark = 0.0
     token, ws_id = seed()
     t0 = time.time()
     first, second = speak(Q1), speak(Q2)
@@ -179,8 +180,10 @@ async def main() -> int:
             speaking_at = await s.wait("audio_start", after=answered or 0, timeout=20)
             if speaking_at is None:
                 print("WARN: agent never started speaking before the interruption")
+                speaking_at = s.mark()
             else:
                 print(f"[phase2] agent speaking since {speaking_at:.1f}s; caller talks over it")
+            barge_mark = speaking_at
             await send_audio(sock, second)
             await s.wait("assistant", after=s.mark() - 0.001, timeout=30)
             await asyncio.sleep(1.5)
@@ -200,9 +203,15 @@ async def main() -> int:
     if len(s.replies) < 2:
         print(f"FAIL: expected 2 replies, got {len(s.replies)}")
         ok = False
-    if s.interruptions != 1:
-        print(f"FAIL: expected exactly 1 interruption, got {s.interruptions}")
+    # Only interruptions after the answer started matter; talking over the
+    # greeting is normal and expected.
+    late = [t for t in s.seen.get("interrupted", []) if t > barge_mark]
+    if len(late) != 1:
+        print(f"FAIL: expected exactly 1 interruption while answering, got {len(late)}")
         ok = False
+    else:
+        print(f"OK: interrupted once at {late[0]:.1f}s, "
+              f"{late[0] - barge_mark:.1f}s into the answer")
     if len(s.replies) > 2:
         print(f"FAIL: {len(s.replies)} replies - the agent is talking over itself")
         ok = False
