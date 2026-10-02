@@ -1,5 +1,5 @@
 import React from "react";
-import { api, type ConversationRow, type MessageRow, type TurnTrace } from "../lib/api";
+import { api, type ConversationRow, type MessageRow, type ToolResultRow, type TurnTrace } from "../lib/api";
 import { useToast } from "../main";
 
 export function ConversationsPage() {
@@ -8,6 +8,7 @@ export function ConversationsPage() {
   const [active, setActive] = React.useState<string | null>(null);
   const [messages, setMessages] = React.useState<MessageRow[]>([]);
   const [trace, setTrace] = React.useState<TurnTrace | null>(null);
+  const [toolLinks, setToolLinks] = React.useState<Record<string, ToolResultRow[]>>({});
   const [input, setInput] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
@@ -55,6 +56,9 @@ export function ConversationsPage() {
     try {
       const turn = await api.send(active, text);
       setTrace(turn);
+      if (turn.toolResults?.length) {
+        setToolLinks((prev) => ({ ...prev, [turn.answer.id]: turn.toolResults as ToolResultRow[] }));
+      }
       setMessages((m) => [
         ...m.filter((x) => !x.id.startsWith("tmp-")),
         turn.userMessage,
@@ -111,6 +115,16 @@ export function ConversationsPage() {
                       <div className="avatar">{m.role === "user" ? "U" : "AI"}</div>
                       <div>
                         <div className="bubble">{m.content}</div>
+                        {toolLinks[m.id]?.length ? (
+                          <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                            {toolLinks[m.id].map((t) => (
+                              <a key={t.url} className="btn btn-sm" href={t.url} target="_blank" rel="noreferrer">
+                                <i className={t.type === "calendar" ? "fa-solid fa-calendar-plus" : "fa-solid fa-map-location-dot"} />{" "}
+                                {t.label}
+                              </a>
+                            ))}
+                          </div>
+                        ) : null}
                         <div className="msg-meta">
                           <span>{new Date(m.createdAt).toLocaleTimeString()}</span>
                           {m.citations?.length ? <span className="badge ok">cited {m.citations.length} chunk{m.citations.length > 1 ? "s" : ""}</span> : null}

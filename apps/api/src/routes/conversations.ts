@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import type { Agent, ConversationMessage, Decision, RetrievalResult, HarnessVerdict } from "@voice-agent/types";
+import type { Agent, ConversationMessage, Decision, RetrievalResult, HarnessVerdict, ToolDefinition } from "@voice-agent/types";
 import { ruleFallback } from "@voice-agent/decision";
 import { buildContext } from "@voice-agent/context";
 import { validateResponse } from "@voice-agent/harness";
@@ -22,19 +22,40 @@ const messageSchema = z.object({
   agentId: z.string().uuid().optional(),
 });
 
+/** Platform tools advertised to the decision engine. */
+const PLATFORM_TOOLS: ToolDefinition[] = [
+  { name: "book_appointment", description: "Book an appointment/meeting on the business calendar", inputSchema: {} },
+  { name: "get_location", description: "Return the business address with a Google Maps link", inputSchema: {} },
+];
+
 const DEFAULT_AGENT: Agent = {
   id: "default",
   workspaceId: "",
   name: "Business Assistant",
   language: "en",
   tone: "professional",
-  systemPrompt: "You are a helpful business voice assistant. Only answer from provided knowledge.",
+  systemPrompt:
+    "You are a professional American-English receptionist. Be warm, natural and concise. Only answer from provided knowledge.",
   fallbackResponse: "I don't have verified information about that yet.",
   maxTokens: 6000,
   temperature: 0.4,
   createdAt: new Date(0).toISOString(),
   updatedAt: new Date(0).toISOString(),
 };
+
+const VOICE_STYLE = `# Voice style
+- You are a warm, professional American-English receptionist — natural conversational tone, like a real front desk.
+- Keep every reply to 1-2 short sentences so the spoken response can start instantly.
+- Never invent facts, prices, hours, availability or policies. Answer ONLY from the knowledge above; if it is not covered, say you will check with the team.
+- Plain speech only: no URLs, markdown, emoji or stage directions — the reply is read aloud by text-to-speech.`;
+
+const BOOKING_INSTRUCTIONS = `# Tool: book_appointment
+You can book appointments for the customer.
+- Collect a preferred date/time and the customer's name (and a phone/email as contact if offered). Ask for at most ONE missing detail per turn, briefly.
+- The moment you have both a date/time and a name, start your reply with exactly one machine line as the FIRST line (uppercase, pipe-separated):
+BOOK|YYYY-MM-DD HH:MM|name|contact
+then continue with a short, warm spoken confirmation. Use only details the customer gave — never invent them.
+- If any detail is missing, do NOT output the BOOK line; just ask naturally.`;
 
 async function loadAgent(workspaceId: string, agentId: string | undefined): Promise<Agent> {
   const db = getSupabase();
@@ -52,9 +73,56 @@ async function loadAgent(workspaceId: string, agentId: string | undefined): Prom
     fallbackResponse: String(r.fallback_response),
     maxTokens: Number(r.max_tokens),
     temperature: Number(r.temperature),
+    location: String(r.location ?? ""),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
+}
+
+/** Instant local reply for greetings — zero network, zero LLM latency. */
+function smallTalkReply(agent: Agent, content: string): string {
+  const t = content.toLowerCase();
+  if (/\b(bye|goodbye|good night|see you|talk later)\b/.test(t)) {
+    return "Thanks for calling — have a great day!";
+  }
+  if (/\b(thank|thanks|appreciate)\b/.test(t)) {
+    return "You're very welcome! Is there anything else I can help you with?";
+  }
+  return `Hi, thanks for reaching out to ${agent.name}! This is the front desk — how can I help you today?`;
+}
+
+const mapsUrl = (location: string) =>
+  `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location)}`;
+
+/** Floating-time Google Calendar template link (no OAuth needed). */
+function calendarUrl(title: string, startsAt: string, details: string): string | null {
+  const m = startsAt.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const start = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])));
+  if (Number.isNaN(start.getTime())) return null;
+  const end = new Date(start.getTime() + 30 * 60000);
+  const fmt = (d: Date) =>
+    `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}T${String(d.getUTCHours()).padStart(2, "0")}${String(d.getUTCMinutes()).padStart(2, "0")}00`;
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: title,
+    dates: `${fmt(start)}/${fmt(end)}`,
+    details,
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+/** Pull the machine BOOK line out of an LLM reply. Returns null when not booking yet. */
+function extractBooking(text: string): { startsAt: string; name: string; contact: string; rest: string } | null {
+  const m = text.match(/^\s*BOOK\|([^|\n]+)\|([^|\n]+)\|([^\n]*)\n?/);
+  if (!m) return null;
+  return { startsAt: (m[1] ?? "").trim(), name: (m[2] ?? "").trim(), contact: (m[3] ?? "").trim(), rest: text.slice(m[0].length).trim() };
+}
+
+interface ToolResult {
+  type: "calendar" | "maps";
+  label: string;
+  url: string;
 }
 
 export async function conversationRoutes(app: FastifyInstance): Promise<void> {
@@ -129,13 +197,19 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
 
     const agent = await loadAgent(body.workspaceId, body.agentId);
 
-    const { data: histRows } = await db
-      .from("messages")
-      .select("id, role, content, citations, created_at")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: false })
-      .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20));
-    const history: ConversationMessage[] = (histRows ?? [])
+    const [histRows, docCountRes] = await Promise.all([
+      db
+        .from("messages")
+        .select("id, role, content, citations, created_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: false })
+        .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20)),
+      db
+        .from("documents")
+        .select("id", { count: "exact", head: true })
+        .eq("workspace_id", body.workspaceId),
+    ]);
+    const history: ConversationMessage[] = (histRows.data ?? [])
       .reverse()
       .map((m) => ({
         id: String(m.id),
@@ -146,15 +220,15 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         createdAt: String(m.created_at),
       }));
 
-    const { count: docCount } = await db
-      .from("documents")
-      .select("id", { count: "exact", head: true })
-      .eq("workspace_id", body.workspaceId);
-
-    const decision: Decision = ruleFallback(body.content, (docCount ?? 0) > 0, []);
+    const docCount = docCountRes.count ?? 0;
+    const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
 
     let retrieved: RetrievalResult[] = [];
-    if (decision.route === "answer_from_knowledge" || decision.route === "web_search") {
+    const needsRetrieval =
+      decision.route === "answer_from_knowledge" ||
+      decision.route === "web_search" ||
+      (decision.route === "use_tools" && decision.requiredTools?.[0] === "book_appointment");
+    if (needsRetrieval && docCount > 0) {
       const [queryVector] = await embedAll([body.content]);
       const { data: hits, error: searchErr } = await db.rpc("match_chunks", {
         p_workspace_id: body.workspaceId,
@@ -174,25 +248,83 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       }));
     }
 
-    const ctx = buildContext({
-      agent,
-      businessProfile: {},
-      history,
-      retrieved,
-      customerMemory: [],
-      maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
-    });
+    let answerText: string;
+    let verdict: HarnessVerdict;
+    let answerSource: string;
+    let contextInfo = { usedTokens: 0, truncated: false, includedChunkIds: [] as string[] };
+    const toolResults: ToolResult[] = [];
 
-    const llmResult = await complete({
-      system: ctx.systemPrompt,
-      context: ctx.contextText,
-      user: body.content,
-      fallback: agent.fallbackResponse,
-    });
+    const tool = decision.route === "use_tools" ? decision.requiredTools?.[0] : undefined;
 
-    const verdict: HarnessVerdict = validateResponse(llmResult.text, retrieved, {
-      fallbackResponse: agent.fallbackResponse,
-    });
+    if (decision.route === "small_talk") {
+      // Fast path: instant, local, no LLM — greetings must reply with zero delay.
+      answerText = smallTalkReply(agent, body.content);
+      verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+      answerSource = "fast-path";
+    } else if (tool === "book_appointment") {
+      const ctx = buildContext({
+        agent,
+        businessProfile: {},
+        history,
+        retrieved,
+        customerMemory: [],
+        maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
+      });
+      const llmResult = await complete({
+        system: `${ctx.systemPrompt}\n\n${VOICE_STYLE}`,
+        context: `${ctx.contextText}\n\n${BOOKING_INSTRUCTIONS}`,
+        user: body.content,
+        fallback: agent.fallbackResponse,
+      });
+      const booking = extractBooking(llmResult.text);
+      answerText = booking ? booking.rest : llmResult.text;
+      answerSource = llmResult.source;
+      contextInfo = { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds };
+      if (booking) {
+        const calUrl = calendarUrl(`${agent.name} — appointment with ${booking.name}`, booking.startsAt, `Contact: ${booking.contact || "-"}`);
+        const { error: bookErr } = await db.from("bookings").insert({
+          workspace_id: body.workspaceId,
+          conversation_id: conversationId,
+          customer_name: booking.name,
+          contact: booking.contact,
+          starts_at: booking.startsAt,
+          notes: "",
+          source: "agent",
+        });
+        if (bookErr) console.error(`booking insert failed: ${bookErr.message}`);
+        if (calUrl) toolResults.push({ type: "calendar", label: "Add to Google Calendar", url: calUrl });
+        if (!answerText) answerText = "You're all set — I've noted your booking details.";
+      }
+      // Tool turns are conversational actions, not factual claims — skip grounding.
+      verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+    } else if (tool === "get_location" && agent.location) {
+      answerText = `You can find us at ${agent.location}.`;
+      toolResults.push({ type: "maps", label: "Open in Google Maps", url: mapsUrl(agent.location) });
+      verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
+      answerSource = "tool";
+    } else {
+      // Knowledge / escalate / web_search / location-without-configured-address.
+      const ctx = buildContext({
+        agent,
+        businessProfile: {},
+        history,
+        retrieved,
+        customerMemory: [],
+        maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
+      });
+      const llmResult = await complete({
+        system: `${ctx.systemPrompt}\n\n${VOICE_STYLE}`,
+        context: ctx.contextText,
+        user: body.content,
+        fallback: agent.fallbackResponse,
+      });
+      verdict = validateResponse(llmResult.text, retrieved, {
+        fallbackResponse: agent.fallbackResponse,
+      });
+      answerText = verdict.safeText;
+      answerSource = llmResult.source;
+      contextInfo = { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds };
+    }
 
     const now = new Date().toISOString();
     const userMsg = { workspace_id: body.workspaceId, conversation_id: conversationId, role: "user", content: body.content, citations: [] };
@@ -200,7 +332,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       workspace_id: body.workspaceId,
       conversation_id: conversationId,
       role: "assistant",
-      content: verdict.safeText,
+      content: answerText,
       citations: retrieved.map((r) => r.id),
     };
     const { data: saved, error: saveErr } = await db.from("messages").insert([userMsg, assistantMsg]).select("id, role, content, citations, created_at");
@@ -213,9 +345,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       verdict: { ok: verdict.ok, confidence: verdict.confidence, issues: verdict.issues },
       answer: { ...savedAssistant, createdAt: savedAssistant?.created_at ?? now },
       userMessage: { ...savedUser, createdAt: savedUser?.created_at ?? now },
-      answerSource: llmResult.source,
+      answerSource,
+      toolResults,
       retrieved: retrieved.map((r) => ({ id: r.id, documentId: r.documentId, score: r.score, text: r.content.slice(0, 200) })),
-      context: { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds },
+      context: contextInfo,
     });
   });
 }

@@ -10,8 +10,10 @@ export function AgentsPage() {
     name: "",
     language: "en",
     tone: "professional",
-    systemPrompt: "You are a helpful business voice assistant. Only answer from provided knowledge.",
+    systemPrompt:
+      "You are a professional American-English receptionist. Be warm, natural and concise. Only answer from provided knowledge.",
     fallbackResponse: "I don't have verified information about that yet.",
+    location: "",
   });
   const [busy, setBusy] = React.useState(false);
 
@@ -112,6 +114,15 @@ export function AgentsPage() {
           <div className="field">
             <label>Fallback response</label>
             <input className="input" value={form.fallbackResponse} onChange={(e) => setForm({ ...form, fallbackResponse: e.target.value })} />
+          </div>
+          <div className="field">
+            <label>Business address (powers Google Maps)</label>
+            <input
+              className="input"
+              value={form.location}
+              onChange={(e) => setForm({ ...form, location: e.target.value })}
+              placeholder="123 Main St, Springfield, IL 62701"
+            />
           </div>
           <button className="btn btn-primary" disabled={busy || !form.name.trim()} style={{ width: "100%" }}>
             {busy ? <span className="spinner" /> : "Create agent"}

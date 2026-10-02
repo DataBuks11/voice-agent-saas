@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 import httpx
 from websockets.asyncio.server import serve
@@ -19,6 +20,13 @@ API_BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:3001").rstrip("/")
 PORT = int(os.getenv("PORT", "8080"))
 SAMPLE_RATE = 16000
 FRAME_BYTES = SAMPLE_RATE // 50 * 2  # 20ms of PCM16 mono
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = [p.strip() for p in _SENTENCE_SPLIT.split(text) if p.strip()]
+    return parts or [text]
 
 _stt: FasterWhisperSTT | None = None
 _tts: PiperTTS | None = None
@@ -132,16 +140,26 @@ class Session:
                 answer = await self.pipeline.handle_audio(pcm, on_transcript=on_transcript)
                 if answer and not self.interrupted:
                     await self.send_json({"type": "assistant", "text": answer})
-                    chunk = await self.pipeline.synthesize(answer)
-                    if chunk.pcm16 and not self.interrupted:
-                        await self.send_json(
-                            {"type": "audio_start", "sampleRate": chunk.sample_rate, "encoding": "pcm16le"}
-                        )
+                    # Sentence-streamed TTS: synthesize + ship sentence by sentence so
+                    # first audio leaves before the whole reply is rendered.
+                    started = False
+                    for sentence in _split_sentences(answer):
+                        if self.interrupted:
+                            break
+                        chunk = await self.pipeline.synthesize(sentence)
+                        if not chunk.pcm16:
+                            continue
+                        if not started:
+                            await self.send_json(
+                                {"type": "audio_start", "sampleRate": chunk.sample_rate, "encoding": "pcm16le"}
+                            )
+                            started = True
                         data = chunk.pcm16
                         for i in range(0, len(data), 16384):
                             if self.interrupted:
                                 break
                             await self.send_bytes(data[i : i + 16384])
+                    if started:
                         await self.send_json({"type": "audio_end"})
             except Exception as exc:  # noqa: BLE001 - surface to client
                 log.exception("turn failed")

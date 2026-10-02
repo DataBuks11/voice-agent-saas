@@ -15,6 +15,7 @@ export interface AgentConfig {
   fallbackResponse: string;
   maxTokens: number;
   temperature: number;
+  location?: string; // business address — powers the Google Maps tool
 }
 
 export interface Agent extends AgentConfig {

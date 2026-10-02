@@ -10,6 +10,7 @@ import { workspaceRoutes } from "./routes/workspaces.js";
 import { agentRoutes } from "./routes/agents.js";
 import { knowledgeRoutes } from "./routes/knowledge.js";
 import { conversationRoutes } from "./routes/conversations.js";
+import { bookingRoutes } from "./routes/bookings.js";
 import { warmupEmbeddings } from "./lib/embeddings.js";
 import { runMigrations } from "./lib/migrate.js";
 
@@ -22,7 +23,8 @@ declare module "fastify" {
 export function buildServer() {
   const config = loadConfig();
   const log = createLogger("api", config.LOG_LEVEL);
-  const app = Fastify({ logger: false });
+  // Raised body limit: document uploads (pdf/docx base64) ride on JSON requests.
+  const app = Fastify({ logger: false, bodyLimit: Number(process.env.BODY_LIMIT ?? 48 * 1024 * 1024) });
 
   app.decorate("jwtSecret", config.JWT_SECRET);
 
@@ -53,6 +55,7 @@ export function buildServer() {
   app.register(agentRoutes, { prefix: "/v1" });
   app.register(knowledgeRoutes, { prefix: "/v1" });
   app.register(conversationRoutes, { prefix: "/v1" });
+  app.register(bookingRoutes, { prefix: "/v1" });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) {

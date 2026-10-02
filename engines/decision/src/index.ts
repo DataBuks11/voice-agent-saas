@@ -16,9 +16,18 @@ export interface LayaCompatibleClassifier {
 /** Deterministic rules fallback — cheap, no LLM call. */
 export function ruleFallback(text: string, hasKnowledge: boolean, toolsAvailable: string[]): Decision {
   const t = text.toLowerCase();
-  const needsTool = toolsAvailable.some((tool) => t.includes(tool.toLowerCase().replace(/_/g, " ")));
-  if (/\b(book|order|pay|schedule|cancel|refund|appointment)\b/.test(t) && toolsAvailable.length) {
-    return { route: "use_tools", confidence: 0.7, reason: "action verb + tools available", requiredTools: toolsAvailable.slice(0, 1) };
+  const hasTool = (name: string) => toolsAvailable.includes(name);
+  if (
+    hasTool("book_appointment") &&
+    /\b(book|booking|booked|appointment|schedule|slot|reserve|reservation)\b/.test(t)
+  ) {
+    return { route: "use_tools", confidence: 0.75, reason: "booking intent + calendar tool", requiredTools: ["book_appointment"] };
+  }
+  if (
+    hasTool("get_location") &&
+    /\b(where are you|address|location|located|directions|map|reach you|find you|reach the|come to)\b/.test(t)
+  ) {
+    return { route: "use_tools", confidence: 0.7, reason: "location intent + maps tool", requiredTools: ["get_location"] };
   }
   if (/\b(latest|today|news|price now|weather|search|web)\b/.test(t)) {
     return { route: "web_search", confidence: 0.65, reason: "freshness/external info requested" };

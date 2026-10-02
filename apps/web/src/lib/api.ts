@@ -9,6 +9,7 @@ export interface AgentRow {
   tone: string;
   systemPrompt: string;
   fallbackResponse: string;
+  location?: string;
   createdAt: string;
 }
 
@@ -33,6 +34,24 @@ export interface ConversationRow {
   createdAt: string;
 }
 
+export interface BookingRow {
+  id: string;
+  conversationId: string | null;
+  customerName: string;
+  contact: string;
+  startsAt: string;
+  notes: string;
+  status: string;
+  source: string;
+  createdAt: string;
+}
+
+export interface ToolResultRow {
+  type: "calendar" | "maps";
+  label: string;
+  url: string;
+}
+
 export interface MessageRow {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
@@ -48,6 +67,7 @@ export interface TurnTrace {
   answer: MessageRow;
   userMessage: MessageRow;
   answerSource: string;
+  toolResults?: ToolResultRow[];
   retrieved: { id: string; documentId: string; score: number; text: string }[];
   context: { usedTokens: number; truncated: boolean; includedChunkIds: string[] };
 }
@@ -99,13 +119,19 @@ export const api = {
     post<{ id: string; name: string; createdAt: string; role: string }>("/v1/workspaces", { name }),
   listWorkspaces: () => get<{ items: WorkspaceLite[]; total: number }>(`/v1/workspaces`),
   listAgents: () => get<{ items: AgentRow[]; total: number }>("/v1/agents?workspaceId=" + getWorkspace()!.id),
-  createAgent: (body: { name: string; language: string; tone: string; systemPrompt: string; fallbackResponse: string }) =>
+  createAgent: (body: { name: string; language: string; tone: string; systemPrompt: string; fallbackResponse: string; location?: string }) =>
     post<AgentRow>("/v1/agents", { workspaceId: getWorkspace()!.id, ...body }),
-  ingest: (title: string, markdown: string) =>
-    post<{ sourceId: string; documentId: string; title: string; chunkCount: number; embeddingProvider: string; preview: { tokens: number; text: string }[] }>(
+  ingest: (title: string, markdown: string, opts?: { documentId?: string }) =>
+    post<{ sourceId: string | null; documentId: string; title: string; chunkCount: number; embeddingProvider: string; preview: { tokens: number; text: string }[] }>(
       "/v1/knowledge/ingest",
-      { workspaceId: getWorkspace()!.id, title, markdown },
+      { workspaceId: getWorkspace()!.id, title, markdown, ...(opts?.documentId ? { documentId: opts.documentId } : {}) },
     ),
+  uploadFile: (filename: string, contentBase64: string, title?: string) =>
+    post<{ sourceId: string; documentId: string; title: string; chunkCount: number; embeddingProvider: string }>(
+      "/v1/knowledge/upload",
+      { workspaceId: getWorkspace()!.id, filename, contentBase64, ...(title ? { title } : {}) },
+    ),
+  bookings: () => get<{ items: BookingRow[]; total: number }>("/v1/bookings?workspaceId=" + getWorkspace()!.id),
   documents: () => get<{ items: DocumentRow[]; total: number }>("/v1/knowledge/documents?workspaceId=" + getWorkspace()!.id),
   search: (query: string, topK = 6) =>
     post<{ items: SearchHit[]; total: number }>("/v1/knowledge/search", { workspaceId: getWorkspace()!.id, query, topK }),

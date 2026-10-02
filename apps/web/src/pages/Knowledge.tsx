@@ -25,6 +25,9 @@ export function KnowledgePage() {
   const [query, setQuery] = React.useState("");
   const [hits, setHits] = React.useState<SearchHit[] | null>(null);
   const [searching, setSearching] = React.useState(false);
+  const [file, setFile] = React.useState<File | null>(null);
+  const [fileBusy, setFileBusy] = React.useState(false);
+  const [fileProg, setFileProg] = React.useState<string | null>(null);
 
   const load = React.useCallback(() => {
     api
@@ -34,6 +37,66 @@ export function KnowledgePage() {
   }, [toast]);
 
   React.useEffect(load, [load]);
+
+  const uploadFile = async () => {
+    if (!file) return;
+    const isDoc = /\.pdf$/i.test(file.name) || /\.docx$/i.test(file.name);
+    const isText = /\.(md|markdown|txt|text|csv|tsv|json|log|rst|adoc|html?)$/i.test(file.name) || !file.name.includes(".");
+    if (!isDoc && !isText) {
+      toast({ kind: "err", text: "Unsupported type — use .md, .txt, .pdf or .docx" });
+      return;
+    }
+    const sizeMB = file.size / 1048576;
+    if (isDoc && sizeMB > 20) {
+      toast({ kind: "err", text: "PDF/DOCX up to 20MB — convert big files to .txt/.md for unlimited upload" });
+      return;
+    }
+    setFileBusy(true);
+    setFileProg("Preparing…");
+    try {
+      let chunkTotal = 0;
+      if (isText) {
+        // Chunked upload: stream the file in slices so huge text files stay memory-safe.
+        const PART = 600 * 1024;
+        const total = Math.max(1, Math.ceil(file.size / PART));
+        let docId: string | undefined;
+        let start = 0;
+        let part = 0;
+        while (start < file.size) {
+          const blob = file.slice(start, Math.min(start + PART, file.size));
+          const text = await blob.text();
+          const res = await api.ingest(title || file.name, text, docId ? { documentId: docId } : undefined);
+          docId = res.documentId;
+          chunkTotal += res.chunkCount;
+          part += 1;
+          start += PART;
+          setFileProg(`Uploading part ${part}/${total} · ${chunkTotal} chunks embedded`);
+        }
+      } else {
+        setFileProg("Reading file…");
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        const STEP = 0x8000;
+        for (let i = 0; i < bytes.length; i += STEP) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + STEP));
+        }
+        setFileProg("Parsing & embedding…");
+        const res = await api.uploadFile(file.name, btoa(binary), title || file.name);
+        chunkTotal = res.chunkCount;
+      }
+      toast({ kind: "ok", text: `Ingested "${title || file.name}" → ${chunkTotal} chunks` });
+      setFile(null);
+      setTitle("");
+      load();
+    } catch (err) {
+      toast({ kind: "err", text: (err as Error).message });
+    } finally {
+      setFileBusy(false);
+      setFileProg(null);
+      const input = document.getElementById("kb-file-input") as HTMLInputElement | null;
+      if (input) input.value = "";
+    }
+  };
 
   const ingest = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -123,6 +186,28 @@ export function KnowledgePage() {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="card mt">
+        <div className="card-title">Upload document</div>
+        <p className="hint" style={{ marginBottom: 10 }}>
+          <span className="mono">.md / .txt</span> — any size (streamed in parts) ·{" "}
+          <span className="mono">.pdf / .docx</span> — parsed server-side, up to 20MB each
+        </p>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            id="kb-file-input"
+            className="input"
+            type="file"
+            accept=".md,.markdown,.txt,.text,.csv,.tsv,.json,.log,.pdf,.docx"
+            style={{ flex: "1 1 260px" }}
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+          <button className="btn btn-primary" disabled={fileBusy || !file} onClick={uploadFile}>
+            {fileBusy ? <span className="spinner" /> : "Upload & embed"}
+          </button>
+        </div>
+        {fileProg ? <div className="hint mt">{fileProg}</div> : null}
       </div>
 
       <div className="card mt">

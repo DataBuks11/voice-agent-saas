@@ -8,8 +8,9 @@ const agentSchema = z.object({
   name: z.string().min(1),
   language: z.string().default("en"),
   tone: z.string().default("professional"),
-  systemPrompt: z.string().default("You are a helpful business voice assistant."),
+  systemPrompt: z.string().default("You are a professional American-English receptionist. Be warm, natural and concise. Only answer from provided knowledge."),
   fallbackResponse: z.string().default("I don't have verified information about that yet."),
+  location: z.string().default(""),
 });
 
 const rowToAgent = (r: Record<string, unknown>) => ({
@@ -20,6 +21,7 @@ const rowToAgent = (r: Record<string, unknown>) => ({
   tone: r.tone,
   systemPrompt: r.system_prompt,
   fallbackResponse: r.fallback_response,
+  location: r.location ?? "",
   maxTokens: r.max_tokens,
   temperature: r.temperature,
   createdAt: r.created_at,
@@ -43,6 +45,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         tone: body.tone,
         system_prompt: body.systemPrompt,
         fallback_response: body.fallbackResponse,
+        location: body.location,
       })
       .select()
       .single();
