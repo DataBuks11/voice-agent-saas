@@ -34,8 +34,20 @@ export async function requireUserId(req: FastifyRequest): Promise<string> {
   return payload.sub;
 }
 
+/**
+ * Short-lived in-memory membership cache — avoids a full DB round-trip
+ * (Singapore pooler RTT) on every authenticated request. Revocation lag is
+ * bounded by AUTH_CACHE_MS (set 0 to disable). Negative results are never
+ * cached, and the global rate limiter already caps auth attempts.
+ */
+const membershipCache = new Map<string, number>();
+const MEMBERSHIP_TTL_MS = Number(process.env.AUTH_CACHE_MS ?? 60_000);
+
 export async function verifyMembership(userId: string, workspaceId: string | undefined): Promise<TenantContext> {
   if (!workspaceId) throw Object.assign(new Error("x-workspace-id header required"), { status: 400 });
+  const key = `${userId}:${workspaceId}`;
+  const hit = membershipCache.get(key);
+  if (hit !== undefined && Date.now() - hit < MEMBERSHIP_TTL_MS) return { userId, workspaceId };
   const db = getSupabase();
   const { data, error } = await db
     .from("memberships")
@@ -44,7 +56,12 @@ export async function verifyMembership(userId: string, workspaceId: string | und
     .eq("user_id", userId)
     .maybeSingle();
   if (error) throw Object.assign(new Error("membership check failed"), { status: 500 });
-  if (!data) throw Object.assign(new Error("not a member of workspace"), { status: 403 });
+  if (!data) {
+    membershipCache.delete(key);
+    throw Object.assign(new Error("not a member of workspace"), { status: 403 });
+  }
+  if (membershipCache.size > 5000) membershipCache.clear();
+  membershipCache.set(key, Date.now());
   return { userId, workspaceId };
 }
 
