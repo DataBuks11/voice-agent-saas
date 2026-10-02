@@ -491,6 +491,10 @@ export async function extractSlotValue(
   if (ctx.llm) {
     const fallback = await ctx.llm(slot, text, data);
     if (fallback && fallback.value) {
+      // "I'm free any day" is not an appointment: a slot must name a time or a day.
+      if (slot.kind === "slot" && !SLOT_CUE.test(fallback.value)) {
+        return { value: null, present: false, iso: null };
+      }
       // A name slot only accepts a name — "January 12th 1990" must re-ask, not
       // silently become someone's surname.
       if (slot.kind === "name" && !isPlausibleName(fallback.value)) {
