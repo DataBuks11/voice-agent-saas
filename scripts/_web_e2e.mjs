@@ -203,7 +203,13 @@ async function main() {
     await shot(page, "09-relogin");
 
     // 10. Deep link without session (isolated context = no localStorage)
-    console.log("\n[10] Deep-link redirect (fresh context, no token)");
+    console.log("\n[10] Bookings page");
+    await page.goto(`${BASE}/app/bookings`, { waitUntil: "networkidle2" });
+    const bookingsOk = await page.evaluate(() => document.body.innerText.includes("Bookings"));
+    check("bookings page renders", bookingsOk, bookingsOk ? "" : "heading missing");
+    await page.goto(`${BASE}/app/conversations`, { waitUntil: "networkidle2" });
+
+    console.log("\n[11] Deep-link redirect (fresh context, no token)");
     const ctx = await browser.createBrowserContext().catch(() => browser.createIncognitoBrowserContext());
     const fresh = await ctx.newPage();
     fresh.on("pageerror", (e) => consoleErrors.push(`pageerror(fresh): ${e.message}`));

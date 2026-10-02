@@ -45,8 +45,9 @@ console.log(`\nBOOKING: ${row?.customerName} @ ${row?.startsAt} customer=${row?.
 let fails = 0;
 const ck = (n, c, x = "") => { if (c) console.log(`  PASS  ${n} ${x}`); else { fails++; console.log(`  FAIL  ${n} ${x}`); } };
 ck("engine offered a real slot", /would .*work for you/i.test(offer1.answer?.content ?? ""), `-> ${offer1.answer?.content?.slice(0, 70)}`);
-ck("'too late' produced an earlier re-offer", /no problem/i.test(rej.answer?.content ?? ""), `-> ${rej.answer?.content?.slice(0, 80)}`);
-ck("third negotiation still offers", /no problem|work for you/i.test(rej2.answer?.content ?? ""), `-> ${rej2.answer?.content?.slice(0, 80)}`);
+ck("'too late' produced a fresh re-offer", /would .*work for you/i.test(rej.answer?.content ?? ""), `-> ${rej.answer?.content?.slice(0, 80)}`);
+ck("third negotiation records the decline and re-offers", /no problem/i.test(rej2.answer?.content ?? ""), `-> ${rej2.answer?.content?.slice(0, 80)}`);
+ck("declined slot remembered", /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(String(rej2.capture?.data?.declined_slots ?? "")), `-> ${rej2.capture?.data?.declined_slots}`);
 ck("booking locked with an ISO slot", /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(row?.startsAt ?? ""), `-> ${row?.startsAt}`);
 ck("captured details stored", Boolean(row?.capture?.data?.zip) && (row?.capture?.skipped ?? []).includes("member_id"), `zip=${row?.capture?.data?.zip}`);
 console.log(fails === 0 ? "\nNEGOTIATION E2E PASS" : `\nNEGOTIATION E2E FAIL (${fails})`);
