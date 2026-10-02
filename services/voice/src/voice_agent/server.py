@@ -38,6 +38,8 @@ _models_warmed = False
 # (draft). ~700ms keeps the draft warm without flooding the transcriber.
 STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 
+# Speaker bleed reaches the mic a moment after our audio starts; ignore that window.
+ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.25"))
 # How long the endpoint waits for the in-flight model warm-up before answering anyway.
 # Race the draft: if it lands within this window the answer comes from cache,
 # otherwise answer immediately rather than making the caller wait for it.
@@ -136,6 +138,17 @@ class Session:
         self.hypothesis = ""
         self.start_error_sent = False
         self.greet_task: asyncio.Task | None = None
+        # Half-duplex state: while the agent is speaking the microphone is muted
+        # and speaker bleed is ignored, so the agent can never answer itself.
+        self.speaking = False
+        self._echo_candidate = False
+        # Speaker bleed needs a moment to reach the mic; ignore that onset window.
+        self._echo_guard_until = 0.0
+        self._barge_taken = False
+        self.last_activity = __import__("time").time()
+        self.call_started = self.last_activity
+        self.idle_nudges = 0
+        self.watchdog: asyncio.Task | None = None
 
     # --- wire helpers (serialize sends: audio + json interleave) ---
     async def send_json(self, obj: dict) -> None:
@@ -200,7 +213,10 @@ class Session:
         )
         self.pipeline = VoicePipeline(stt, self.llm, tts, cfg)
         self.started = True
+        self.call_started = __import__("time").time()
+        self.last_activity = self.call_started
         self.worker = asyncio.create_task(self._turn_worker())
+        await self._start_watchdog()
         await self.send_json(
             {
                 "type": "ready",
@@ -260,6 +276,12 @@ class Session:
                 await self.send_json(
                     {"type": "audio_start", "sampleRate": chunk.sample_rate, "encoding": "pcm16le"}
                 )
+                # Mute the microphone for the duration of our own voice.
+                self.speaking = True
+                self._echo_candidate = False
+                self._echo_guard_until = __import__("time").time() + ECHO_GUARD_S
+                self.vad.reset()
+                await self.send_json({"type": "speak_start"})
                 started = True
                 t_first = _time.time()
             data = chunk.pcm16
@@ -269,6 +291,13 @@ class Session:
                 await self.send_bytes(data[i : i + 16384])
         if started:
             await self.send_json({"type": "audio_end"})
+        if started:
+            # Unmute, then discard anything captured during playback.
+            self.speaking = False
+            self.vad.reset()
+            self._echo_candidate = False
+            self._barge_taken = False
+            await self.send_json({"type": "speak_end"})
         log.info(
             "stage speak first=%s total=%.2fs greeting=%s",
             f"{t_first - t0:.2f}s" if t_first else "none",
@@ -289,6 +318,7 @@ class Session:
             kind, payload = await self.queue.get()
             self.interrupted = False
             self.turn_active = True
+            self.last_activity = __import__("time").time()
             try:
                 assert self.pipeline is not None
 
@@ -443,11 +473,35 @@ class Session:
                         continue
                     if not self.started:
                         continue
+                self.last_activity = __import__("time").time()
                 self.partial.extend(message)
                 while len(self.partial) >= FRAME_BYTES:
                     frame = bytes(self.partial[:FRAME_BYTES])
                     del self.partial[:FRAME_BYTES]
                     event = self.vad.feed(frame)
+                    if self.speaking:
+                        # Our own voice is in the room. Ignore the echo onset, then
+                        # require sustained speech before treating it as an interruption.
+                        if self._barge_taken:
+                            # Already handling an interruption: keep buffering the
+                            # caller's sentence so it is transcribed once, whole.
+                            continue
+                        if event == "speech_start":
+                            if __import__("time").time() < self._echo_guard_until:
+                                self._echo_candidate = False
+                                self.vad.reset()
+                            else:
+                                self._echo_candidate = True
+                        elif self._echo_candidate and self.vad.sustained():
+                            # Interrupt exactly once. The utterance stays in the VAD
+                            # so the rest of the sentence is not thrown away.
+                            self._echo_candidate = False
+                            self._barge_taken = True
+                            self.interrupted = True
+                            if self.pipeline is not None:
+                                self.pipeline.handle_barge_in()
+                            await self.send_json({"type": "interrupted"})
+                        continue
                     if event == "speech_start":
                         # Immediate UI feedback: the orb reacts while the caller is
                         # still speaking, not only after transcription finishes.
@@ -456,6 +510,7 @@ class Session:
                         self.hypothesis = ""
                         await self.send_json({"type": "hearing"})
                     elif event == "endpoint":
+                        self._barge_taken = False
                         pcm = self.vad.take()
                         if pcm and self.pipeline is not None:
                             await self._drain_draft()
@@ -494,7 +549,45 @@ class Session:
                 elif kind == "ping":
                     await self.send_json({"type": "pong"})
 
+    async def _start_watchdog(self) -> None:
+        if self.watchdog is None:
+            self.watchdog = asyncio.create_task(self._watchdog())
+
+    async def _watchdog(self) -> None:
+        """Call guardrails: nudge on silence, hang up when it continues, cap length."""
+        max_call = float(os.getenv("MAX_CALL_S", "600"))
+        nudge_after = float(os.getenv("IDLE_NUDGE_S", "14"))
+        hangup_after = float(os.getenv("IDLE_HANGUP_S", "32"))
+        while True:
+            await asyncio.sleep(2)
+            try:
+                if not self.started:
+                    continue
+                now = __import__("time").time()
+                idle = now - self.last_activity
+                if now - self.call_started > max_call:
+                    await self._speak("Thanks for your time today. Goodbye!")
+                    await asyncio.sleep(0.4)
+                    await self.ws.close()
+                    return
+                if self.speaking or self.turn_active:
+                    self.last_activity = now
+                    continue
+                if idle >= nudge_after and self.idle_nudges == 0:
+                    self.idle_nudges = 1
+                    self.last_activity = now
+                    await self._speak("Are you still there?")
+                elif idle >= hangup_after:
+                    await self._speak("I did not hear anything, so I will let you go. Goodbye!")
+                    await asyncio.sleep(0.4)
+                    await self.ws.close()
+                    return
+            except Exception:  # noqa: BLE001 - watchdog must never kill the session
+                log.exception("watchdog tick failed")
+
     async def close(self) -> None:
+        if self.watchdog:
+            self.watchdog.cancel()
         if self.greet_task:
             self.greet_task.cancel()
             try:
