@@ -39,10 +39,12 @@ _models_warmed = False
 STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 
 # How long the endpoint waits for the in-flight model warm-up before answering anyway.
-DRAFT_JOIN_TIMEOUT = float(os.getenv("DRAFT_JOIN_TIMEOUT_S", "3.5"))
+# Race the draft: if it lands within this window the answer comes from cache,
+# otherwise answer immediately rather than making the caller wait for it.
+DRAFT_JOIN_TIMEOUT = float(os.getenv("DRAFT_JOIN_TIMEOUT_S", "0.8"))
 
 # Don't speculate on short replies ("yes", "okay") - it only burns CPU.
-STT_DRAFT_MIN_BYTES = int(float(os.getenv("STT_DRAFT_MIN_MS", "1600")) * 32)
+STT_DRAFT_MIN_BYTES = int(float(os.getenv("STT_DRAFT_MIN_MS", "1200")) * 32)
 
 # Short acknowledgements are synthesised once at boot and replayed from memory, so
 # the customer hears "Got it" within milliseconds of finishing their sentence

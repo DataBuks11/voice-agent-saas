@@ -231,8 +231,10 @@ async function warmDraft(
       context: contextText,
       user: body.content,
       fallback: "",
+      maxTokens: 120,
     });
     if (result.text) cachePut(body.content, result.text, result.source);
+    console.log(`draft cached (${result.source}, ${result.text.length} chars)`);
   } catch (err) {
     console.error(`draft warm failed: ${(err as Error).message}`);
   }

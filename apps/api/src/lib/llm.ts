@@ -84,6 +84,8 @@ export interface LlmOptions {
   context: string;
   user: string;
   fallback: string;
+  /** Draft turns only need a short spoken answer, so cap generation. */
+  maxTokens?: number;
 }
 
 /**
@@ -99,7 +101,7 @@ export async function complete(opts: LlmOptions): Promise<LlmResult> {
 
   const base = (process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
   const model = process.env.LLM_MODEL || "gpt-4o-mini";
-  const maxTokens = Number(process.env.LLM_MAX_TOKENS ?? 300);
+  const maxTokens = opts.maxTokens ?? Number(process.env.LLM_MAX_TOKENS ?? 300);
   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 15000);
   const reasoningEffort = process.env.LLM_REASONING_EFFORT ?? "";
 
@@ -164,7 +166,7 @@ export async function completeStream(opts: LlmOptions, onDelta: (chunk: string) 
 
   const base = (process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
   const model = process.env.LLM_MODEL || "gpt-4o-mini";
-  const maxTokens = Number(process.env.LLM_MAX_TOKENS ?? 300);
+  const maxTokens = opts.maxTokens ?? Number(process.env.LLM_MAX_TOKENS ?? 300);
   const timeoutMs = Number(process.env.LLM_TIMEOUT_MS ?? 15000);
   const reasoningEffort = process.env.LLM_REASONING_EFFORT ?? "";
 
