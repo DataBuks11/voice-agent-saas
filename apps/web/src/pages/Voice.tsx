@@ -356,7 +356,7 @@ export function VoicePage() {
 
             <div className="voice-hints">
               <span className="pipe-step">headphones = cleanest barge-in</span>
-              <span className="pipe-step">first reply ≈ 15–25s (local STT/TTS)</span>
+              <span className="pipe-step">first reply ≈ 5–9s (STT + grounded turn + TTS)</span>
               <span className="pipe-step">answers grounded in your knowledge</span>
             </div>
 
@@ -408,9 +408,9 @@ export function VoicePage() {
               <div className="v">
                 <span className="badge muted">mic 16k pcm</span>{" "}
                 <span className="badge muted">energy vad</span>{" "}
-                <span className="badge muted">faster-whisper</span>{" "}
-                <span className="badge muted">deepseek v4.1 flash</span>{" "}
-                <span className="badge muted">piper tts</span>
+                <span className="badge muted">whisper</span>{" "}
+                <span className="badge muted">gemini-2.5-flash</span>{" "}
+                <span className="badge muted">sentence tts</span>
               </div>
             </div>
           </div>
