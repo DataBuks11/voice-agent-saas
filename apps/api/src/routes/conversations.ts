@@ -246,10 +246,12 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       }));
 
     let retrieved: RetrievalResult[] = [];
+    const toolForRoute = decision.route === "use_tools" ? decision.requiredTools?.[0] : undefined;
     const needsRetrieval =
       decision.route === "answer_from_knowledge" ||
       decision.route === "web_search" ||
-      (decision.route === "use_tools" && decision.requiredTools?.[0] === "book_appointment");
+      toolForRoute === "book_appointment" ||
+      (toolForRoute === "get_location" && !agent.location);
     if (needsRetrieval && docCount > 0 && queryVector) {
       const { data: hits, error: searchErr } = await db.rpc("match_chunks", {
         p_workspace_id: body.workspaceId,
