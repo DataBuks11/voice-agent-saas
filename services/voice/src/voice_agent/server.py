@@ -278,6 +278,8 @@ class Session:
         t0 = _time.time()
         t_first: float | None = None
         started = False
+        total_bytes = 0
+        out_rate = SAMPLE_RATE
         for sentence in _split_sentences(text):
             if self.interrupted:
                 break
@@ -299,7 +301,9 @@ class Session:
                 await self.send_json({"type": "speak_start"})
                 started = True
                 t_first = _time.time()
+            out_rate = chunk.sample_rate or SAMPLE_RATE
             data = chunk.pcm16
+            total_bytes += len(data)
             for i in range(0, len(data), 16384):
                 if self.interrupted or (is_greeting and self.turn_active):
                     break
@@ -307,6 +311,17 @@ class Session:
         if started:
             await self.send_json({"type": "audio_end"})
         if started:
+            # Audio is buffered by the client, so we are still "speaking" after the
+            # last byte is sent. Stay armed for the playback length, otherwise a
+            # caller who talks over the tail is treated as a fresh turn.
+            playback_s = total_bytes / float(out_rate * 2)
+            if t_first is not None and not self.interrupted:
+                remaining = (t_first + playback_s) - _time.time()
+                if 0 < remaining < 30:
+                    try:
+                        await asyncio.sleep(remaining)
+                    except asyncio.CancelledError:  # noqa: PERF203
+                        raise
             self.speaking = False
             self._echo_candidate = False
             await self.send_json({"type": "speak_end"})

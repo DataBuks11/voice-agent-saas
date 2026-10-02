@@ -321,3 +321,33 @@ async def test_stale_turn_watchdog_ignores_a_healthy_stream(monkeypatch):
     except asyncio.CancelledError:
         pass
     assert session.queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_stays_armed_while_the_client_is_still_playing(monkeypatch):
+    """The client buffers audio, so we are speaking until playback finishes."""
+    monkeypatch.setattr(srv, "_stt", StubSTT())
+    session, ws, pipeline = await _session([])
+    await session._speak("Hello there.")
+    seconds = ws.audio_bytes() / (16000 * 2)
+    assert 0.4 <= seconds <= 2.0  # about half a second of speech
+    assert session.speaking is False  # released after the playback window
+
+
+@pytest.mark.asyncio
+async def test_playback_window_keeps_barge_in_armed(monkeypatch):
+    monkeypatch.setattr(srv, "_stt", StubSTT())
+    session, ws, pipeline = await _session([])
+    task = asyncio.create_task(session._speak("One two three four five."))
+    # while the client would still be playing, a caller must be able to interrupt
+    for _ in range(200):
+        if session.speaking:
+            break
+        await asyncio.sleep(0.005)
+    assert session.speaking is True
+    assert pipeline.barge_ins == 0
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
