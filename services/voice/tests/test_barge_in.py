@@ -262,7 +262,8 @@ async def test_words_spoken_during_our_audio_are_not_lost(monkeypatch):
     monkeypatch.setattr(srv, "_stt", StubSTT())
     monkeypatch.setattr(srv, "_tts", StubTTS())
     session, ws, pipeline = await _session([])
-    ws.script = [frame(1500, 0.3)]
+    # trailing silence so the endpoint closes the utterance after our audio stops
+    ws.script = [frame(1500, 0.3) + frame(700, 0.0)]
     ws.gate = asyncio.Event()  # hold the caller's words until we are speaking
     runner = asyncio.create_task(session.run())
     # a multi-sentence greeting so "speaking" lasts long enough to interrupt
@@ -391,7 +392,7 @@ async def test_interruption_transcript_covers_the_whole_utterance(monkeypatch):
     monkeypatch.setattr(srv, "_stt", stt)
     monkeypatch.setattr(srv, "_tts", StubTTS())
     session, ws, pipeline = await _session([])
-    ws.script = [frame(1500, 0.3)]
+    ws.script = [frame(1500, 0.3) + frame(700, 0.0)]
     ws.gate = asyncio.Event()
     runner = asyncio.create_task(session.run())
     greeting = asyncio.create_task(
@@ -406,3 +407,33 @@ async def test_interruption_transcript_covers_the_whole_utterance(monkeypatch):
     await asyncio.wait_for(runner, timeout=5)
     assert session.queue.qsize() == 1
     assert max(stt.seen) >= 1000 * 16000 // 1000 * 2
+
+
+@pytest.mark.asyncio
+async def test_caller_who_keeps_talking_is_captured_whole(monkeypatch):
+    """Regression: flushing at speak_end answered only the first word."""
+    stt = RecordingSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    monkeypatch.setattr(srv, "_tts", StubTTS())
+    session, ws, pipeline = await _session([])
+    # 0.6 s of speech, we stop talking, then 1.2 s more from the caller
+    ws.script = [frame(600, 0.3), frame(1200, 0.3), frame(700, 0.0)]
+    ws.gate = asyncio.Event()
+    runner = asyncio.create_task(session.run())
+    greeting = asyncio.create_task(
+        session._speak("Hello there. Thanks for calling. How can I help you today.")
+    )
+    for _ in range(400):
+        if session.speaking:
+            break
+        await asyncio.sleep(0.001)
+    ws.gate.set()
+    await asyncio.wait_for(greeting, timeout=5)
+    await asyncio.wait_for(runner, timeout=5)
+    assert pipeline.barge_ins == 1
+    # one utterance, containing everything the caller said
+    assert session.queue.qsize() == 1
+    _kind, payload = session.queue.get_nowait()
+    spoken_ms = len(payload) / (16000 * 2) * 1000
+    assert spoken_ms >= 1700, f"only {spoken_ms:.0f} ms captured"
+    assert session.hypothesis == "Actually, tell me about the enterprise plan instead."

@@ -35,14 +35,30 @@ const steps = [
 ];
 if (docArg) steps.push({ name: "document QA", cmd: "node", args: ["scripts/_doc_qa.mjs", docArg] });
 
+// tsx ships in the api workspace; call its CLI entry directly (the .bin shims
+// are shell scripts and cannot be passed to node directly on Windows).
+import { existsSync } from "node:fs";
+const TSX = ["node_modules/tsx/dist/cli.mjs", "apps/api/node_modules/tsx/dist/cli.mjs"]
+  .map((p) => p.replace(/\//g, process.platform === "win32" ? "\\" : "/"))
+  .find((p) => existsSync(p));
+if (!TSX) {
+  console.error("could not find tsx; run pnpm install first");
+  process.exit(1);
+}
+
 const run = (step) =>
   new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn(step.cmd, step.args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...(step.env ?? {}) },
-      shell: process.platform === "win32",
-    });
+    const isTsx = step.cmd === "tsx";
+    const child = spawn(
+      isTsx ? process.execPath : step.cmd,
+      isTsx ? [TSX, ...step.args] : step.args,
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, ...(step.env ?? {}) },
+        shell: !isTsx && process.platform === "win32",
+      },
+    );
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));

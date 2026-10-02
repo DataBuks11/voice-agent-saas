@@ -325,8 +325,13 @@ class Session:
             self.speaking = False
             self._echo_candidate = False
             await self.send_json({"type": "speak_end"})
-            if self._barge_taken:
-                # The buffer holds the caller talking over us: answer it, never drop it.
+            if self._barge_taken and self.vad.in_speech:
+                # The caller is still talking. Leave the utterance open so the
+                # endpoint captures the whole sentence; flushing here would
+                # answer the first word only ("Actually" -> "how can I help you?").
+                pass
+            elif self._barge_taken:
+                # They stopped while we were still speaking: answer what we have.
                 await self._flush_interruption()
             else:
                 # Pure playback bleed: throw it away.
