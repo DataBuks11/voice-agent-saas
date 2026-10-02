@@ -326,14 +326,6 @@ async function offerIfSlot(
   };
 }
 
-/** Front-desk vs patient-intake: a call about a patient or a death needs the
- *  intake slots (relative, patient, hospital, callback) rather than a haircut. */
-function pickIntent(text: string): "patient_intake" | "new_patient_booking" {
-  return /(patient|death|dead ?body|deceased|body shifting|ambulance|hospital|funeral|last rites|cremation|shmashan)/i.test(text)
-    ? "patient_intake"
-    : "new_patient_booking";
-}
-
 const STOPWORDS = new Set([
   "what", "when", "where", "which", "who", "why", "how", "is", "are", "was", "were", "do", "does",
   "did", "can", "could", "should", "would", "will", "the", "a", "an", "of", "and", "or", "to", "in",
@@ -347,11 +339,42 @@ const questionTokens = (text: string): string[] =>
     .split(/\s+/)
     .filter((t) => t.length > 2 && !STOPWORDS.has(t));
 
+/** Front-desk vs patient-intake: a call about a patient or a death needs the
+ *  intake slots (relative, patient, hospital, callback) rather than a haircut. */
+function pickIntent(text: string): "patient_intake" | "new_patient_booking" {
+  return /(patient|death|dead ?body|deceased|body shifting|ambulance|hospital|funeral|last rites|cremation|shmashan)/i.test(text)
+    ? "patient_intake"
+    : "new_patient_booking";
+}
+
+const HEADING_STOPWORDS = new Set([
+  "a","an","the","of","in","on","to","for","and","or","but","with","from","by","as","at","it",
+  "its","this","that","these","those","you","your","i","we","they","he","she","his","her","our",
+  "their","my","me","us","them",
+]);
+
+/** Words that turn a fragment into a statement. */
+const HEADING_VERBS = new Set([
+  "is","are","was","were","be","been","am","has","have","had","can","could","will","would",
+  "shall","should","must","may","might","do","does","did","need","needs","require","requires",
+  "include","includes","contain","contains","mean","means","refer","refers","cost","costs",
+]);
+
 /**
- * Answer from the knowledge base without calling the model at all: the single
- * sentence that best matches the question wins. Turns a lookup into a ~100ms
- * reply instead of a 2s model round trip.
+ * "Count Number of Lines in a File" overlaps the question word for word, but it is
+ * a heading, not an answer. A capitalised noun phrase with no verb reads as
+ * nonsense when spoken, so let the model phrase it instead.
  */
+export function looksLikeHeading(sentence: string): boolean {
+  const words = sentence.split(/\s+/).filter(Boolean);
+  if (words.length > 9) return false; // long text is prose even without an auxiliary
+  if (words.some((w) => HEADING_VERBS.has(w.toLowerCase().replace(/[^a-z]/g, "")))) return false;
+  const content = words.filter((w) => !HEADING_STOPWORDS.has(w.toLowerCase()));
+  if (!content.length) return true;
+  const capitalised = content.filter((w) => /^[A-Z]/.test(w)).length;
+  return capitalised / content.length >= 0.6;
+}
+
 export function extractiveAnswer(question: string, hits: RetrievalResult[], minRatio: number): string | null {
   if (!hits.length) return null;
   const qTokens = new Set(questionTokens(question));
@@ -366,9 +389,11 @@ export function extractiveAnswer(question: string, hits: RetrievalResult[], minR
         sentence = sentence.slice(title.length).replace(/^\s*[:\-]\s*/, "").trim();
       }
       const words = sentence.split(/\s+/).filter(Boolean);
-      if (words.length < 5 || words.length > 45) continue;
+      const minWords = Number(process.env.RAG_EXTRACTIVE_MIN_WORDS ?? 5);
+      if (words.length < minWords || words.length > 45) continue;
       // Skip code-ish fragments: they read as gibberish when spoken aloud.
       if (/["'`]\s*[,)]|[{}();]|\w+\s*\(/.test(sentence)) continue;
+      if (looksLikeHeading(sentence)) continue;
       const tokens = questionTokens(sentence);
       if (!tokens.length) continue;
       const shared = tokens.filter((t) => qTokens.has(t)).length;

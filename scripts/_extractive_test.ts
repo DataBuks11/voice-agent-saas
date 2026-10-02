@@ -1,4 +1,4 @@
-﻿import { extractiveAnswer } from "../apps/api/src/routes/conversations.js";
+﻿import { extractiveAnswer, looksLikeHeading } from "../apps/api/src/routes/conversations.js";
 
 const hits = [
   { id: "1", workspaceId: "w", documentId: "d", content: "Unit-4 programme: Store student information in a file. Find the student with the highest marks. Display lines containing a specific word. Count lines, words and characters using file commands.", tokens: 0, metadata: {}, score: 0.31 },
@@ -18,5 +18,18 @@ check("code fragment rejected", extractiveAnswer("how do I find the student with
 ], 0.5) === null, "");
 const d = extractiveAnswer("what is the capital of France", hits, 0.5);
 check("unrelated question returns null", d === null, `-> ${d}`);
+// Headings overlap the question but are not answers.
+const headingHits = [
+  { id: "3", workspaceId: "w", documentId: "d", content: "Count Number of Lines in a File\nStore Student Information in a File", tokens: 0, metadata: {}, score: 0.4 },
+];
+check(
+  "bare heading is rejected",
+  extractiveAnswer("how do I count lines in a file?", headingHits, 0.5) === null,
+  `-> ${extractiveAnswer("how do I count lines in a file?", headingHits, 0.5)}`,
+);
+check("heading detector flags a noun phrase", looksLikeHeading("Count Number of Lines in a File"));
+check("heading detector keeps a statement", !looksLikeHeading("Hash values are generated with the md5sum command."));
+check("heading detector keeps a short imperative", !looksLikeHeading("Find the student with the highest marks."));
+
 console.log(fails === 0 ? "\nEXTRACTIVE PASS" : `\nEXTRACTIVE FAIL (${fails})`);
 process.exit(fails === 0 ? 0 : 1);
