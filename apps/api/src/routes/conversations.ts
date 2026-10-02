@@ -57,6 +57,21 @@ BOOK|YYYY-MM-DD HH:MM|name|contact
 then continue with a short, warm spoken confirmation. Use only details the customer gave — never invent them.
 - If any detail is missing, do NOT output the BOOK line; just ask naturally.`;
 
+/** Current business date so "tomorrow 5pm" resolves correctly. */
+function todayInfo(): string {
+  const tz = process.env.BUSINESS_TIMEZONE || "UTC";
+  try {
+    const d = new Date();
+    const date = d.toLocaleDateString("en-CA", { timeZone: tz });
+    const day = d.toLocaleDateString("en-US", { timeZone: tz, weekday: "long" });
+    return `Today's date is ${date} (${day}).`;
+  } catch {
+    return `Today's date is ${new Date().toISOString().slice(0, 10)}.`;
+  }
+}
+
+const systemWithStyle = (base: string) => `${base}\n\n${todayInfo()}\n\n${VOICE_STYLE}`;
+
 async function loadAgent(workspaceId: string, agentId: string | undefined): Promise<Agent> {
   const db = getSupabase();
   const query = db.from("agents").select().eq("workspace_id", workspaceId);
@@ -271,7 +286,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
       });
       const llmResult = await complete({
-        system: `${ctx.systemPrompt}\n\n${VOICE_STYLE}`,
+        system: systemWithStyle(ctx.systemPrompt),
         context: `${ctx.contextText}\n\n${BOOKING_INSTRUCTIONS}`,
         user: body.content,
         fallback: agent.fallbackResponse,
@@ -313,7 +328,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         maxTokens: agent.maxTokens || Number(process.env.CONTEXT_MAX_TOKENS ?? 6000),
       });
       const llmResult = await complete({
-        system: `${ctx.systemPrompt}\n\n${VOICE_STYLE}`,
+        system: systemWithStyle(ctx.systemPrompt),
         context: ctx.contextText,
         user: body.content,
         fallback: agent.fallbackResponse,
