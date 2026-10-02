@@ -726,7 +726,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     if (draft) {
       // Speculative turn: answer from cache when we can, otherwise compute and
       // cache it without persisting anything. The real turn then hits the cache.
-      const warmed = cacheGet(body.content, 0.99);
+      const warmed = cacheGet(body.content, 0.99, "warm");
       if (warmed) return reply.send({ draft: true, cached: true });
       await warmDraft(body, agent, history, docCount);
       return reply.send({ draft: true, cached: false });
@@ -892,7 +892,8 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         const llmOpts = ungrounded ? { ...opts, system: `${opts.system}\n\n${UNGROUNDED_NOTE}` } : opts;
         const tLlm = Date.now();
         // A draft of the same question already warmed this answer: reuse it.
-        const drafted = ungrounded ? null : cacheGet(body.content, 0.72);
+        const cacheScope = `docs${docCount}`;
+        const drafted = ungrounded ? null : cacheGet(body.content, 0.72, cacheScope);
         const llmResult = drafted
           ? { text: drafted, source: "llm" as const }
           : streamed
@@ -905,7 +906,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         }
         llmMs = Date.now() - tLlm;
         answerText = llmResult.text;
-        if (llmResult.source === "llm") cachePut(body.content, llmResult.text, llmResult.source);
+        if (llmResult.source === "llm") cachePut(body.content, llmResult.text, llmResult.source, cacheScope);
         // Voice callers cannot wait 8 seconds for a token: past the budget we take
         // the grounded extractive answer instead (still sourced from knowledge).
         const voiceBudget = Number(process.env.LLM_VOICE_BUDGET_MS ?? 3000);

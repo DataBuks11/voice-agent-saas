@@ -25,9 +25,9 @@ function similarity(a: string, b: string): number {
   return shared / (ta.size + tb.size - shared);
 }
 
-export function cacheGet(question: string, minSimilarity = 0.8): string | null {
+export function cacheGet(question: string, minSimilarity = 0.8, scope = ""): string | null {
   const now = Date.now();
-  const key = normalizeQuestion(question);
+  const key = scope + "|" + normalizeQuestion(question);
   if (!key) return null;
   const exact = answerCache.get(key);
   if (exact) {
@@ -50,8 +50,10 @@ export function cacheGet(question: string, minSimilarity = 0.8): string | null {
   return null;
 }
 
-export function cachePut(question: string, text: string, source: LlmResult["source"]): void {
-  const key = normalizeQuestion(question);
+export function cachePut(question: string, text: string, source: LlmResult["source"], scope = ""): void {
+  // The scope keeps answers from before a knowledge change (e.g. a document was
+  // just ingested) from shadowing the grounded answer.
+  const key = scope + "|" + normalizeQuestion(question);
   if (!key || !text) return;
   if (answerCache.size >= CACHE_MAX) answerCache.delete(answerCache.keys().next().value as string);
   answerCache.set(key, { text, source, at: Date.now() });
