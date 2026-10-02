@@ -206,7 +206,9 @@ export async function persistCapture(write: BookingWrite): Promise<{ customerId:
   };
 
   const insert = async (withCapture: boolean): Promise<string | null> => {
-    const row = withCapture ? { ...base, capture: capturePayload } : base;
+    const row: Record<string, unknown> = { ...base };
+    if (withCapture) row.capture = capturePayload;
+    else delete row.customer_id;
     const { data: booking, error } = await db.from("bookings").insert(row).select("id").maybeSingle();
     if (error) {
       if (withCapture && missingColumn(error.message)) return insert(false);
