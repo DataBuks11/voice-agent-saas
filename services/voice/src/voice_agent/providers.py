@@ -23,7 +23,7 @@ class LLMProvider(ABC):
     name: str = "base-llm"
 
     @abstractmethod
-    async def complete(self, system: str, context: str, user: str) -> str:
+    async def complete(self, system: str, context: str, user: str, draft: bool = False) -> str:
         raise NotImplementedError
 
 
@@ -52,7 +52,7 @@ class StubSTT(STTProvider):
 class StubLLM(LLMProvider):
     name = "stub-llm"
 
-    async def complete(self, system: str, context: str, user: str) -> str:
+    async def complete(self, system: str, context: str, user: str, draft: bool = False) -> str:
         return "Voice pipeline stub: configure LLM_PROVIDER + LLM_API_KEY for real answers."
 
 

@@ -22,6 +22,26 @@ _LOCAL = ("local", "faster-whisper", "piper")
 # customers). Refreshed per session from the API; empty is harmless.
 _STT_DICTIONARY: list[str] = []
 
+# Beam width trades speed for accuracy: 1 is fastest, 5 is what a real
+# receptionist call deserves (STT runs off the critical path).
+BEAM_SIZE = max(1, min(5, int(os.getenv("STT_BEAM_SIZE", "3"))))
+
+# The kinds of things callers say on the phone. Whisper leans hard on its prompt,
+# so this pulls the decoder towards call language instead of dictation language.
+CALL_VOCABULARY = (
+    "Phone call with a customer. Front desk booking: appointment, booking, cleaning, consultation, "
+    "checkup, new patient, returning patient, date of birth, morning, afternoon, evening, zip code, "
+    "insurance, member ID, member id, policy number, hospital, patient, ambulance, body shifting, "
+    "price, cost, timing, hours, address, map, transfer, call back, spell it out."
+)
+
+
+def build_stt_prompt() -> str | None:
+    terms = [t for t in stt_dictionary()[:80] if t]
+    if not terms:
+        return CALL_VOCABULARY
+    return f"{CALL_VOCABULARY} Names and terms: " + ", ".join(terms)
+
 
 def set_stt_dictionary(terms: list[str]) -> None:
     global _STT_DICTIONARY
@@ -294,20 +314,29 @@ class FasterWhisperSTT(STTProvider):
         from faster_whisper import WhisperModel
 
         size = model_size or os.getenv("STT_MODEL", "base.en")
+        self._model_is_english_only = size.endswith(".en")
         self._model = WhisperModel(size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
         self._lock = asyncio.Lock()
-        self._language = (os.getenv("STT_LANGUAGE") or "en").strip() or "en"
-        self._configured_language = os.getenv("STT_LANGUAGE") or ""
-        log.info("STT ready: faster-whisper %s (int8) lang=%s", size, self._language)
+        configured = (os.getenv("STT_LANGUAGE") or "auto").strip().lower() or "auto"
+        # "auto" lets whisper detect the language: forcing "en" mangles Hindi/Hinglish.
+        self._language = None if configured in ("auto", "") else configured
+        self._configured_language = configured if configured != "auto" else ""
+        log.info("STT ready: faster-whisper %s (int8) lang=%s", size, self._language or "auto")
 
     def set_language(self, language: str) -> None:
-        """Multilingual calls need a matching decoder; tiny.en only does English."""
+        """Pin the decoder to the agent's language when the operator asked for one."""
         if self._configured_language:
             return
         lang = (language or "en").strip().lower()[:2]
-        if lang and lang != self._language[:2]:
-            self._language = lang
-            log.info("stt language -> %s", lang)
+        if not lang:
+            return
+        # A .en model only decodes English; other languages need the multilingual one.
+        if self._model_is_english_only and lang != "en":
+            log.info("stt stays auto (english-only model, got %s)", lang)
+            return
+        if lang != (self._language or "en")[:2]:
+            self._language = None if lang == "en" and not self._configured_language else lang
+            log.info("stt language -> %s", self._language or "auto")
 
     async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> Transcript:
         async with self._lock:
@@ -322,13 +351,16 @@ class FasterWhisperSTT(STTProvider):
             if target < 160:
                 return Transcript(text="", confidence=0.0)
             audio = np.interp(np.linspace(0, len(audio) - 1, target), np.arange(len(audio)), audio).astype(np.float32)
-        # Known names/business terms bias the decoder, so a name the caller spelled
-        # out once is transcribed correctly the next time.
-        prompt = ", ".join(stt_dictionary()[:60]) or None
+        # Known names/business terms plus call vocabulary bias the decoder, so the
+        # transcript comes back with the wording this business actually uses.
+        prompt = build_stt_prompt()
         segments, info = self._model.transcribe(
             audio,
             language=self._language,
-            beam_size=1,
+            task="transcribe",
+            beam_size=BEAM_SIZE,
+            best_of=BEAM_SIZE,
+            temperature=0.0,
             vad_filter=True,
             condition_on_previous_text=False,
             initial_prompt=prompt,
@@ -404,7 +436,7 @@ class ApiLLM(LLMProvider):
         token = await self._auth.token() if self._auth else (self._token or "")
         return {"Authorization": f"Bearer {token}", "x-workspace-id": self._ws}
 
-    async def complete(self, system: str, context: str, user: str) -> str:
+    async def complete(self, system: str, context: str, user: str, draft: bool = False) -> str:
         payload: dict = {"workspaceId": self._ws, "content": user}
         if self._agent_id:
             payload["agentId"] = self._agent_id

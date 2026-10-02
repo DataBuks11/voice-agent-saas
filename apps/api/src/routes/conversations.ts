@@ -16,7 +16,7 @@ import { parseSlotIso } from "../lib/captureFlow.js";
 import { getSupabase } from "../lib/supabase.js";
 import { requireTenant } from "../lib/tenant.js";
 import { embedAll } from "../lib/embeddings.js";
-import { complete, completeStream } from "../lib/llm.js";
+import { cacheGet, cachePut, complete, completeStream } from "../lib/llm.js";
 import {
   applyAnswer,
   currentSlot,
@@ -44,6 +44,8 @@ const messageSchema = z.object({
   agentId: z.string().uuid().optional(),
   /** Ask for an SSE stream (first token ~600ms); server falls back to JSON on fast paths. */
   stream: z.boolean().optional(),
+  /** Speculative turn from a partial transcript: warms the answer, never persisted. */
+  draft: z.boolean().optional(),
 });
 
 /** Platform tools advertised to the decision engine. */
@@ -188,6 +190,52 @@ async function runSlotOfferTurn(
   }
   void state;
   return { spoken: spoken.join(" "), offers };
+}
+
+/**
+ * Speculative draft: answer the partial transcript the recogniser produced and
+ * keep it in the cache, so when the final transcript lands the caller hears the
+ * reply immediately instead of paying another ~2s of model time.
+ */
+async function warmDraft(
+  body: { content: string },
+  agent: Agent,
+  history: ConversationMessage[],
+  docCount: number,
+): Promise<void> {
+  if (docCount === 0) return; // nothing to ground on; the real turn is a chatbot reply
+  if (body.content.trim().split(/\s+/).length < 3) return;
+  try {
+    const db = getSupabase();
+    const embedding = await embedAll([body.content]).catch(() => null);
+    let contextText = "";
+    if (embedding?.[0]) {
+      const { data: hits } = await db.rpc("match_chunks", {
+        p_workspace_id: agent.workspaceId,
+        p_query_embedding: embedding[0],
+        p_top_k: Number(process.env.RAG_TOP_K ?? 6),
+        p_filter: {},
+      });
+      const mapped = (hits ?? []) as Record<string, unknown>[];
+      const minScore = Number(process.env.RAG_MIN_SCORE ?? 0.32);
+      const strong = mapped.filter((h) => Number(h.score) >= minScore);
+      if (strong.length) {
+        contextText = strong
+          .slice(0, 3)
+          .map((h) => String(h.content))
+          .join("\n\n");
+      }
+    }
+    const result = await complete({
+      system: systemWithStyle(agent.systemPrompt, agent.language),
+      context: contextText,
+      user: body.content,
+      fallback: "",
+    });
+    if (result.text) cachePut(body.content, result.text, result.source);
+  } catch (err) {
+    console.error(`draft warm failed: ${(err as Error).message}`);
+  }
 }
 
 /** Add a booked slot to the agent's diary so the engine stops offering it. */
@@ -544,6 +592,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       }
       return reply;
     };
+    const draft = body.draft === true;
     const db = getSupabase();
     const t0 = Date.now();
     let embedMs = 0;
@@ -661,6 +710,15 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       canonicalName: async (spoken) => (await canonicalName(body.workspaceId, spoken)).canonical,
       llm: (slot, text, data) => slotExtractLlm(slot, text, data),
     };
+
+    if (draft) {
+      // Speculative turn: answer from cache when we can, otherwise compute and
+      // cache it without persisting anything. The real turn then hits the cache.
+      const warmed = cacheGet(body.content, 0.99);
+      if (warmed) return reply.send({ draft: true, cached: true });
+      await warmDraft(body, agent, history, docCount);
+      return reply.send({ draft: true, cached: false });
+    }
 
     if (flowActive && captureState) {
       const system = systemWithStyle(agent.systemPrompt, agent.language);
@@ -821,9 +879,21 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         const ungrounded = docCount === 0;
         const llmOpts = ungrounded ? { ...opts, system: `${opts.system}\n\n${UNGROUNDED_NOTE}` } : opts;
         const tLlm = Date.now();
-        const llmResult = streamed ? await completeStream(llmOpts, writeDelta) : await complete(llmOpts);
+        // A draft of the same question already warmed this answer: reuse it.
+        const drafted = ungrounded ? null : cacheGet(body.content, 0.72);
+        const llmResult = drafted
+          ? { text: drafted, source: "llm" as const }
+          : streamed
+            ? await completeStream(llmOpts, writeDelta)
+            : await complete(llmOpts);
+        if (!drafted && streamed && llmResult.source === "llm") {
+          // streamed path already painted tokens; nothing to do
+        } else if (drafted && streamed) {
+          writeDelta(drafted);
+        }
         llmMs = Date.now() - tLlm;
         answerText = llmResult.text;
+        if (llmResult.source === "llm") cachePut(body.content, llmResult.text, llmResult.source);
         if (ungrounded) {
           verdict = { ok: true, confidence: 0.5, issues: ["ungrounded — no documents uploaded"], safeText: answerText };
           answerSource = "llm-ungrounded";

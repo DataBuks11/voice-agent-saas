@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import { warmLlm } from "./lib/llm.js";
 import { ZodError } from "zod";
 import { loadConfig } from "@voice-agent/config";
 import { createLogger } from "@voice-agent/shared";
@@ -122,6 +123,7 @@ warmupEmbeddings();
 
 // Hosting platforms (Render/Railway) inject PORT — respect it over API_PORT.
 const port = Number(process.env.PORT ?? config.API_PORT);
+void warmLlm();
 app.listen({ port, host: config.API_HOST }).then(() => {
   log.info(`API listening on ${config.API_HOST}:${port}`);
 });

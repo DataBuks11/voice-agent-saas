@@ -287,6 +287,14 @@ class Session:
             finally:
                 self.turn_active = False
 
+    async def draft_text(self, text: str) -> None:
+        """Warm the answer for a partial transcript without speaking or persisting."""
+        assert self.pipeline is not None
+        try:
+            await self.pipeline.handle_text(text, draft=True)
+        except Exception:  # noqa: BLE001 - drafting is best-effort
+            log.debug("draft failed", exc_info=True)
+
     async def _send_backchannel(self) -> None:
         """Pre-cached acknowledgement so the caller never hears dead air.
 
@@ -370,8 +378,12 @@ class Session:
                 elif kind == "text":
                     # Browser Web Speech API transcript — STT already done client-side.
                     text = str(msg.get("text") or "").strip()
+                    draft = bool(msg.get("draft"))
                     if text and self.started and self.pipeline is not None:
-                        await self.enqueue("text", text)
+                        if draft:
+                            await self.draft_text(text)
+                        else:
+                            await self.enqueue("text", text)
                 elif kind == "interrupt":
                     self.interrupted = True
                     if self.pipeline is not None:

@@ -52,12 +52,21 @@ class VoicePipeline:
             return ""
         return await self._complete_turn(tr.text, on_transcript, t0=t0, t_stt=t_stt)
 
-    async def handle_text(self, text: str, on_transcript=None) -> str:
+    async def handle_text(self, text: str, on_transcript=None, draft: bool = False) -> str:
         """Browser-side STT (Web Speech API) arrives as text — skip server STT entirely."""
         import time as _time
 
         t0 = _time.time()
         if not text.strip():
+            return ""
+        if draft:
+            # Speculative: warm the answer, stay silent, let the real turn speak.
+            await self.llm.complete(
+                system="You are a helpful voice assistant.",
+                context=self.state.history_text(),
+                user=text,
+                draft=True,
+            )
             return ""
         return await self._complete_turn(text, on_transcript, t0=t0, t_stt=None)
 
@@ -69,7 +78,7 @@ class VoicePipeline:
             result = on_transcript(text)
             if result is not None and hasattr(result, "__await__"):
                 await result
-        answer = await self.llm.complete(system="You are a helpful voice assistant.", context=self.state.history_text(), user=text)
+        answer = await self.llm.complete(system="You are a helpful voice assistant.", context=self.state.history_text(), user=text)  # noqa: E501
         if t_stt is not None:
             log.info("stage stt %.2fs llm %.2fs", t_stt - t0, _time.time() - t_stt)
         elif t0 is not None:

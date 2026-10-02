@@ -1,3 +1,79 @@
+/**
+ * Short-lived answer cache.
+ *
+ * A voice call says the same things repeatedly ("how much is a haircut?" twice,
+ * a re-phrased question while the recogniser settles). Gemini's first token costs
+ * ~1.3-2s, so serving a near-identical recent question from memory removes that
+ * wait entirely.
+ */
+const answerCache = new Map<string, { text: string; source: LlmResult["source"]; at: number }>();
+const CACHE_TTL_MS = Number(process.env.LLM_CACHE_TTL_MS ?? 90000);
+const CACHE_MAX = 200;
+
+const normalizeQuestion = (text: string): string =>
+  text.toLowerCase().replace(/[^a-z0-9\u0900-\u097f ]+/g, " ").replace(/\s+/g, " ").trim();
+
+const tokenSet = (text: string): Set<string> => new Set(normalizeQuestion(text).split(" ").filter(Boolean));
+
+/** Jaccard-ish overlap: robust to the small edits a recogniser makes mid-utterance. */
+function similarity(a: string, b: string): number {
+  const ta = tokenSet(a);
+  const tb = tokenSet(b);
+  if (!ta.size || !tb.size) return 0;
+  let shared = 0;
+  for (const t of ta) if (tb.has(t)) shared++;
+  return shared / (ta.size + tb.size - shared);
+}
+
+export function cacheGet(question: string, minSimilarity = 0.8): string | null {
+  const now = Date.now();
+  const key = normalizeQuestion(question);
+  if (!key) return null;
+  const exact = answerCache.get(key);
+  if (exact) {
+    if (now - exact.at < CACHE_TTL_MS) {
+      exact.at = now;
+      return exact.text;
+    }
+    answerCache.delete(key);
+  }
+  for (const [k, v] of answerCache) {
+    if (now - v.at > CACHE_TTL_MS) {
+      answerCache.delete(k);
+      continue;
+    }
+    if (similarity(key, k) >= minSimilarity) {
+      v.at = now;
+      return v.text;
+    }
+  }
+  return null;
+}
+
+export function cachePut(question: string, text: string, source: LlmResult["source"]): void {
+  const key = normalizeQuestion(question);
+  if (!key || !text) return;
+  if (answerCache.size >= CACHE_MAX) answerCache.delete(answerCache.keys().next().value as string);
+  answerCache.set(key, { text, source, at: Date.now() });
+}
+
+/** Pay the TLS handshake and first-token cost at boot, not on the caller's first turn. */
+export async function warmLlm(): Promise<void> {
+  if (!process.env.LLM_API_KEY) return;
+  try {
+    const t0 = Date.now();
+    await complete({
+      system: "You are a front desk.",
+      context: "",
+      user: "ready check",
+      fallback: "",
+    });
+    console.log(`llm warm-up ok in ${Date.now() - t0}ms`);
+  } catch (err) {
+    console.error(`llm warm-up skipped: ${(err as Error).message}`);
+  }
+}
+
 export interface LlmResult {
   text: string;
   source: "llm" | "grounded-fallback";

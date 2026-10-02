@@ -46,6 +46,7 @@ export function VoicePage() {
   const backchannelChunksRef = React.useRef<Uint8Array[]>([]);
   const backchannelRateRef = React.useRef<number | null>(null);
   const replyStartedRef = React.useRef(false);
+  const draftSentRef = React.useRef(false);
   const playNodesRef = React.useRef<AudioBufferSourceNode[]>([]);
   const playEndTimerRef = React.useRef<number | null>(null);
 
@@ -80,6 +81,7 @@ export function VoicePage() {
               if (socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({ type: "text", text: spoken }));
               }
+              draftSentRef.current = false;
             } else {
               interim += `${spoken} `;
             }
@@ -88,6 +90,13 @@ export function VoicePage() {
           interimRef.current = interim.trim();
           if (interimRef.current) setInterim(interimRef.current);
           else setInterim("");
+          // Speculative draft: the model answers the partial transcript now, so
+          // the final turn can answer instantly instead of paying model latency.
+          const draft = interimRef.current;
+          if (draft.split(/\s+/).length >= 4 && !draftSentRef.current && socket.readyState === WebSocket.OPEN) {
+            draftSentRef.current = true;
+            socket.send(JSON.stringify({ type: "text", text: draft, draft: true }));
+          }
         };
         rec.onerror = (ev: any) => {
           const err = String(ev?.error ?? "");
