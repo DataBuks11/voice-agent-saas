@@ -519,7 +519,7 @@ export const acceptSlotValue = (state: CaptureState, iso: string, spoken: string
 
 export function closingMessage(data: CaptureData): string {
   const who = [data.first_name, data.last_name].filter(Boolean).join(" ");
-  const when = data.appointment ? ` on ${data.appointment}` : "";
+  const when = data.appointment ? ` on ${data.appointment.replace(/[.?!]+\s*$/, "")}` : "";
   const base = `You're all set${who ? `, ${who}` : ""}${when}. We'll see you then!`;
   return `${base} Is there anything else I can help you with today?`;
 }
