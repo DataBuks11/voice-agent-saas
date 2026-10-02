@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { ZodError } from "zod";
 import { loadConfig } from "@voice-agent/config";
 import { createLogger } from "@voice-agent/shared";
@@ -24,6 +25,21 @@ export function buildServer() {
   const app = Fastify({ logger: false });
 
   app.decorate("jwtSecret", config.JWT_SECRET);
+
+  const allowedOrigins = (
+    process.env.CORS_ORIGINS ?? "https://voice-agent-saas-web.vercel.app,http://localhost:5173,http://localhost:3001"
+  )
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  app.register(cors, {
+    origin: (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin)) cb(null, true);
+      else cb(null, false);
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["content-type", "authorization", "x-workspace-id", "x-admin-token", "x-service-key"],
+  });
 
   app.addHook("onRequest", (req, _reply, done) => {
     log.info(`${req.method} ${req.url}`);

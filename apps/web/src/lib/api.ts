@@ -111,7 +111,7 @@ export const api = {
     post<{ items: SearchHit[]; total: number }>("/v1/knowledge/search", { workspaceId: getWorkspace()!.id, query, topK }),
   listConversations: () => get<{ items: ConversationRow[]; total: number }>("/v1/conversations?workspaceId=" + getWorkspace()!.id),
   createConversation: (agentId?: string) =>
-    post<ConversationRow>("/v1/conversations", { workspaceId: getWorkspace()!.id, ...(agentId ? { agentId } : {}) }),
+    post<ConversationRow>("/v1/conversations", { workspaceId: getWorkspace()!.id, channel: "web", ...(agentId ? { agentId } : {}) }),
   messages: (conversationId: string) =>
     get<{ items: MessageRow[]; total: number }>(`/v1/conversations/${conversationId}/messages?workspaceId=${getWorkspace()!.id}`),
   send: (conversationId: string, content: string) =>

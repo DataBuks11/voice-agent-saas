@@ -10,8 +10,7 @@ import { DashboardPage } from "./pages/Dashboard";
 import { AgentsPage } from "./pages/Agents";
 import { KnowledgePage } from "./pages/Knowledge";
 import { ConversationsPage } from "./pages/Conversations";
-
-const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, "");
+import { BASENAME } from "./lib/base";
 
 export interface Toast {
   id: number;
@@ -118,8 +117,8 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  if (!getToken()) return <Navigate to={BASENAME + "/login"} replace />;
-  if (!getWorkspace()) return <Navigate to={BASENAME + "/setup"} replace />;
+  if (!getToken()) return <Navigate to="/login" replace />;
+  if (!getWorkspace()) return <Navigate to="/setup" replace />;
   return <>{children}</>;
 }
 

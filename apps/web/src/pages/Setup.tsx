@@ -1,10 +1,9 @@
 import React from "react";
-import { useNavigate } from "react-router-dom";
 import { api, ApiError, type WorkspaceLite } from "../lib/api";
 import { setWorkspace } from "../lib/session";
+import { BASENAME } from "../lib/base";
 
 export function SetupPage() {
-  const nav = useNavigate();
   const [mode, setMode] = React.useState<"create" | "join">("create");
   const [name, setName] = React.useState("");
   const [existing, setExisting] = React.useState<WorkspaceLite[]>([]);
@@ -32,8 +31,7 @@ export function SetupPage() {
         if (!picked) throw new Error("select a workspace");
         setWorkspace({ id: picked.id, name: picked.name, createdAt: picked.createdAt, role: picked.role });
       }
-      nav("/");
-      location.reload();
+      location.href = BASENAME + "/";
     } catch (err) {
       setError(err instanceof ApiError ? err.message : (err as Error).message);
     } finally {
@@ -101,7 +99,7 @@ export function SetupPage() {
         </form>
 
         <p className="hint mt">
-          Auth: local workspace identity for now — Supabase Auth (email/OTP) lands next milestone.
+          Auth: simple email + password (scrypt + JWT) — no OTP, no verification emails.
         </p>
       </div>
     </div>

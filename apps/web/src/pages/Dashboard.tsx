@@ -112,7 +112,7 @@ export function DashboardPage() {
               <tr><td className="muted">Database</td><td><span className="badge ok">supabase · pgvector</span></td></tr>
               <tr><td className="muted">Backend host</td><td><span className="badge info">railway</span></td></tr>
               <tr><td className="muted">Frontend host</td><td><span className="badge info">vercel</span></td></tr>
-              <tr><td className="muted">Voice runtime</td><td><span className="badge warn">pipecat · next milestone</span></td></tr>
+              <tr><td className="muted">Voice runtime</td><td><span className="badge ok">wss · whisper + piper · live</span></td></tr>
             </tbody>
           </table>
         </div>
