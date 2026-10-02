@@ -10,6 +10,7 @@ import {
   currentSlot,
   offerSlot,
   flowForIntent,
+  resolveSlotIso,
   startFlow,
   type CaptureState,
   type ExtractionContext,
@@ -33,6 +34,8 @@ check("digits nine two seven eight zero", digitsFromSpoken("nine two seven eight
 check("spoken year nineteen ninety", digitsFromSpoken("nineteen ninety") === "1990", `-> ${digitsFromSpoken("nineteen ninety")}`);
 check("dob digits 10 18 90 -> 1990-10-18", digitsFromSpoken("10 18 90") === "101890", `-> ${digitsFromSpoken("10 18 90")}`);
 check("phone digits spoken in sequence", digitsFromSpoken("nine one eight two four zero zero zero zero zero") === "9182400000", `-> ${digitsFromSpoken("nine one eight two four zero zero zero zero zero")}`);
+check("slot iso from spoken weekday", /^\d{4}-\d{2}-\d{2} 15:00$/.test(resolveSlotIso("Wednesday at 3 p.m.", new Date("2026-10-02T09:00:00")) ?? ""), `-> ${resolveSlotIso("Wednesday at 3 p.m.", new Date("2026-10-02T09:00:00"))}`);
+check("slot iso from spoken morning", /^\d{4}-\d{2}-\d{2} 09:00$/.test(resolveSlotIso("next Friday morning", new Date("2026-10-02T09:00:00")) ?? ""), `-> ${resolveSlotIso("next Friday morning", new Date("2026-10-02T09:00:00"))}`);
 check("Sudhansu key == Sudhanshu key", phoneticKey("Sudhansu") === phoneticKey("Sudhanshu"), `${phoneticKey("Sudhansu")} vs ${phoneticKey("Sudhanshu")}`);
 
 const homophone = await resolveCanonicalName("Sudhansu", { known: ["Sudhanshu Sharma", "Priya Nair"] });

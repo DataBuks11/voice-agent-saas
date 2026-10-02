@@ -297,6 +297,57 @@ export interface ExtractionContext {
   ) => Promise<{ value?: string | null; present?: boolean; iso?: string | null } | null>;
 }
 
+const WEEKDAY_OFFSETS: Record<string, number> = {
+  sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+};
+
+/**
+ * Turn a spoken slot ("Wednesday at 3 p.m.", "next Tuesday morning") into a
+ * concrete local datetime. Used when the model did not return an ISO value.
+ */
+export function resolveSlotIso(spoken: string, now: Date = new Date()): string | null {
+  const text = spoken.toLowerCase();
+  const isoDate = normalizeDate(text);
+  let year = now.getFullYear();
+  let month = now.getMonth() + 1;
+  let day = now.getDate();
+
+  const explicit = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (explicit) {
+    year = Number(explicit[1]);
+    month = Number(explicit[2]);
+    day = Number(explicit[3]);
+  } else if (isoDate) {
+    year = Number(isoDate.slice(0, 4));
+    month = Number(isoDate.slice(5, 7));
+    day = Number(isoDate.slice(8, 10));
+  } else {
+    const named = Object.keys(WEEKDAY_OFFSETS).find((d) => text.includes(d));
+    if (named) {
+      const target = WEEKDAY_OFFSETS[named] ?? 0;
+      const delta = (target - now.getDay() + 7) % 7 || 7;
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + delta);
+      year = next.getFullYear();
+      month = next.getMonth() + 1;
+      day = next.getDate();
+    }
+  }
+
+  let hour = 9;
+  let minute = 0;
+  const time = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b/);
+  if (time) {
+    hour = Number(time[1]);
+    minute = Number(time[2] ?? 0);
+    const meridiem = (time[3] ?? "").replace(/\./g, "");
+    if (meridiem.startsWith("p") && hour < 12) hour += 12;
+    if (meridiem.startsWith("a") && hour === 12) hour = 0;
+    if (hour > 23 || minute > 59) return null;
+  }
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${year}-${pad(month)}-${pad(day)} ${pad(hour)}:${pad(minute)}`;
+}
+
 export async function extractSlotValue(
   slot: SlotDef,
   text: string,
@@ -449,6 +500,7 @@ export async function applyAnswer(
   }
 
   const { value, present, iso } = await extractSlotValue(slot, text, state.data, ctx);
+  const slotIso = slot.kind === "slot" && value ? iso ?? resolveSlotIso(value) : iso;
   if (!present) {
     if (slot.absentPhrases?.test(text)) {
       const skipped = save({ ...state, skipped: [...new Set([...state.skipped, slot.key])], step: state.step + 1 });
@@ -480,7 +532,7 @@ export async function applyAnswer(
   }
   if (slot.readback) {
     const captured = value;
-    const withIso: CaptureState = iso ? { ...state, pendingIso: iso } : state;
+    const withIso: CaptureState = slotIso ? { ...state, pendingIso: slotIso } : state;
     const pending = save({ ...withIso, status: "confirming", pendingKey: slot.key, pendingValue: captured });
     return { state: pending, reply: slot.readback(captured, state.data) };
   }
