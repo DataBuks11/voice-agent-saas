@@ -17,23 +17,50 @@ const dbAvailable = { ok: true };
 export async function loadCaptureState(conversationId: string, workspaceId: string): Promise<CaptureState | null> {
   if (!dbAvailable.ok) return memoryStore.get(conversationId) ?? null;
   const db = getSupabase();
-  const { data, error } = await db
-    .from("capture_sessions")
-    .select("intent,status,step,data,skipped")
-    .eq("conversation_id", conversationId)
-    .maybeSingle();
+  const base = { intent: true, status: true, step: true, data: true, skipped: true };
+  let data: Record<string, unknown> | null = null;
+  let error: { message: string } | null = null;
+  let pendingSupported = true;
+  {
+    const res = await db
+      .from("capture_sessions")
+      .select("intent,status,step,data,skipped,pending_key,pending_value,pending_iso")
+      .eq("conversation_id", conversationId)
+      .maybeSingle();
+    data = (res.data as Record<string, unknown> | null) ?? null;
+    error = res.error;
+  }
   if (error) {
-    if (/does not exist|schema cache|42P01/i.test(error.message)) {
-      dbAvailable.ok = false;
-      console.warn("capture_sessions table missing — using in-memory capture state (run migration 0005)");
-      return memoryStore.get(conversationId) ?? null;
+    if (/column .* does not exist|42P01|42703/i.test(error.message)) {
+      // Migration 0006 not applied yet: read the base columns and recover the
+      // pending read-back from this process instead of dropping the turn.
+      pendingSupported = false;
+      const res = await db
+        .from("capture_sessions")
+        .select("intent,status,step,data,skipped")
+        .eq("conversation_id", conversationId)
+        .maybeSingle();
+      data = (res.data as Record<string, unknown> | null) ?? null;
+      error = res.error;
     }
-    console.error(`capture state load failed: ${error.message}`);
-    return null;
+    if (error) {
+      if (/does not exist|schema cache|42P01/i.test(error.message)) {
+        dbAvailable.ok = false;
+        console.warn("capture_sessions table missing — using in-memory capture state (run migration 0005)");
+        return memoryStore.get(conversationId) ?? null;
+      }
+      console.error(`capture state load failed: ${error.message}`);
+      return null;
+    }
   }
   if (!data) return null;
   const row = data as Record<string, unknown>;
   const status = String(row.status) as CaptureState["status"];
+  const cached = memoryStore.get(conversationId);
+  const pendingKey = row.pending_key ? String(row.pending_key) : pendingSupported ? undefined : cached?.pendingKey;
+  const pendingValue = row.pending_value ? String(row.pending_value) : pendingSupported ? undefined : cached?.pendingValue;
+  const pendingIso = row.pending_iso ? String(row.pending_iso) : pendingSupported ? undefined : cached?.pendingIso;
+  void base;
   return {
     active: status === "capturing" || status === "confirming",
     intent: String(row.intent),
@@ -41,6 +68,9 @@ export async function loadCaptureState(conversationId: string, workspaceId: stri
     status,
     data: (row.data ?? {}) as Record<string, string>,
     skipped: (row.skipped ?? []) as string[],
+    ...(pendingKey ? { pendingKey } : {}),
+    ...(pendingValue ? { pendingValue } : {}),
+    ...(pendingIso ? { pendingIso } : {}),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -55,7 +85,7 @@ export async function saveCaptureState(
     return;
   }
   const db = getSupabase();
-  const row = {
+  const row: Record<string, unknown> = {
     conversation_id: conversationId,
     workspace_id: workspaceId,
     intent: state.intent,
@@ -65,17 +95,30 @@ export async function saveCaptureState(
     skipped: state.skipped,
     updated_at: new Date().toISOString(),
   };
+  if (state.pendingKey) row.pending_key = state.pendingKey;
+  if (state.pendingValue) row.pending_value = state.pendingValue;
+  if (state.pendingIso) row.pending_iso = state.pendingIso;
   const { error } = await db
     .from("capture_sessions")
     .upsert(row, { onConflict: "conversation_id" });
   if (error) {
     if (/does not exist|schema cache|42P01/i.test(error.message)) {
+      // Columns from 0006 missing: keep the confirm step alive in memory.
+      delete row.pending_key;
+      delete row.pending_value;
+      delete row.pending_iso;
+      const retry = await db.from("capture_sessions").upsert(row, { onConflict: "conversation_id" });
+      if (!retry.error) {
+        memoryStore.set(conversationId, state);
+        return;
+      }
       dbAvailable.ok = false;
-      console.warn("capture_sessions table missing — using in-memory capture state (run migration 0005)");
+      console.warn("capture_sessions unusable — using in-memory capture state (run migrations 0005/0006)");
       memoryStore.set(conversationId, state);
       return;
     }
     console.error(`capture state save failed: ${error.message}`);
+    memoryStore.set(conversationId, state);
   }
 }
 
