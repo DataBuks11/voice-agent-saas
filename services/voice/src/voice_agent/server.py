@@ -344,11 +344,14 @@ class Session:
         self._barge_taken = False
         if not self.vad.in_speech and self.vad.speech_ms <= 0:
             return
+        # Read the buffer BEFORE take() resets it, otherwise the final transcript
+        # is only the last partial and the answer is cut mid-sentence.
+        buffered = self.vad.peek()
         pcm = self.vad.take()
         if not pcm or self.pipeline is None:
             return
         await self._drain_draft()
-        await self._stt_delta(True)
+        await self._stt_final(buffered)
         await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm)
 
     async def _turn_watchdog(self) -> None:
@@ -377,11 +380,12 @@ class Session:
         if self.vad.speech_ms <= 0:
             self.vad.reset()
             return
+        buffered = self.vad.peek()
         pcm = self.vad.take()
         if not pcm or self.pipeline is None:
             return
         await self._drain_draft()
-        await self._stt_delta(True)
+        await self._stt_final(buffered)
         await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm)
 
     async def _auto_greet(self, text: str) -> None:
@@ -422,33 +426,38 @@ class Session:
             finally:
                 self.turn_active = False
 
-    async def _stt_delta(self, final: bool) -> str:
+    async def _stt_final(self, buffered: bytes) -> str:
+        """Transcribe the complete utterance.
+
+        A tail chunk on its own carries no context, so whisper drops or garbles
+        the last words ("...about the enterprise plan instead" -> "...about the
+        enterprise"). Accuracy is worth the extra pass.
+        """
+        if not buffered or self.pipeline is None:
+            return self.hypothesis
+        self._stt_consumed = len(buffered)
+        text = ""
+        try:
+            text = await self.pipeline.transcribe(buffered)
+        except Exception:  # noqa: BLE001 - keep the stitched hypothesis
+            log.debug("final stt failed", exc_info=True)
+        if text:
+            self._hyp_parts = [text]
+            self.hypothesis = text.strip()
+            if len(self.hypothesis.split()) >= 3:
+                await self.send_json({"type": "partial", "text": self.hypothesis})
+        return self.hypothesis
+
+    async def _stt_delta(self, final: bool = False) -> str:
         """Transcribe only the audio since the last delta and stitch the pieces.
 
-        Deltas of ~0.7s keep partials and the speculative draft cheap. The final
-        pass re-reads the WHOLE utterance: a tail chunk on its own has no context,
-        so whisper drops or garbles the last words ("...about the enterprise plan
-        instead" -> "...about the enterprise"). Accuracy wins over the last 200 ms.
+        Deltas of ~0.7s keep partials and the speculative draft cheap; the final
+        transcript comes from _stt_final on the whole utterance.
         """
         if self.pipeline is None:
             return ""
         buffered = self.vad.peek()
         start = self._stt_consumed
-        if not buffered:
-            return self.hypothesis
-        if final:
-            self._stt_consumed = len(buffered)
-            text = ""
-            try:
-                text = await self.pipeline.transcribe(buffered)
-            except Exception:  # noqa: BLE001 - keep the stitched hypothesis
-                log.debug("final stt failed", exc_info=True)
-            if text:
-                self._hyp_parts = [text]
-                self.hypothesis = text.strip()
-                if len(self.hypothesis.split()) >= 3:
-                    await self.send_json({"type": "partial", "text": self.hypothesis})
-            return self.hypothesis
         if len(buffered) <= start:
             return self.hypothesis
         chunk = buffered[start:]

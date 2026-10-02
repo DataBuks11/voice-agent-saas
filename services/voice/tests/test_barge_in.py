@@ -84,6 +84,9 @@ class StubPipeline:
     def handle_barge_in(self) -> None:
         self.barge_ins += 1
 
+    async def transcribe(self, pcm: bytes):
+        return await srv._stt.transcribe(pcm)
+
     async def handle_text(self, text: str, on_transcript=None):
         self.turns.append(text)
         if on_transcript:
@@ -110,13 +113,12 @@ class StubTTS:
 
 
 class StubSTT:
+    """Mirrors the real provider contract: transcribe() returns the text."""
+
     name = "stub"
 
-    async def transcribe(self, pcm: bytes, sr: int):
-        class R:
-            text = "are you still there"
-
-        return R()
+    async def transcribe(self, pcm: bytes, sr: int = 16000) -> str:
+        return "are you still there"
 
 
 async def _session(script: list[bytes | str]) -> tuple[Session, FakeWS, StubPipeline]:
@@ -351,3 +353,56 @@ async def test_playback_window_keeps_barge_in_armed(monkeypatch):
         await task
     except asyncio.CancelledError:
         pass
+
+
+class RecordingSTT:
+    """STT stub that records what it was asked to transcribe."""
+
+    name = "recording"
+
+    def __init__(self) -> None:
+        self.seen: list[int] = []
+        self.text = "Actually, tell me about the enterprise plan instead."
+
+    async def transcribe(self, pcm: bytes, sr: int = 16000) -> str:
+        self.seen.append(len(pcm))
+        return "Actually, tell me about the enterprise plan instead."
+
+
+@pytest.mark.asyncio
+async def test_final_transcript_covers_the_whole_utterance(monkeypatch):
+    """Regression: take() reset the VAD before the final pass, so the answer was
+    only the last partial and got cut mid-sentence."""
+    stt = RecordingSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    session, ws, pipeline = await _session([frame(1500, 0.3), frame(600, 0.0)])
+    await session.run()
+    assert session.queue.qsize() == 1
+    kind, _pcm = session.queue.get_nowait()
+    assert kind == "audio-draft"
+    # the whole utterance reached the recogniser, not just the trailing delta
+    assert max(stt.seen) >= 1500 * 16000 // 1000 * 2
+    assert session.hypothesis == "Actually, tell me about the enterprise plan instead."
+
+
+@pytest.mark.asyncio
+async def test_interruption_transcript_covers_the_whole_utterance(monkeypatch):
+    stt = RecordingSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    monkeypatch.setattr(srv, "_tts", StubTTS())
+    session, ws, pipeline = await _session([])
+    ws.script = [frame(1500, 0.3)]
+    ws.gate = asyncio.Event()
+    runner = asyncio.create_task(session.run())
+    greeting = asyncio.create_task(
+        session._speak("Hello there. Thanks for calling. How can I help you today.")
+    )
+    for _ in range(400):
+        if session.speaking:
+            break
+        await asyncio.sleep(0.001)
+    ws.gate.set()
+    await asyncio.wait_for(greeting, timeout=5)
+    await asyncio.wait_for(runner, timeout=5)
+    assert session.queue.qsize() == 1
+    assert max(stt.seen) >= 1000 * 16000 // 1000 * 2
