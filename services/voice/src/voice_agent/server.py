@@ -38,6 +38,9 @@ _models_warmed = False
 # (draft). ~700ms keeps the draft warm without flooding the transcriber.
 STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 
+# How long the endpoint waits for the in-flight model warm-up before answering anyway.
+DRAFT_JOIN_TIMEOUT = float(os.getenv("DRAFT_JOIN_TIMEOUT_S", "3.5"))
+
 # Don't speculate on short replies ("yes", "okay") - it only burns CPU.
 STT_DRAFT_MIN_BYTES = int(float(os.getenv("STT_DRAFT_MIN_MS", "1600")) * 32)
 
@@ -121,6 +124,7 @@ class Session:
         self.started = False
         self._drafting = False
         self._draft_task: asyncio.Task | None = None
+        self._draft_api_task: asyncio.Task | None = None
         self._stt_consumed = 0
         self._hyp_parts: list[str] = []
         self.hypothesis = ""
@@ -336,10 +340,16 @@ class Session:
             if len(self.hypothesis.split()) >= 3:
                 await self.send_json({"type": "partial", "text": self.hypothesis})
                 if not final:
-                    await self.draft_text(self.hypothesis)
+                    self.start_draft(self.hypothesis)
         return self.hypothesis
 
     async def _drain_draft(self) -> None:
+        """Wait for the speculative work so the real turn can be served from cache.
+
+        Without this the draft and the real turn call the model at the same time:
+        both get slower and neither benefits. The draft has had a head start of over
+        a second, so the remaining wait is usually short.
+        """
         task = self._draft_task
         if task is not None and not task.done():
             try:
@@ -347,6 +357,13 @@ class Session:
             except Exception:  # noqa: BLE001 - drafting is best-effort
                 log.debug("draft task failed", exc_info=True)
         self._draft_task = None
+        api_task = self._draft_api_task
+        if api_task is not None and not api_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(api_task), timeout=DRAFT_JOIN_TIMEOUT)
+            except Exception:  # noqa: BLE001 - never block the turn on a draft
+                log.debug("draft api join skipped")
+        self._draft_api_task = None
 
     async def draft_text(self, text: str) -> None:
         """Warm the answer for a partial transcript without speaking or persisting."""
@@ -355,6 +372,11 @@ class Session:
             await self.pipeline.handle_text(text, draft=True)
         except Exception:  # noqa: BLE001 - drafting is best-effort
             log.debug("draft failed", exc_info=True)
+
+    def start_draft(self, text: str) -> None:
+        """Kick off model warming for a draft and remember it for the endpoint join."""
+        if self._draft_api_task is None or self._draft_api_task.done():
+            self._draft_api_task = asyncio.create_task(self.draft_text(text))
 
     async def _send_backchannel(self) -> None:
         """Pre-cached acknowledgement so the caller never hears dead air.
