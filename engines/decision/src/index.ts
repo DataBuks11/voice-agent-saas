@@ -32,6 +32,14 @@ export function ruleFallback(text: string, hasKnowledge: boolean, toolsAvailable
   ) {
     return { route: "use_tools", confidence: 0.62, reason: "front-desk service request + calendar tool", requiredTools: ["book_appointment"] };
   }
+  // Patient / deceased-body requests go to the intake flow, not the calendar.
+  if (
+    hasTool("book_appointment") &&
+    /(patient|patients|death|dead ?body|deceased|body shifting|ambulance|hospital|funeral|last rites|cremation|shmashan|burning)/.test(t) &&
+    t.length < 260
+  ) {
+    return { route: "use_tools", confidence: 0.66, reason: "patient intake flow", requiredTools: ["book_appointment"] };
+  }
   if (
     hasTool("get_location") &&
     /\b(where are you|address|location|located|directions|map|reach you|find you|reach the|come to)\b/.test(t)

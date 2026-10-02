@@ -1,6 +1,34 @@
 import React from "react";
-import { api, type ConversationRow, type MessageRow, type ToolResultRow, type TurnTrace } from "../lib/api";
+import { api, type CaptureView, type ConversationRow, type MessageRow, type ToolResultRow, type TurnTrace } from "../lib/api";
 import { useToast } from "../main";
+
+/** Live slot progress for the front-desk flow: naam . DOB . slot . zip . insurance */
+function CaptureProgress({ capture }: { capture: CaptureView }) {
+  const visible = capture.slots.filter((s) => s.key !== "office" && s.key !== "patient_status");
+  const done = visible.filter((s) => s.state === "done" || s.state === "skipped").length;
+  return (
+    <div className="capture-progress">
+      <div className="cp-head">
+        <strong>Booking in progress</strong>
+        <span className="muted">
+          {done}/{visible.length} details
+          {capture.active ? "" : " . complete"}
+        </span>
+      </div>
+      <div className="cp-slots">
+        {visible.map((s) => (
+          <span key={s.key} className={`cp-slot ${s.state}`} title={s.value || "not captured yet"}>
+            {s.state === "done" ? <i className="fa-solid fa-check" /> : null}
+            {s.state === "skipped" ? <i className="fa-solid fa-minus" /> : null}
+            {s.state === "pending" ? <i className="fa-regular fa-circle" /> : null}
+            <span className="cp-label">{s.label}</span>
+            {s.value ? <span className="cp-value">{s.value}</span> : null}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function ConversationsPage() {
   const toast = useToast();
@@ -8,6 +36,7 @@ export function ConversationsPage() {
   const [active, setActive] = React.useState<string | null>(null);
   const [messages, setMessages] = React.useState<MessageRow[]>([]);
   const [trace, setTrace] = React.useState<TurnTrace | null>(null);
+  const [capture, setCapture] = React.useState<CaptureView | null>(null);
   const [toolLinks, setToolLinks] = React.useState<Record<string, ToolResultRow[]>>({});
   const [input, setInput] = React.useState("");
   const [busy, setBusy] = React.useState(false);
@@ -64,6 +93,7 @@ export function ConversationsPage() {
         setMessages((m) => m.map((x) => (x.id === "tmp-a" ? { ...x, content: partial } : x)));
       });
       setTrace(turn);
+      if (turn.capture) setCapture(turn.capture);
       if (turn.toolResults?.length) {
         setToolLinks((prev) => ({ ...prev, [turn.answer.id]: turn.toolResults as ToolResultRow[] }));
       }
@@ -89,6 +119,7 @@ export function ConversationsPage() {
 
       <div className="split">
         <div className="card">
+          {capture && capture.slots.length ? <CaptureProgress capture={capture} /> : null}
           <div className="section-row">
             <div className="card-title" style={{ margin: 0 }}>
               Console {active ? <span className="mono muted"> · {active.slice(0, 8)}…</span> : null}

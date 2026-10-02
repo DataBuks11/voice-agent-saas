@@ -196,15 +196,43 @@ class EdgeTTS(TTSProvider):
 
     name = "edge-tts"
 
+    # One voice per language so a Hindi caller hears a Hindi receptionist.
+    VOICE_BY_LANG = {
+        "hi": "hi-IN-SwaraNeural",
+        "mr": "mr-IN-AarohiNeural",
+        "bn": "bn-IN-TomtomNeural",
+        "ta": "ta-IN-PallaviNeural",
+        "te": "te-IN-VaniNeural",
+        "kn": "kn-IN-SarikaNeural",
+        "gu": "gu-IN-DhwaniNeural",
+        "pa": "pa-IN-AnanyaNeural",
+        "es": "es-ES-ElviraNeural",
+        "ar": "ar-EG-SalmaNeural",
+        "en": "en-US-AvaNeural",
+    }
+
     def __init__(self) -> None:
-        self._voice = (os.getenv("EDGE_TTS_VOICE") or "en-US-AvaNeural").strip()
+        self._configured = (os.getenv("EDGE_TTS_VOICE") or "").strip()
         self._rate = (os.getenv("EDGE_TTS_RATE") or "-5%").strip()
         self._timeout = float(os.getenv("EDGE_TTS_TIMEOUT_S", "30"))
+        self.language = "en"
+
+    def set_language(self, language: str) -> None:
+        lang = (language or "en").strip().lower()[:2]
+        if lang != (self.language or "en")[:2]:
+            self.language = lang
+            log.info("tts language -> %s", self._voice_name())
+
+    def _voice_name(self) -> str:
+        if self._configured:
+            return self._configured
+        lang = (self.language or "en").strip().lower()[:2]
+        return self.VOICE_BY_LANG.get(lang, self.VOICE_BY_LANG["en"])
 
     async def synthesize(self, text: str, voice: str = "default") -> AudioChunk:
         import edge_tts
 
-        target = self._voice if voice in ("", "default") else voice
+        target = self._voice_name() if voice in ("", "default") else voice
         buf = bytearray()
 
         async def _run() -> None:
@@ -269,7 +297,17 @@ class FasterWhisperSTT(STTProvider):
         self._model = WhisperModel(size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
         self._lock = asyncio.Lock()
         self._language = (os.getenv("STT_LANGUAGE") or "en").strip() or "en"
+        self._configured_language = os.getenv("STT_LANGUAGE") or ""
         log.info("STT ready: faster-whisper %s (int8) lang=%s", size, self._language)
+
+    def set_language(self, language: str) -> None:
+        """Multilingual calls need a matching decoder; tiny.en only does English."""
+        if self._configured_language:
+            return
+        lang = (language or "en").strip().lower()[:2]
+        if lang and lang != self._language[:2]:
+            self._language = lang
+            log.info("stt language -> %s", lang)
 
     async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> Transcript:
         async with self._lock:

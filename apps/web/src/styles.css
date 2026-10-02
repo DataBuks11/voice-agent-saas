@@ -596,3 +596,101 @@ input, textarea, select { font: inherit; }
   }
   .content > *, .split > *, .sidebar, .topbar, .setup-card { opacity: 1 !important; transform: none !important; filter: none !important; }
 }
+
+/* ---- front-desk capture progress ---- */
+.capture-progress {
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  background: rgba(120, 170, 255, 0.06);
+}
+.capture-progress .cp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.capture-progress .cp-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.capture-progress .cp-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  opacity: 0.55;
+}
+.capture-progress .cp-slot.done {
+  opacity: 1;
+  border-color: rgba(80, 220, 140, 0.5);
+  background: rgba(80, 220, 140, 0.12);
+}
+.capture-progress .cp-slot.skipped {
+  opacity: 0.8;
+  border-color: rgba(255, 200, 90, 0.45);
+  background: rgba(255, 200, 90, 0.1);
+}
+.capture-progress .cp-slot.pending {
+  border-style: dashed;
+}
+.capture-progress .cp-value {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted, #9aa4b2);
+}
+
+/* ---- bookings page ---- */
+.booking-row {
+  border-top: 1px solid var(--line, rgba(255, 255, 255, 0.1));
+  padding: 12px 0;
+}
+.booking-row:first-of-type {
+  border-top: none;
+}
+.booking-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.booking-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.capture-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.capture-cell {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.capture-cell.empty {
+  opacity: 0.5;
+}
+.capture-cell .k {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted, #9aa4b2);
+}
+.capture-cell .v {
+  display: block;
+  margin-top: 3px;
+  word-break: break-word;
+}

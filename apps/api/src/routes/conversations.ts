@@ -5,6 +5,14 @@ import { ruleFallback } from "@voice-agent/decision";
 import { buildContext } from "@voice-agent/context";
 import { validateResponse } from "@voice-agent/harness";
 import { KeywordOverlapReranker } from "@voice-agent/reranking";
+import {
+  nextOffers,
+  normalizeAvailability,
+  parseSlotPreference,
+  spokenSlot,
+  type AvailabilityConfig,
+} from "../lib/availability.js";
+import { parseSlotIso } from "../lib/captureFlow.js";
 import { getSupabase } from "../lib/supabase.js";
 import { requireTenant } from "../lib/tenant.js";
 import { embedAll } from "../lib/embeddings.js";
@@ -182,6 +190,107 @@ async function runSlotOfferTurn(
   return { spoken: spoken.join(" "), offers };
 }
 
+/** Add a booked slot to the agent's diary so the engine stops offering it. */
+async function markSlotBooked(agentId: string, iso: string): Promise<void> {
+  const db = getSupabase();
+  const { data } = await db.from("agents").select("booked_slots").eq("id", agentId).maybeSingle();
+  const current = ((data as Record<string, unknown> | null)?.booked_slots ?? []) as unknown;
+  const list = Array.isArray(current) ? current.map(String) : [];
+  const value = iso.slice(0, 16);
+  if (list.includes(value)) return;
+  list.push(value);
+  const trimmed = list.slice(-400);
+  const { error } = await db.from("agents").update({ booked_slots: trimmed }).eq("id", agentId);
+  if (error) console.error(`booked slot update failed: ${error.message}`);
+}
+
+/** "That's too late" / "anything earlier?" / "some other day". */
+function isSlotRejection(text: string): boolean {
+  return /\b(too late|earlier|not possible|can'?t make|another day|different day|some other|next day|not that (day|time)|any other)\b/i.test(text);
+}
+
+/** Slot-by-slot progress for the UI: [{key,label,value,state}] with state = done|skipped|pending. */
+function captureProgress(flow: SlotDef[], state: CaptureState): Array<{ key: string; label: string; value: string; state: "done" | "skipped" | "pending" }> {
+  const labels: Record<string, string> = {
+    office: "Office",
+    patient_status: "Patient",
+    first_name: "First name",
+    last_name: "Last name",
+    dob: "Date of birth",
+    visit_reason: "Reason",
+    time_pref: "Preference",
+    appointment: "Appointment",
+    zip: "Zip code",
+    insurance_company: "Insurance",
+    member_id: "Member ID",
+    plan_holder: "Plan holder",
+  };
+  return flow.map((slot) => {
+    const skipped = state.skipped.includes(slot.key);
+    const value = state.data[slot.key] ?? "";
+    const done = Boolean(value) || skipped;
+    return {
+      key: slot.key,
+      label: labels[slot.key] ?? slot.key,
+      value: skipped ? "not available" : value,
+      state: skipped ? "skipped" : value ? "done" : "pending",
+    };
+  });
+}
+
+/** Persist the declined list on the flow state (JSON-in-string keeps the row simple). */
+function saveDeclined(state: CaptureState, declined: string[]): CaptureState {
+  return {
+    ...state,
+    status: "capturing",
+    data: { ...state.data, declined_slots: JSON.stringify(declined.slice(-8)) },
+    step: state.step,
+  };
+}
+
+/** Front-desk vs patient-intake: a call about a patient or a death needs the
+ *  intake slots (relative, patient, hospital, callback) rather than a haircut. */
+function pickIntent(text: string): "patient_intake" | "new_patient_booking" {
+  return /(patient|death|dead ?body|deceased|body shifting|ambulance|hospital|funeral|last rites|cremation|shmashan)/i.test(text)
+    ? "patient_intake"
+    : "new_patient_booking";
+}
+
+/** Slots the caller has already turned down, so we never repeat one. */
+function parseDeclined(data: Record<string, string>): string[] {
+  const raw = data.declined_slots;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Deterministic offer: honour the caller's stated part of day, skip what they
+ * already turned down, and move earlier when they say "too late".
+ */
+async function engineOffer(
+  cfg: AvailabilityConfig,
+  pref: ReturnType<typeof parseSlotPreference>,
+  declined: string[],
+  storedPart?: string,
+): Promise<{ iso: string }[]> {
+  const part = pref.part !== "any" ? pref.part : storedPart === "mornings" || storedPart === "afternoons" || storedPart === "evenings" ? storedPart : "any";
+  const lastDeclined = declined[declined.length - 1];
+  const offers = nextOffers(cfg, {
+    part: part as "mornings" | "afternoons" | "evenings" | "any",
+    exclude: declined,
+    ...(pref.wantsEarlier && lastDeclined
+      ? { sameDay: lastDeclined.slice(0, 10), beforeIso: lastDeclined }
+      : {}),
+    limit: 2,
+  });
+  return offers.map((o) => ({ iso: o.iso }));
+}
+
 function humanSlot(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -213,6 +322,18 @@ async function loadAgent(workspaceId: string, agentId: string | undefined): Prom
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
+}
+
+/** Business hours + already-booked slots for the slot-offer engine. */
+async function loadAvailability(agent: Agent): Promise<AvailabilityConfig> {
+  const db = getSupabase();
+  const { data } = await db
+    .from("agents")
+    .select("availability,booked_slots")
+    .eq("id", agent.id)
+    .maybeSingle();
+  const row = (data ?? {}) as Record<string, unknown>;
+  return normalizeAvailability({ ...(row.availability ?? {}), booked: row.booked_slots ?? [] });
 }
 
 /** Instant local reply for greetings — zero network, zero LLM latency. */
@@ -297,7 +418,17 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       .select()
       .single();
     if (error) throw Object.assign(new Error(`conversation create failed: ${error.message}`), { status: 500 });
-    return reply.status(201).send({ id: data.id, workspaceId: body.workspaceId, channel: data.channel, createdAt: data.created_at });
+    // The voice runtime matches its STT/TTS to the agent's language.
+    const agentRow = await loadAgent(body.workspaceId, body.agentId);
+    return reply
+      .status(201)
+      .send({
+        id: data.id,
+        workspaceId: body.workspaceId,
+        channel: data.channel,
+        createdAt: data.created_at,
+        language: agentRow.language,
+      });
   });
 
   app.get("/conversations", async (req) => {
@@ -428,6 +559,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       .map((m) => ({
         id: String(m.id),
         conversationId,
+      language: agent.language,
         role: m.role as ConversationMessage["role"],
         content: String(m.content),
         citations: (m.citations ?? []) as string[],
@@ -496,6 +628,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     const flowSlot = flow.length ? currentSlot(flow, captureState!) : null;
     const flowActive = Boolean(flowSlot) || captureState?.status === "confirming";
     const startsBooking = tool === "book_appointment" && !flowActive;
+    const availability = flowActive ? await loadAvailability(agent) : normalizeAvailability({});
     const extractionCtx: ExtractionContext = {
       canonicalName: async (spoken) => (await canonicalName(body.workspaceId, spoken)).canonical,
       llm: (slot, text, data) => slotExtractLlm(slot, text, data),
@@ -505,17 +638,52 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       const system = systemWithStyle(agent.systemPrompt, agent.language);
       let advance: Advance | null = null;
 
-      // Availability step needs the model (it must offer real slots).
-      if (flowSlot?.kind === "slot" && captureState.status === "capturing" && !captureState.pendingKey) {
-        const offerTurn = await runSlotOfferTurn(system, history, captureState, body.content);
-        const iso = offerTurn.offers[0];
-        if (iso) {
-          const spoken = humanSlot(iso);
-          advance = offerSlot(captureState, iso, spoken);
-          answerText = `${offerTurn.spoken}`.trim() || `Would ${spoken} work for you?`;
+      // Availability step: the engine decides which slots exist, so the agent can
+      // never invent availability; the model only speaks the offer.
+      const appointmentRejected =
+        captureState.status === "confirming" &&
+        captureState.pendingKey === "appointment" &&
+        isSlotRejection(body.content) &&
+        Boolean(captureState.pendingIso);
+      if (appointmentRejected && captureState.pendingIso) {
+        // "That's too late" / "anything earlier?" -> remember it and re-offer.
+        const declined = parseDeclined(captureState.data);
+        declined.push(captureState.pendingIso);
+        const pref = parseSlotPreference(body.content, null);
+        const offered = await engineOffer(availability, pref, declined, captureState.data.time_pref ?? "any");
+        const rejected = saveDeclined(captureState, declined);
+        await saveCaptureState(conversationId, body.workspaceId, rejected);
+        if (offered.length) {
+          advance = offerSlot(rejected, offered[0]!.iso, spokenSlot(offered[0]!.iso));
+          answerText =
+            offered.length > 1
+              ? `No problem — how about ${spokenSlot(offered[0]!.iso)} or ${spokenSlot(offered[1]!.iso)}?`
+              : `No problem — does ${spokenSlot(offered[0]!.iso)} work for you?`;
         } else {
-          advance = await applyAnswer(flow, captureState, body.content, extractionCtx);
+          advance = await applyAnswer(flow, rejected, body.content, extractionCtx);
           answerText = advance.reply;
+        }
+      } else if (flowSlot?.kind === "slot" && captureState.status === "capturing" && !captureState.pendingKey) {
+        const pref = parseSlotPreference(body.content, parseSlotIso(body.content));
+        const declined = parseDeclined(captureState.data);
+        const offered = await engineOffer(availability, pref, declined, captureState.data.time_pref ?? "any");
+        if (offered.length) {
+          const first = offered[0]!;
+          advance = offerSlot(captureState, first.iso, spokenSlot(first.iso));
+          answerText =
+            offered.length > 1
+              ? `Would ${spokenSlot(first.iso)} or ${spokenSlot(offered[1]!.iso)} work for you?`
+              : `Would ${spokenSlot(first.iso)} work for you?`;
+        } else {
+          const offerTurn = await runSlotOfferTurn(system, history, captureState, body.content);
+          const iso = offerTurn.offers[0];
+          if (iso) {
+            advance = offerSlot(captureState, iso, humanSlot(iso));
+            answerText = `${offerTurn.spoken}`.trim() || `Would ${humanSlot(iso)} work for you?`;
+          } else {
+            advance = await applyAnswer(flow, captureState, body.content, extractionCtx);
+            answerText = advance.reply;
+          }
         }
       } else if (isQuestionLike(body.content) && !/^(yes|yeah|yep|no|nope|ok|okay|sure)\b/i.test(body.content.trim())) {
         // Mid-flow question: answer it, keep every captured slot.
@@ -559,6 +727,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
           console.log(
             `capture complete: booking=${bookingId ?? "none"} customer=${customerId ?? "none"} skipped=[${nextState.skipped.join(",")}]`,
           );
+          if (startsAt) await markSlotBooked(agent.id, startsAt);
           const calUrl = calendarUrl(
             `${agent.name} — appointment with ${[nextState.data.first_name, nextState.data.last_name].filter(Boolean).join(" ") || "guest"}`,
             startsAt || new Date().toISOString().slice(0, 16),
@@ -571,9 +740,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       if (!verdict) verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
       writeDelta(answerText);
     } else if (startsBooking) {
+      const intent = pickIntent(body.content);
       const bookingFlowOpts = agent.location ? { office: agent.location } : {};
-      const bookingFlow = flowForIntent("new_patient_booking", bookingFlowOpts);
-      const fresh = startFlow(bookingFlow, "new_patient_booking");
+      const bookingFlow = flowForIntent(intent, bookingFlowOpts);
+      const fresh = startFlow(bookingFlow, intent);
       await saveCaptureState(conversationId, body.workspaceId, fresh);
       answerText = currentSlot(bookingFlow, fresh)?.prompt ?? "Of course — let's get you booked.";
       verdict = { ok: true, confidence: 1, issues: [], safeText: answerText };
@@ -663,6 +833,22 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         ...(streamed ? { stream: true } : {}),
       }),
     );
+    // Slot-free view of the capture flow so the UI can render live progress
+    // (name / DOB / slot / zip / insurance) without re-deriving anything.
+    const finalState = await loadCaptureState(conversationId, body.workspaceId);
+    const captureView = finalState
+      ? {
+          active: finalState.active,
+          intent: finalState.intent,
+          status: finalState.status,
+          step: finalState.step,
+          data: finalState.data,
+          skipped: finalState.skipped,
+          pending: finalState.pendingKey ?? null,
+          slots: captureProgress(flow, finalState),
+        }
+      : null;
+
     const responsePayload = {
       conversationId,
       decision,
@@ -671,6 +857,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       userMessage: { ...savedUser, createdAt: savedUser?.created_at ?? now },
       answerSource,
       toolResults,
+      capture: captureView,
       retrieved: retrieved.map((r) => ({ id: r.id, documentId: r.documentId, score: r.score, text: r.content.slice(0, 200) })),
       context: contextInfo,
     };

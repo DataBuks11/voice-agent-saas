@@ -37,6 +37,7 @@ export interface ConversationRow {
 export interface BookingRow {
   id: string;
   conversationId: string | null;
+  customerId: string | null;
   customerName: string;
   contact: string;
   startsAt: string;
@@ -44,6 +45,31 @@ export interface BookingRow {
   status: string;
   source: string;
   createdAt: string;
+  capture: CapturePayload;
+}
+
+export interface CaptureSlotView {
+  key: string;
+  label: string;
+  value: string;
+  state: "done" | "skipped" | "pending";
+}
+
+export interface CaptureView {
+  active: boolean;
+  intent: string;
+  status: string;
+  step: number;
+  data: Record<string, string>;
+  skipped: string[];
+  pending: string | null;
+  slots: CaptureSlotView[];
+}
+
+export interface CapturePayload {
+  data?: Record<string, string>;
+  skipped?: string[];
+  summary?: string;
 }
 
 export interface ToolResultRow {
@@ -68,6 +94,7 @@ export interface TurnTrace {
   userMessage: MessageRow;
   answerSource: string;
   toolResults?: ToolResultRow[];
+  capture?: CaptureView | null;
   retrieved: { id: string; documentId: string; score: number; text: string }[];
   context: { usedTokens: number; truncated: boolean; includedChunkIds: string[] };
 }

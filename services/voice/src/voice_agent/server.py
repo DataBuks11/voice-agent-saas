@@ -159,10 +159,17 @@ class Session:
                 log.error("conversation create failed: %s %s", r.status_code, r.text[:300])
                 await self.send_json({"type": "error", "reason": "conversation_create_failed"})
                 return
-            conversation_id = r.json()["id"]
+            conversation_payload = r.json() or {}
+            conversation_id = str(conversation_payload.get("id") or "")
 
         stt, tts = await shared_models()
         self.llm = ApiLLM(API_BASE, workspace_id, conversation_id, agent_id=agent_id, auth=auth, token=token)
+        # Match the caller's language end to end: STT decoder + neural voice.
+        language = str((conversation_payload or {}).get("language") or "en")
+        for provider in (stt, tts):
+            setter = getattr(provider, "set_language", None)
+            if callable(setter):
+                setter(language)
         asyncio.create_task(self._load_dictionary(headers))
         cfg = VoiceConfig(
             allow_barge_in=os.getenv("VOICE_ALLOW_BARGE_IN", "true").lower() == "true",
@@ -172,7 +179,14 @@ class Session:
         self.pipeline = VoicePipeline(stt, self.llm, tts, cfg)
         self.started = True
         self.worker = asyncio.create_task(self._turn_worker())
-        await self.send_json({"type": "ready", "conversationId": conversation_id, "workspaceId": workspace_id})
+        await self.send_json(
+            {
+                "type": "ready",
+                "conversationId": conversation_id,
+                "workspaceId": workspace_id,
+                "language": str(conversation_payload.get("language") or "en"),
+            }
+        )
         log.info("session ready: workspace=%s conversation=%s", workspace_id, conversation_id)
         # Instant greeting: the agent speaks the moment the call connects —
         # no mic round-trip needed to feel "answered". VOICE_GREETING=off disables.

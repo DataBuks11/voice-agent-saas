@@ -56,7 +56,7 @@ export const emptyState = (intent = "booking"): CaptureState => ({
   updatedAt: new Date().toISOString(),
 });
 
-const ABSENT = /\b(don'?t have|do ?n'?t have|did ?n'?t bring|not (with )?me|no idea|don'?t know|does ?n'?t (have|matter)|skip|forget it|can'?t find|left (it|them) at home|not available)\b/i;
+const ABSENT = /\b(don'?t have|do ?n'?t have|did ?n'?t bring|not (with )?me|no idea|don'?t know|does ?n'?t (have|matter)|skip|forget it|can'?t find|left (it|them) at home|not available|that'?s (everything|all)|nothing else|no more|that'?s it)\b/i;
 
 /* ------------------------------------------------------------------ flows */
 
@@ -156,8 +156,66 @@ export const newPatientFlow = (opts: { office?: string; service?: string } = {})
   },
 ];
 
-export const flowForIntent = (intent: string, opts: { office?: string; service?: string } = {}): SlotDef[] =>
-  intent === "new_patient_booking" ? newPatientFlow(opts) : newPatientFlow(opts);
+/**
+ * Patient / deceased-body intake (hospital, ambulance, dead-body shifting).
+ * Same confirm-everything discipline, different slots: who is calling, for whom,
+ * where, and when — the details a real family call needs.
+ */
+export const patientIntakeFlow = (opts: { office?: string; service?: string } = {}): SlotDef[] => [
+  {
+    key: "caller_relation",
+    kind: "text",
+    prompt: opts.service
+      ? `I am sorry for your loss. Is this for ${opts.service}?`
+      : "I am sorry for your loss. Is this for the patient, or a relative?",
+    singleQuestion: true,
+  },
+  {
+    key: "patient_name",
+    kind: "name",
+    prompt: "Could I get the patient's name, spelled out for me?",
+    readback: (v) => `So the patient's name is ${v}. Is that correct?`,
+  },
+  {
+    key: "patient_age",
+    kind: "text",
+    prompt: "And how old is the patient?",
+    readback: (v) => `Noted — ${v}.`,
+    singleQuestion: true,
+  },
+  {
+    key: "hospital",
+    kind: "text",
+    prompt: "Which hospital or address are they at?",
+    readback: (v) => `Thank you. ${v} — is that right?`,
+  },
+  {
+    key: "caller_phone",
+    kind: "digits",
+    prompt: "And a phone number where we can call you right now?",
+    readback: (v) => `I have ${v}. We will call you on this number.`,
+    singleQuestion: true,
+  },
+  {
+    key: "appointment",
+    kind: "slot",
+    prompt: "When should our team reach you?",
+    readback: (v) => `So that's ${v.replace(/[.?!]+\s*$/, "")}. Shall I lock that in?`,
+    singleQuestion: true,
+  },
+  {
+    key: "notes",
+    kind: "text",
+    prompt: "Is there anything else we should know before we send the team?",
+    absentPhrases: ABSENT,
+    optional: true,
+  },
+];
+
+export const flowForIntent = (intent: string, opts: { office?: string; service?: string } = {}): SlotDef[] => {
+  if (intent === "patient_intake") return patientIntakeFlow(opts);
+  return newPatientFlow(opts);
+};
 
 /* --------------------------------------------------------- value extraction */
 

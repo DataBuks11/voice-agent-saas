@@ -11,6 +11,7 @@ import { AgentsPage } from "./pages/Agents";
 import { KnowledgePage } from "./pages/Knowledge";
 import { ConversationsPage } from "./pages/Conversations";
 import { VoicePage } from "./pages/Voice";
+import { BookingsPage } from "./pages/Bookings";
 import { BASENAME } from "./lib/base";
 
 export interface Toast {
@@ -77,6 +78,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/agents", label: "Agents", ico: "fa-solid fa-robot" },
     { to: "/knowledge", label: "Knowledge", ico: "fa-solid fa-book-open" },
     { to: "/conversations", label: "Conversations", ico: "fa-solid fa-comments" },
+    { to: "/bookings", label: "Bookings", ico: "fa-solid fa-calendar-check" },
   ];
   const title = nav.find((n) => n.to === loc.pathname)?.label ?? "Voice Agent OS";
 
@@ -178,6 +180,7 @@ createRoot(document.getElementById("root")!).render(
       <Route path="/agents" element={<Shell><RequireAuth><AgentsPage /></RequireAuth></Shell>} />
       <Route path="/knowledge" element={<Shell><RequireAuth><KnowledgePage /></RequireAuth></Shell>} />
       <Route path="/conversations" element={<Shell><RequireAuth><ConversationsPage /></RequireAuth></Shell>} />
+  <Route path="/bookings" element={<Shell><RequireAuth><BookingsPage /></RequireAuth></Shell>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   </BrowserRouter>,
