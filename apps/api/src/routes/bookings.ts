@@ -10,7 +10,7 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
     const db = getSupabase();
     const { data, error } = await db
       .from("bookings")
-      .select("id, conversation_id, customer_name, contact, starts_at, notes, status, source, created_at")
+      .select("id, conversation_id, customer_name, contact, starts_at, notes, status, source, created_at, customer_id, capture")
       .eq("workspace_id", q.workspaceId)
       .order("created_at", { ascending: false })
       .limit(50);
@@ -18,6 +18,7 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
     const items = (data ?? []).map((b) => ({
       id: b.id,
       conversationId: b.conversation_id,
+      customerId: (b as Record<string, unknown>).customer_id ?? null,
       customerName: b.customer_name,
       contact: b.contact,
       startsAt: b.starts_at,
@@ -25,6 +26,7 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
       status: b.status,
       source: b.source,
       createdAt: b.created_at,
+      capture: (b as Record<string, unknown>).capture ?? {},
     }));
     return { items, total: items.length };
   });
