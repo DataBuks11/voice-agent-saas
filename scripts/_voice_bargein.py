@@ -1,11 +1,11 @@
 """Barge-in E2E against a deployed voice runtime.
 
 Reproduces the reported failure: while the agent is answering, the caller talks
-over it. We assert the agent stops its own audio, handles exactly one
-interruption, keeps the caller's words, and answers them once (no overlapping
-replies, no lost audio).
+over it. Asserts that the agent stops its own audio, handles exactly one
+interruption, keeps the words spoken during playback, and answers once.
 
-Audio is paced at real time, because that is what a microphone does.
+Audio is paced at real time because that is what a microphone does, and a
+background reader keeps timestamps honest while the test is sending.
 """
 from __future__ import annotations
 
@@ -38,15 +38,15 @@ Q2 = "Actually, tell me about the enterprise plan instead."
 
 
 def pcm16(rate: int, samples: bytes) -> bytes:
-    """Resample 22 kHz piper output to the 16 kHz the runtime expects.
+    """Resample piper output to the 16 kHz the runtime expects.
 
     Must be a real resample: duplicating samples slows the audio down and
     whisper then transcribes nonsense, which looks like an STT bug but is not.
     """
     if rate == NATIVE:
         return samples
-    import numpy as np
     import av
+    import numpy as np
 
     arr = np.frombuffer(samples, dtype=np.int16).reshape(1, -1)
     frame = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")
@@ -88,20 +88,16 @@ def seed() -> tuple[str, str]:
     return token, ws_id
 
 
-async def send_audio(sock, pcm: bytes) -> None:
-    """Send at roughly real time so turn detection behaves like a live call."""
-    for i in range(0, len(pcm), CHUNK):
-        await sock.send(pcm[i : i + CHUNK])
-        await asyncio.sleep(CHUNK / (NATIVE * 2))
-
-
-class Recorder:
-    def __init__(self) -> None:
-        self.events: list[tuple[float, str, dict]] = []
-        self.audio_runs: list[list[float]] = []
-        self.transcripts: list[str] = []
-        self.replies: list[str] = []
+class Session:
+    def __init__(self, sock, t0: float) -> None:
+        self.sock = sock
+        self.t0 = t0
+        self.transcripts: list[tuple[float, str]] = []
+        self.replies: list[tuple[float, str]] = []
         self.interruptions = 0
+        self.audio_runs: list[list[float]] = []
+        self.seen: dict[str, list[float]] = {}
+        self.closed = False
 
     def feed(self, now: float, msg) -> None:
         if isinstance(msg, bytes):
@@ -111,96 +107,116 @@ class Recorder:
                 self.audio_runs[-1][1] = now
             return
         ev = json.loads(msg)
-        kind = ev.get("type", "?")
-        self.events.append((now, kind, ev))
+        kind = str(ev.get("type", "?"))
         text = str(ev.get("text") or "")
+        self.seen.setdefault(kind, []).append(now)
         if kind == "user":
-            self.transcripts.append(text)
+            self.transcripts.append((now, text))
         elif kind == "assistant":
-            self.replies.append(text)
+            self.replies.append((now, text))
         elif kind == "interrupted":
             self.interruptions += 1
-        print(f"[{now:5.1f}s] {kind}: {text[:100]}")
+        if kind in ("assistant", "user", "interrupted", "ready", "audio_start", "audio_end"):
+            print(f"[{now:5.1f}s] {kind}: {text[:100]}")
 
-    async def wait_for(self, sock, kinds: set[str], timeout: float) -> tuple[float, str] | None:
+    async def read_forever(self) -> None:
+        try:
+            async for msg in self.sock:
+                self.feed(time.time() - self.t0, msg)
+        except Exception as exc:  # noqa: BLE001
+            self.closed = True
+            print(f"[warn] reader stopped: {type(exc).__name__}")
+
+    async def wait(self, kind: str, after: float = 0.0, timeout: float = 25.0) -> float | None:
         end = time.time() + timeout
         while time.time() < end:
-            try:
-                msg = await asyncio.wait_for(sock.recv(), timeout=max(0.2, end - time.time()))
-            except asyncio.TimeoutError:
+            hits = [t for t in self.seen.get(kind, []) if t > after]
+            if hits:
+                return hits[0]
+            if self.closed:
                 return None
-            now = time.time() - self.t0
-            self.feed(now, msg)
-            if msg.__class__ is bytes:
-                continue
-            if json.loads(msg).get("type") in kinds:
-                return now, json.loads(msg).get("type", "")
+            await asyncio.sleep(0.05)
         return None
+
+    def mark(self) -> float:
+        return time.time() - self.t0
+
+
+async def send_audio(sock, pcm: bytes) -> None:
+    for i in range(0, len(pcm), CHUNK):
+        await sock.send(pcm[i : i + CHUNK])
+        await asyncio.sleep(CHUNK / (NATIVE * 2))
 
 
 async def main() -> int:
     token, ws_id = seed()
     t0 = time.time()
-    rec = Recorder()
-    rec.t0 = t0
-    first = speak(Q1)
-    second = speak(Q2)
-    print(f"[audio] q1={len(first) // 3200 * 100}ms q2={len(second) // 3200 * 100}ms")
+    first, second = speak(Q1), speak(Q2)
+    print(f"[audio] q1={len(first) // 640 * 10}ms q2={len(second) // 640 * 10}ms")
 
+    rc = 1
     try:
         async with websockets.connect(WS_URL, max_size=8 * 1024 * 1024, open_timeout=30) as sock:
             await sock.send(json.dumps({"type": "start", "token": token, "workspaceId": ws_id}))
-            if not await rec.wait_for(sock, {"ready"}, timeout=30):
+            s = Session(sock, t0)
+            reader = asyncio.create_task(s.read_forever())
+            if not await s.wait("ready", timeout=30):
                 print("FAIL: session never became ready")
                 return 1
-            print("[ready] ok")
 
-            # ---- phase 1: ask straight away (this also cuts the greeting short)
             print("\n--- phase 1: first question")
+            spoke_at = s.mark()
             await send_audio(sock, first)
-            t_heard = time.time()
-            await rec.wait_for(sock, {"assistant"}, timeout=30)
-            print(f"[phase1] answered {time.time() - t_heard:.1f}s after the caller stopped talking")
-            if not rec.replies:
-                print("FAIL: first question was never answered")
-                return 1
+            heard = await s.wait("user", after=spoke_at, timeout=30)
+            answered = await s.wait("assistant", after=heard or spoke_at, timeout=30)
+            if heard and answered:
+                print(
+                    f"[phase1] transcript {heard - spoke_at:.1f}s after speaking started, "
+                    f"answer {answered - heard:.1f}s later"
+                )
 
-            # ---- phase 2: talk over the answer
             print("\n--- phase 2: caller interrupts the answer")
-            got_speaking = await rec.wait_for(sock, {"audio_start"}, timeout=20)
-            if not got_speaking:
-                print("WARN: agent never started speaking; sending anyway")
+            speaking_at = await s.wait("audio_start", after=answered or 0, timeout=20)
+            if speaking_at is None:
+                print("WARN: agent never started speaking before the interruption")
+            else:
+                print(f"[phase2] agent speaking since {speaking_at:.1f}s; caller talks over it")
             await send_audio(sock, second)
-            await rec.wait_for(sock, {"assistant"}, timeout=30)
-    except Exception as exc:  # noqa: BLE001 - diagnostics matter more than the exit code
+            await s.wait("assistant", after=s.mark() - 0.001, timeout=30)
+            await asyncio.sleep(1.5)
+            reader.cancel()
+    except Exception as exc:  # noqa: BLE001
         print(f"[warn] session ended early: {type(exc).__name__}: {exc}")
 
-    print("\n=== summary ===")
-    print(f"transcripts: {rec.transcripts}")
-    print(f"replies: {rec.replies}")
-    print(f"interruptions: {rec.interruptions}")
-    print(f"audio runs (s): {[[round(a, 1), round(b, 1)] for a, b in rec.audio_runs]}")
-
     ok = True
-    if not rec.transcripts:
+    print("\n=== summary ===")
+    print(f"transcripts: {[(round(t, 1), x) for t, x in s.transcripts]}")
+    print(f"replies: {[(round(t, 1), x[:70]) for t, x in s.replies]}")
+    print(f"interruptions: {s.interruptions}")
+    print(f"audio runs (s): {[[round(a, 1), round(b, 1)] for a, b in s.audio_runs]}")
+    if not s.transcripts:
         print("FAIL: nothing was transcribed")
         ok = False
-    if len(rec.replies) < 2:
-        print(f"FAIL: expected 2 replies, got {len(rec.replies)}")
+    if len(s.replies) < 2:
+        print(f"FAIL: expected 2 replies, got {len(s.replies)}")
         ok = False
-    if rec.interruptions != 1:
-        print(f"FAIL: expected exactly 1 interruption, got {rec.interruptions}")
+    if s.interruptions != 1:
+        print(f"FAIL: expected exactly 1 interruption, got {s.interruptions}")
         ok = False
-    if len(rec.replies) > 2:
-        print(f"FAIL: {len(rec.replies)} replies - agent is talking over itself")
+    if len(s.replies) > 2:
+        print(f"FAIL: {len(s.replies)} replies - the agent is talking over itself")
         ok = False
-    if rec.transcripts and "enterprise" not in rec.transcripts[-1].lower():
-        print(f"FAIL: the words said during playback were lost: {rec.transcripts[-1]!r}")
+    if s.transcripts and "enterprise" not in s.transcripts[-1][1].lower():
+        print(f"FAIL: words spoken during playback were lost: {s.transcripts[-1][1]!r}")
         ok = False
     else:
         print("OK: the words spoken during playback reached the model")
+    if s.replies and "1200" not in s.replies[-1][1]:
+        print(f"FAIL: reply after the interruption is wrong: {s.replies[-1][1]!r}")
+        ok = False
     print("VOICE BARGE-IN E2E " + ("PASS" if ok else "FAIL"))
-    return 0 if ok else 1
+    rc = 0 if ok else 1
+    return rc
 
 
 if __name__ == "__main__":

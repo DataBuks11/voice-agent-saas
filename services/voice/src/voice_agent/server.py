@@ -410,37 +410,47 @@ class Session:
     async def _stt_delta(self, final: bool) -> str:
         """Transcribe only the audio since the last delta and stitch the pieces.
 
-        Re-transcribing the whole utterance at the endpoint was the slowest part of
-        a turn; deltas of ~0.7s are ~4x faster and the stitched hypothesis is what
-        gets answered.
+        Deltas of ~0.7s keep partials and the speculative draft cheap. The final
+        pass re-reads the WHOLE utterance: a tail chunk on its own has no context,
+        so whisper drops or garbles the last words ("...about the enterprise plan
+        instead" -> "...about the enterprise"). Accuracy wins over the last 200 ms.
         """
         if self.pipeline is None:
             return ""
         buffered = self.vad.peek()
         start = self._stt_consumed
+        if not buffered:
+            return self.hypothesis
+        if final:
+            self._stt_consumed = len(buffered)
+            text = ""
+            try:
+                text = await self.pipeline.transcribe(buffered)
+            except Exception:  # noqa: BLE001 - keep the stitched hypothesis
+                log.debug("final stt failed", exc_info=True)
+            if text:
+                self._hyp_parts = [text]
+                self.hypothesis = text.strip()
+                if len(self.hypothesis.split()) >= 3:
+                    await self.send_json({"type": "partial", "text": self.hypothesis})
+            return self.hypothesis
         if len(buffered) <= start:
             return self.hypothesis
         chunk = buffered[start:]
-        if len(chunk) < STT_CHUNK_BYTES and not final:
+        if len(chunk) < STT_CHUNK_BYTES:
             return self.hypothesis
         self._stt_consumed = len(buffered)
         text = ""
         try:
             text = await self.pipeline.transcribe(chunk)
-        except Exception:  # noqa: BLE001 - fall back to a full pass below
+        except Exception:  # noqa: BLE001 - partials are best-effort
             log.debug("delta stt failed", exc_info=True)
-        if not text and final:
-            try:
-                text = await self.pipeline.transcribe(buffered)
-            except Exception:  # noqa: BLE001 - last resort
-                log.debug("full stt fallback failed", exc_info=True)
         if text:
             self._hyp_parts.append(text)
             self.hypothesis = " ".join(self._hyp_parts).strip()
             if len(self.hypothesis.split()) >= 3:
                 await self.send_json({"type": "partial", "text": self.hypothesis})
-                if not final:
-                    self.start_draft(self.hypothesis)
+                self.start_draft(self.hypothesis)
         return self.hypothesis
 
     async def _drain_draft(self) -> None:
