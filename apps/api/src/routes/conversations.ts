@@ -224,10 +224,12 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: false })
         .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20)),
-      embedAll([body.content]).catch((err: Error) => {
-        console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
-        return null;
-      }),
+      embedAll([body.content])
+        .then((vectors) => vectors[0] ?? null)
+        .catch((err: Error) => {
+          console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
+          return null;
+        }),
     ]);
     const docCount = docCountRes.count ?? 0;
     const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
