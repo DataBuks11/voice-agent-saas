@@ -111,6 +111,17 @@ function smallTalkReply(agent: Agent, content: string): string {
 const mapsUrl = (location: string) =>
   `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(location)}`;
 
+/**
+ * @fastify/cors only decorates non-hijacked replies — the SSE branch writes raw
+ * headers, so it must echo these itself (same allow-list as index.ts).
+ */
+const SSE_ALLOWED_ORIGINS = new Set(
+  (process.env.CORS_ORIGINS ?? "https://voice-agent-saas-web.vercel.app,http://localhost:5173,http://localhost:3001")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean),
+);
+
 /** Floating-time Google Calendar template link (no OAuth needed). */
 function calendarUrl(title: string, startsAt: string, details: string): string | null {
   const m = startsAt.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})/);
@@ -223,11 +234,16 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     };
     if (streamed) {
       reply.hijack();
+      const origin = req.headers.origin;
+      const cors: Record<string, string> = origin && SSE_ALLOWED_ORIGINS.has(origin)
+        ? { "access-control-allow-origin": origin, vary: "Origin" }
+        : {};
       reply.raw.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
         connection: "keep-alive",
         "x-accel-buffering": "no",
+        ...cors,
       });
     }
     const streamFail = (err: Error) => {
