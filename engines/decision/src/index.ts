@@ -32,8 +32,11 @@ export function ruleFallback(text: string, hasKnowledge: boolean, toolsAvailable
   if (/\b(latest|today|news|price now|weather|search|web)\b/.test(t)) {
     return { route: "web_search", confidence: 0.65, reason: "freshness/external info requested" };
   }
-  if (/\b(hi|hello|thanks|bye|hey)\b/.test(t) && text.length < 30) {
-    return { route: "small_talk", confidence: 0.8, reason: "greeting pattern" };
+  if (
+    /\b(hi|hello|thanks|bye|hey|okay|ok|cool|great|nice|perfect|awesome|wonderful|no problem|no worries|got it|alright|welcome|how are you|how's it going)\b/.test(t) &&
+    text.length < 40
+  ) {
+    return { route: "small_talk", confidence: 0.8, reason: "greeting/filler pattern" };
   }
   if (hasKnowledge) {
     return { route: "answer_from_knowledge", confidence: 0.6, reason: "knowledge available, default to grounding" };

@@ -111,6 +111,12 @@ function smallTalkReply(agent: Agent, content: string): string {
   if (/\b(thank|thanks|appreciate)\b/.test(t)) {
     return "You're very welcome! Is there anything else I can help you with?";
   }
+  if (/\b(how are you|how's it going|how do you do)\b/.test(t)) {
+    return "I'm doing great, thanks for asking! What can I help you with today?";
+  }
+  if (/\b(okay|ok|cool|great|nice|perfect|awesome|wonderful|no problem|no worries|got it|alright|welcome)\b/.test(t)) {
+    return "Happy to help! Is there anything else I can take care of for you?";
+  }
   return `Hi, thanks for reaching out to ${agent.name}! This is the front desk — how can I help you today?`;
 }
 

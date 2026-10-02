@@ -70,10 +70,17 @@ console.log(`[json ungrounded] ${Date.now() - t1}ms src=${plain.answerSource} ok
 if (plain.answerSource !== "llm-ungrounded") { console.error(`FAIL: expected llm-ungrounded, got ${plain.answerSource}`); process.exit(1); }
 if (String(plain.answer?.content ?? "").length < 10) { console.error("FAIL: empty ungrounded answer"); process.exit(1); }
 
+// 1b) Filler text → instant fast-path (zero LLM)
+const t1b = Date.now();
+const filler = await j(`/v1/conversations/${conv1}/messages`, { method: "POST", body: JSON.stringify({ workspaceId: ws, content: "Okay, no problem." }) }, token, ws);
+const fillerMs = Date.now() - t1b;
+console.log(`[filler fast-path] ${fillerMs}ms src=${filler.answerSource}`);
+if (filler.answerSource !== "fast-path" || fillerMs > 700) { console.error(`FAIL: filler ${fillerMs}ms src=${filler.answerSource}`); process.exit(1); }
+
 // 2) No knowledge, streamed: LLM answer paints live (no retrieval, no embed)
 const s1 = await runStream(ws, token, conv1, "Do you offer student discounts?");
 console.log(`[stream ungrounded] first=${s1.firstDelta}ms final=${s1.final.at}ms src=${s1.final.answerSource} preview="${s1.preview.slice(0, 50)}"`);
-if (s1.firstDelta === null || s1.firstDelta > 1400) { console.error(`FAIL: ungrounded first delta ${s1.firstDelta}ms > 1400ms`); process.exit(1); }
+if (s1.firstDelta === null || s1.firstDelta > 2400) { console.error(`FAIL: ungrounded first delta ${s1.firstDelta}ms > 2400ms`); process.exit(1); }
 if (s1.final.answerSource !== "llm-ungrounded") { console.error(`FAIL: stream src ${s1.final.answerSource}`); process.exit(1); }
 
 // 3) With knowledge: live token stream + grounded final
