@@ -41,16 +41,38 @@ class VoicePipeline:
             self.interrupted = True
             log.info("barge-in: stopping TTS playback")
 
-    async def handle_audio(self, pcm16: bytes, on_transcript=None) -> str:
+    async def transcribe(self, pcm16: bytes) -> str:
+        """Transcript of arbitrary audio (used for speculative streaming drafts)."""
+        result = await self.stt.transcribe(pcm16, self.config.sample_rate)
+        return result.text
+
+    async def handle_audio(self, pcm16: bytes, on_transcript=None, hypothesis: str = "") -> str:
         import time as _time
 
         t0 = _time.time()
-        tr = await self.stt.transcribe(pcm16, self.config.sample_rate)
-        t_stt = _time.time()
-        if not tr.text:
-            log.info("stage stt %.2fs (empty)", t_stt - t0)
-            return ""
-        return await self._complete_turn(tr.text, on_transcript, t0=t0, t_stt=t_stt)
+        if hypothesis and self._hypothesis_usable(hypothesis, len(pcm16)):
+            # The streaming draft already produced this transcript — no need to
+            # transcribe the whole utterance again.
+            text, t_stt = hypothesis, _time.time()
+            log.info("stage stt reused-draft (%.2fs)", t_stt - t0)
+        else:
+            tr = await self.stt.transcribe(pcm16, self.config.sample_rate)
+            t_stt = _time.time()
+            text = tr.text
+            if not text:
+                log.info("stage stt %.2fs (empty)", t_stt - t0)
+                return ""
+        return await self._complete_turn(text, on_transcript, t0=t0, t_stt=t_stt)
+
+    @staticmethod
+    def _hypothesis_usable(hypothesis: str, audio_bytes: int) -> bool:
+        """Trust the draft only when it plausibly covers the whole utterance."""
+        seconds = audio_bytes / 2 / 16000
+        words = hypothesis.split()
+        if len(words) < 2:
+            return False
+        # Expected speech rate is ~2.5 words/second; allow a generous margin.
+        return len(words) >= seconds * 1.1
 
     async def handle_text(self, text: str, on_transcript=None, draft: bool = False) -> str:
         """Browser-side STT (Web Speech API) arrives as text — skip server STT entirely."""

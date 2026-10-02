@@ -62,6 +62,10 @@ class Vad:
             return "endpoint"
         return None
 
+    def peek(self) -> bytes:
+        """Current utterance audio without consuming it (streaming transcripts)."""
+        return bytes(self.buf) if self.in_speech or self.speech_ms > 0 else b""
+
     def take(self) -> bytes:
         """Return the captured utterance (empty if too short) and reset."""
         out = bytes(self.buf) if self.speech_ms >= self.cfg.min_speech_ms else b""

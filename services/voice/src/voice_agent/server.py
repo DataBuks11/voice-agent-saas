@@ -34,6 +34,10 @@ _tts: TTSProvider | None = None
 _models_lock = asyncio.Lock()
 _models_warmed = False
 
+# How much speech to accumulate before running a speculative transcript
+# (draft). ~700ms keeps the draft warm without flooding the transcriber.
+STT_CHUNK_BYTES = max(4000, int(float(os.getenv("STT_CHUNK_MS", "700")) * 32))
+
 # Short acknowledgements are synthesised once at boot and replayed from memory, so
 # the customer hears "Got it" within milliseconds of finishing their sentence
 # instead of dead air while the model thinks.
@@ -112,6 +116,9 @@ class Session:
         self.interrupted = False
         self.turn_active = False
         self.started = False
+        self._drafting = False
+        self._drafted_for = b""
+        self.hypothesis = ""
         self.start_error_sent = False
         self.greet_task: asyncio.Task | None = None
 
@@ -277,7 +284,11 @@ class Session:
                 if kind == "text":
                     answer = await self.pipeline.handle_text(payload, on_transcript=on_transcript)
                 else:
-                    answer = await self.pipeline.handle_audio(payload, on_transcript=on_transcript)
+                    hypothesis = self.hypothesis if kind == "audio-draft" else ""
+                    self.hypothesis = ""
+                    answer = await self.pipeline.handle_audio(
+                        payload, on_transcript=on_transcript, hypothesis=hypothesis
+                    )
                 if answer and not self.interrupted:
                     await self.send_json({"type": "assistant", "text": answer})
                     await self._speak(answer)
@@ -286,6 +297,30 @@ class Session:
                 await self.send_json({"type": "error", "reason": "turn_failed", "message": str(exc)})
             finally:
                 self.turn_active = False
+
+    async def _stream_hypothesis(self, pcm: bytes) -> None:
+        """Transcribe the audio heard so far and warm the answer for it.
+
+        Runs while the caller is still talking, so by the time they finish the
+        model has already answered their sentence — the real turn then returns
+        from cache instead of paying ~2s of first-token latency.
+        """
+        if self.pipeline is None or self.interrupted or len(pcm) < 6000:
+            return pcm
+        if self._drafting:
+            return pcm
+        self._drafting = True
+        try:
+            text = await self.pipeline.transcribe(pcm)
+            if text and len(text.split()) >= 3:
+                self.hypothesis = text
+                await self.send_json({"type": "partial", "text": text})
+                await self.draft_text(text)
+        except Exception:  # noqa: BLE001 - drafting is best-effort
+            log.debug("streaming hypothesis failed", exc_info=True)
+        finally:
+            self._drafting = False
+        return pcm
 
     async def draft_text(self, text: str) -> None:
         """Warm the answer for a partial transcript without speaking or persisting."""
@@ -362,11 +397,20 @@ class Session:
                     if event == "speech_start":
                         # Immediate UI feedback: the orb reacts while the caller is
                         # still speaking, not only after transcription finishes.
+                        self._drafted_for = b""
                         await self.send_json({"type": "hearing"})
+                        asyncio.create_task(self._stream_hypothesis(self.vad.peek()))
                     elif event == "endpoint":
                         pcm = self.vad.take()
                         if pcm and self.pipeline is not None:
-                            await self.enqueue_utterance(pcm)
+                            await self._stream_hypothesis(pcm)
+                            kind_now = "audio-draft" if self.hypothesis else "audio"
+                            await self.enqueue(kind_now, pcm)
+                    else:
+                        buffered = self.vad.peek()
+                        if len(buffered) - len(self._drafted_for) >= STT_CHUNK_BYTES:
+                            self._drafted_for = buffered
+                            asyncio.create_task(self._stream_hypothesis(buffered))
             else:
                 try:
                     msg = json.loads(message)
