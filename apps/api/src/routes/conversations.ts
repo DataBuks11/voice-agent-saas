@@ -334,6 +334,15 @@ function pickIntent(text: string): "patient_intake" | "new_patient_booking" {
     : "new_patient_booking";
 }
 
+/** Knowledge-sourced one-liner used when the model is too slow for a live call. */
+function groundedFallbackText(opts: { context: string; fallback: string }, fallback: string): string {
+  const blocks = [...opts.context.matchAll(/# Knowledge \[([^\]]+) score=([0-9.]+)\]\n([\s\S]*?)(?=\n# Knowledge \[|\n# Conversation|$)/g)];
+  const best = blocks[0]?.[3]?.trim() ?? "";
+  if (!best) return "";
+  const sentence = best.split(/(?<=[.!?])\s+/).filter(Boolean)[0] ?? "";
+  return sentence.slice(0, 220) || fallback;
+}
+
 /** Slots the caller has already turned down, so we never repeat one. */
 function parseDeclined(data: Record<string, string>): string[] {
   const raw = data.declined_slots;
@@ -595,6 +604,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       return reply;
     };
     const draft = body.draft === true;
+  const channel = String((req.headers["x-voice-channel"] ?? (req.query as Record<string, string> | undefined)?.channel ?? "web")).toLowerCase();
     const db = getSupabase();
     const t0 = Date.now();
     let embedMs = 0;
@@ -896,6 +906,16 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         llmMs = Date.now() - tLlm;
         answerText = llmResult.text;
         if (llmResult.source === "llm") cachePut(body.content, llmResult.text, llmResult.source);
+        // Voice callers cannot wait 8 seconds for a token: past the budget we take
+        // the grounded extractive answer instead (still sourced from knowledge).
+        const voiceBudget = Number(process.env.LLM_VOICE_BUDGET_MS ?? 3000);
+        if (channel === "voice" && !draft && llmMs > voiceBudget && retrieved.length > 0) {
+          const grounded = groundedFallbackText(opts, agent.fallbackResponse);
+          if (grounded) {
+            answerText = grounded;
+            console.log(`llm over voice budget (${llmMs}ms) -> grounded extractive answer`);
+          }
+        }
         if (ungrounded) {
           verdict = { ok: true, confidence: 0.5, issues: ["ungrounded — no documents uploaded"], safeText: answerText };
           answerSource = "llm-ungrounded";

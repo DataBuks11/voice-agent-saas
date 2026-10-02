@@ -434,7 +434,7 @@ class ApiLLM(LLMProvider):
 
     async def _headers(self) -> dict:
         token = await self._auth.token() if self._auth else (self._token or "")
-        return {"Authorization": f"Bearer {token}", "x-workspace-id": self._ws}
+        return {"Authorization": f"Bearer {token}", "x-workspace-id": self._ws, "x-voice-channel": "voice"}
 
     async def complete(self, system: str, context: str, user: str, draft: bool = False) -> str:
         payload: dict = {"workspaceId": self._ws, "content": user}
