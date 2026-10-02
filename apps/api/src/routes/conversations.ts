@@ -217,7 +217,7 @@ async function warmDraft(
         p_filter: {},
       });
       const mapped = (hits ?? []) as Record<string, unknown>[];
-      const minScore = Number(process.env.RAG_MIN_SCORE ?? 0.32);
+      const minScore = Number(process.env.RAG_MIN_SCORE ?? 0.12);
       const strong = mapped.filter((h) => Number(h.score) >= minScore);
       if (strong.length) {
         contextText = strong
@@ -334,6 +334,46 @@ function pickIntent(text: string): "patient_intake" | "new_patient_booking" {
     : "new_patient_booking";
 }
 
+const STOPWORDS = new Set([
+  "what", "when", "where", "which", "who", "why", "how", "is", "are", "was", "were", "do", "does",
+  "did", "can", "could", "should", "would", "will", "the", "a", "an", "of", "and", "or", "to", "in",
+  "on", "for", "with", "about", "me", "my", "i", "you", "please", "tell", "give", "any", "some",
+]);
+
+const questionTokens = (text: string): string[] =>
+  text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 2 && !STOPWORDS.has(t));
+
+/**
+ * Answer from the knowledge base without calling the model at all: the single
+ * sentence that best matches the question wins. Turns a lookup into a ~100ms
+ * reply instead of a 2s model round trip.
+ */
+export function extractiveAnswer(question: string, hits: RetrievalResult[], minRatio: number): string | null {
+  if (!hits.length) return null;
+  const qTokens = new Set(questionTokens(question));
+  if (!qTokens.size) return null;
+  let best: { text: string; ratio: number } | null = null;
+  for (const hit of hits.slice(0, 3)) {
+    for (const raw of hit.content.split(/(?<=[.!?])\s+|\n+/)) {
+      const sentence = raw.replace(/^[-*#\s]+/, "").trim();
+      if (sentence.length < 30 || sentence.length > 320) continue;
+      const tokens = questionTokens(sentence);
+      if (!tokens.length) continue;
+      const shared = tokens.filter((t) => qTokens.has(t)).length;
+      if (!shared) continue;
+      const ratio = shared / Math.min(qTokens.size, tokens.length);
+      if (!best || ratio > best.ratio) best = { text: sentence, ratio };
+    }
+  }
+  if (!best) return null;
+  const threshold = Number(process.env.RAG_EXTRACTIVE_RATIO ?? minRatio);
+  return best.ratio >= threshold ? best.text : null;
+}
+
 /** Knowledge-sourced one-liner used when the model is too slow for a live call. */
 function groundedFallbackText(opts: { context: string; fallback: string }, fallback: string): string {
   const blocks = [...opts.context.matchAll(/# Knowledge \[([^\]]+) score=([0-9.]+)\]\n([\s\S]*?)(?=\n# Knowledge \[|\n# Conversation|$)/g)];
@@ -388,6 +428,17 @@ function humanSlot(iso: string): string {
   const h12 = hh % 12 === 0 ? 12 : hh % 12;
   return `${date} at ${h12}${mm ? `:${String(mm).padStart(2, "0")}` : ""} ${suffix}`;
 }
+
+/**
+ * Nothing in the knowledge base matches this question. Stay useful: small talk
+ * gets a natural reply, and specific facts get an honest "I'll check with the
+ * team" instead of a canned refusal.
+ */
+const NO_CONTEXT_NOTE = `# Knowledge
+The knowledge base has documents, but none of them cover this question.
+- Small talk, greetings, or questions about you/your role: answer naturally and warmly in one short sentence.
+- Anything about the business (prices, hours, policies, availability, services): say the detail isn't in your notes and offer to check with the team.
+- Never invent a specific fact, price, time or policy.`;
 
 async function loadAgent(workspaceId: string, agentId: string | undefined): Promise<Agent> {
   const db = getSupabase();
@@ -692,7 +743,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         });
         // Below-threshold hits are noise, not evidence: grounding on them is how
         // an agent ends up inventing an answer.
-        const minScore = Number(process.env.RAG_MIN_SCORE ?? 0.32);
+        const minScore = Number(process.env.RAG_MIN_SCORE ?? 0.12);
         const strong = retrieved.filter((r) => Number(r.metadata.vector_score) >= minScore);
         const pool = strong.length ? strong : retrieved.filter((r) => Number(r.metadata.vector_score) >= minScore * 0.8);
         retrieved = await new KeywordOverlapReranker().rerank(body.content, pool, Number(process.env.RAG_RERANK_TOP_K ?? 4));
@@ -878,12 +929,20 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         fallback: agent.fallbackResponse,
       };
       contextInfo = { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds };
-      if (retrieved.length === 0 && docCount > 0) {
-        // Docs exist but nothing was retrieved (embed failed / no hit):
-        // never call the LLM — instant, hallucination-proof fallback.
-        answerText = agent.fallbackResponse;
-        verdict = { ok: false, confidence: 0, issues: ["no knowledge context retrieved"], safeText: answerText };
-        answerSource = "fallback";
+if (retrieved.length === 0 && docCount > 0) {
+        // Documents exist but nothing matched this question. Refusing outright is
+        // what made the agent sound broken ("I don't have verified information"
+        // to "what are you doing"), so the model answers conversationally and only
+        // says it lacks the detail when the caller asked for a specific fact.
+        const honest = await complete({
+          system: `${systemWithStyle(agent.systemPrompt, agent.language)}\n\n${NO_CONTEXT_NOTE}`,
+          context: ctx.contextText,
+          user: body.content,
+          fallback: agent.fallbackResponse,
+        });
+        answerText = honest.text;
+        verdict = { ok: true, confidence: 0.4, issues: ["no matching knowledge for this question"], safeText: answerText };
+        answerSource = honest.source === "llm" ? "llm-no-context" : "fallback";
         writeDelta(answerText);
       } else {
         // Ungrounded (no docs yet): chat like a normal assistant, never invent facts.
@@ -891,39 +950,52 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         const ungrounded = docCount === 0;
         const llmOpts = ungrounded ? { ...opts, system: `${opts.system}\n\n${UNGROUNDED_NOTE}` } : opts;
         const tLlm = Date.now();
-        // A draft of the same question already warmed this answer: reuse it.
         const cacheScope = `docs${docCount}`;
-        const drafted = ungrounded ? null : cacheGet(body.content, 0.72, cacheScope);
-        const llmResult = drafted
-          ? { text: drafted, source: "llm" as const }
-          : streamed
-            ? await completeStream(llmOpts, writeDelta)
-            : await complete(llmOpts);
-        if (!drafted && streamed && llmResult.source === "llm") {
-          // streamed path already painted tokens; nothing to do
-        } else if (drafted && streamed) {
-          writeDelta(drafted);
-        }
-        llmMs = Date.now() - tLlm;
-        answerText = llmResult.text;
-        if (llmResult.source === "llm") cachePut(body.content, llmResult.text, llmResult.source, cacheScope);
-        // Voice callers cannot wait 8 seconds for a token: past the budget we take
-        // the grounded extractive answer instead (still sourced from knowledge).
-        const voiceBudget = Number(process.env.LLM_VOICE_BUDGET_MS ?? 3000);
-        if (channel === "voice" && !draft && llmMs > voiceBudget && retrieved.length > 0) {
-          const grounded = groundedFallbackText(opts, agent.fallbackResponse);
-          if (grounded) {
-            answerText = grounded;
-            console.log(`llm over voice budget (${llmMs}ms) -> grounded extractive answer`);
+
+        if (!ungrounded) {
+          // Direct-from-document answer when one sentence clearly matches: no model
+          // call at all, which is what makes factual lookups feel instant.
+          const instant = extractiveAnswer(body.content, retrieved, 0.5);
+          if (instant) {
+            answerText = instant;
+            verdict = validateResponse(instant, retrieved, { fallbackResponse: agent.fallbackResponse });
+            answerSource = "extractive";
+            writeDelta(answerText);
           }
         }
-        if (ungrounded) {
-          verdict = { ok: true, confidence: 0.5, issues: ["ungrounded — no documents uploaded"], safeText: answerText };
-          answerSource = "llm-ungrounded";
-        } else {
-          verdict = validateResponse(llmResult.text, retrieved, { fallbackResponse: agent.fallbackResponse });
-          answerText = verdict.safeText;
-          answerSource = llmResult.source;
+
+        if (answerSource !== "extractive") {
+          // A draft of the same question already warmed this answer: reuse it.
+          const drafted = ungrounded ? null : cacheGet(body.content, 0.72, cacheScope);
+          const llmResult = drafted
+            ? { text: drafted, source: "llm" as const }
+            : streamed
+              ? await completeStream(llmOpts, writeDelta)
+              : await complete(llmOpts);
+          if (drafted && streamed) writeDelta(drafted);
+          llmMs = Date.now() - tLlm;
+          answerText = llmResult.text;
+          if (llmResult.source === "llm") cachePut(body.content, llmResult.text, llmResult.source, cacheScope);
+
+          // Voice callers cannot wait 8 seconds for a token: past the budget we take
+          // the grounded extractive answer instead (still sourced from knowledge).
+          const voiceBudget = Number(process.env.LLM_VOICE_BUDGET_MS ?? 3000);
+          if (channel === "voice" && !draft && llmMs > voiceBudget && retrieved.length > 0) {
+            const grounded = groundedFallbackText(opts, agent.fallbackResponse);
+            if (grounded) {
+              answerText = grounded;
+              console.log(`llm over voice budget (${llmMs}ms) -> grounded extractive answer`);
+            }
+          }
+
+          if (ungrounded) {
+            verdict = { ok: true, confidence: 0.5, issues: ["ungrounded — no documents uploaded"], safeText: answerText };
+            answerSource = "llm-ungrounded";
+          } else {
+            verdict = validateResponse(llmResult.text, retrieved, { fallbackResponse: agent.fallbackResponse });
+            answerText = verdict.safeText;
+            answerSource = llmResult.source;
+          }
         }
       }
     }
