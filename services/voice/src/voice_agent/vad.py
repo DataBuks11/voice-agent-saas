@@ -9,8 +9,8 @@ from dataclasses import dataclass
 @dataclass
 class VadConfig:
     threshold: float = 0.012
-    min_speech_ms: int = 250
-    endpoint_silence_ms: int = 300
+    min_speech_ms: int = 170
+    endpoint_silence_ms: int = 250
     max_utterance_ms: int = 45000
 
 

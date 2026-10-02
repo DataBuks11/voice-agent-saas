@@ -24,6 +24,7 @@ export function VoicePage() {
   const [agents, setAgents] = React.useState<AgentRow[]>([]);
   const [agentId, setAgentId] = React.useState<string>("");
   const [elapsed, setElapsed] = React.useState(0);
+  const [interim, setInterim] = React.useState("");
 
   const wsRef = React.useRef<WebSocket | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
@@ -40,6 +41,11 @@ export function VoicePage() {
   const recogPausedRef = React.useRef(false);
   const recogActiveRef = React.useRef(false);
   const playNextRef = React.useRef<number | null>(null);
+  const interimRef = React.useRef<string>("");
+  const backchannelTimerRef = React.useRef<number | null>(null);
+  const backchannelChunksRef = React.useRef<Uint8Array[]>([]);
+  const backchannelRateRef = React.useRef<number | null>(null);
+  const replyStartedRef = React.useRef(false);
   const playNodesRef = React.useRef<AudioBufferSourceNode[]>([]);
   const playEndTimerRef = React.useRef<number | null>(null);
 
@@ -62,17 +68,26 @@ export function VoicePage() {
         const lang = (agents.find((a) => a.id === agentId)?.language ?? "en").toLowerCase();
         rec.lang = lang.startsWith("hi") ? "hi-IN" : lang.startsWith("es") ? "es-ES" : lang.startsWith("ar") ? "ar-SA" : "en-US";
         rec.continuous = true;
-        rec.interimResults = false;
+        rec.interimResults = true;
         rec.maxAlternatives = 1;
         rec.onresult = (ev: any) => {
+          let interim = "";
           for (let i = ev.resultIndex; i < ev.results.length; i++) {
             const r = ev.results[i];
-            if (!r.isFinal) continue;
-            const text = String(r[0]?.transcript ?? "").trim();
-            if (text && socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: "text", text }));
+            const spoken = String(r[0]?.transcript ?? "").trim();
+            if (!spoken) continue;
+            if (r.isFinal) {
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: "text", text: spoken }));
+              }
+            } else {
+              interim += `${spoken} `;
             }
           }
+          // Live partials: the caller sees their words land as they speak.
+          interimRef.current = interim.trim();
+          if (interimRef.current) setInterim(interimRef.current);
+          else setInterim("");
         };
         rec.onerror = (ev: any) => {
           const err = String(ev?.error ?? "");
@@ -228,6 +243,48 @@ export function VoicePage() {
 
   /** Incremental playback: schedule complete 4096-sample blocks as bytes stream in
    *  (first audio paints before the whole reply is synthesized). */
+  /** Pre-cached "Got it" — plays only if the real answer is still slow. */
+  const dropBackchannel = () => {
+    if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
+    backchannelTimerRef.current = null;
+    backchannelChunksRef.current = [];
+    backchannelRateRef.current = null;
+  };
+
+  const playBackchannel = (rate: number) => {
+    const parts = backchannelChunksRef.current;
+    backchannelChunksRef.current = [];
+    backchannelRateRef.current = null;
+    if (!parts.length) return;
+    const total = parts.reduce((sum, p) => sum + p.byteLength, 0);
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      merged.set(p, off);
+      off += p.byteLength;
+    }
+    try {
+      const ctx = playCtxRef.current ?? new AudioContext();
+      playCtxRef.current = ctx;
+      void ctx.resume();
+      const pcm = new Int16Array(merged.buffer, merged.byteOffset, merged.byteLength / 2);
+      const buffer = ctx.createBuffer(1, pcm.length, rate);
+      const ch = buffer.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+      const node = ctx.createBufferSource();
+      node.buffer = buffer;
+      node.connect(ctx.destination);
+      const now = ctx.currentTime;
+      if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.02;
+      node.start(playNextRef.current);
+      playNextRef.current += buffer.duration;
+      playNodesRef.current.push(node);
+      backchannelTimerRef.current = null;
+    } catch (err) {
+      pushLine("system", `backchannel failed: ${(err as Error).message}`);
+    }
+  };
+
   const flushAudio = (final: boolean) => {
     const rate = rateRef.current;
     if (!rate) return;
@@ -325,7 +382,12 @@ export function VoicePage() {
       socket.onmessage = (ev) => {
         if (typeof ev.data !== "string") {
           const buf = ev.data as ArrayBuffer;
+          if (backchannelRateRef.current != null && rateRef.current == null) {
+            backchannelChunksRef.current.push(new Uint8Array(buf));
+            return;
+          }
           if (rateRef.current != null) {
+            if (backchannelRateRef.current != null) dropBackchannel();
             chunksRef.current.push(new Uint8Array(buf));
             flushAudio(false);
           }
@@ -338,7 +400,24 @@ export function VoicePage() {
           return;
         }
         const type = msg.type as string;
-        if (type === "ready") {
+        if (type === "hearing") {
+          // The caller started speaking: react instantly.
+          setInterim("");
+          interimRef.current = "";
+          setVoiceState((prev) => (prev === "listening" ? "thinking" : prev));
+        } else if (type === "backchannel") {
+          const rate = Number(msg.sampleRate ?? 24000);
+          backchannelRateRef.current = rate;
+          backchannelChunksRef.current = [];
+          if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
+          backchannelTimerRef.current = window.setTimeout(() => {
+            if (replyStartedRef.current) {
+              dropBackchannel();
+              return;
+            }
+            playBackchannel(rate);
+          }, 300);
+        } else if (type === "ready") {
           setStatus("live");
           setVoiceState("listening");
           pushLine("system", `session ready · conversation ${(msg.conversationId as string)?.slice(0, 8)}…`);
@@ -355,12 +434,20 @@ export function VoicePage() {
             timerRef.current = window.setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
           }
         } else if (type === "user") {
+          replyStartedRef.current = false;
+          setInterim("");
+          interimRef.current = "";
           pushLine("user", msg.text as string);
           setVoiceState("thinking");
           if (rateRef.current != null) stopPlayback();
         } else if (type === "assistant") {
           pushLine("assistant", msg.text as string);
         } else if (type === "audio_start") {
+          replyStartedRef.current = true;
+          if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
+          backchannelTimerRef.current = null;
+          backchannelChunksRef.current = [];
+          backchannelRateRef.current = null;
           rateRef.current = Number(msg.sampleRate ?? 24000);
           chunksRef.current = [];
           playNextRef.current = null;
@@ -510,6 +597,15 @@ export function VoicePage() {
                   </div>
                 ))
               )}
+              {interim ? (
+                <div className="voice-line user">
+                  <span className="who">you</span>
+                  <span className="said">
+                    {interim}
+                    <span className="muted"> …</span>
+                  </span>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>

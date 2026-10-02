@@ -34,6 +34,44 @@ _tts: TTSProvider | None = None
 _models_lock = asyncio.Lock()
 _models_warmed = False
 
+# Short acknowledgements are synthesised once at boot and replayed from memory, so
+# the customer hears "Got it" within milliseconds of finishing their sentence
+# instead of dead air while the model thinks.
+BACKCHANNELS = ["Got it.", "Sure, one moment.", "Okay.", "Thank you.", "You're welcome."]
+_tts_cache: dict[str, object] = {}
+_TTS_CACHE_MAX = 240
+_first_backchannel = 0
+
+
+def _cache_key(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+async def cached_synthesize(tts: TTSProvider, text: str) -> object | None:
+    """Memoised synthesis for short phrases (backchannels, confirmations)."""
+    key = _cache_key(text)
+    hit = _tts_cache.get(key)
+    if hit is not None:
+        return hit
+    if len(key) > 60 or len(key) < 2:
+        return None
+    chunk = await tts.synthesize(text)
+    if not chunk or not chunk.pcm16:
+        return None
+    if len(_tts_cache) >= _TTS_CACHE_MAX:
+        _tts_cache.pop(next(iter(_tts_cache)), None)
+    _tts_cache[key] = chunk
+    return chunk
+
+
+async def warm_backchannels(tts: TTSProvider) -> None:
+    for phrase in BACKCHANNELS:
+        try:
+            await cached_synthesize(tts, phrase)
+        except Exception:  # noqa: BLE001 - backchannel is best-effort
+            log.debug("backchannel warm failed for %r", phrase, exc_info=True)
+    log.info("backchannels ready: %d", len(_tts_cache))
+
 
 async def shared_models() -> tuple[STTProvider, TTSProvider]:
     global _stt, _tts, _models_warmed
@@ -49,6 +87,7 @@ async def shared_models() -> tuple[STTProvider, TTSProvider]:
             try:
                 await _stt.transcribe(b"\x00" * 3200, SAMPLE_RATE)
                 await _tts.synthesize("Warm up.")
+                await warm_backchannels(_tts)
                 backup = getattr(_tts, "backup", None)
                 if backup is not None:
                     await backup.synthesize("Warm up.")
@@ -215,10 +254,12 @@ class Session:
             self.interrupted = False
             self.turn_active = True
             try:
+                assert self.pipeline is not None
+
                 async def on_transcript(text: str) -> None:
                     await self.send_json({"type": "user", "text": text})
+                    await self._send_backchannel()
 
-                assert self.pipeline is not None
                 if kind == "text":
                     answer = await self.pipeline.handle_text(payload, on_transcript=on_transcript)
                 else:
@@ -231,6 +272,37 @@ class Session:
                 await self.send_json({"type": "error", "reason": "turn_failed", "message": str(exc)})
             finally:
                 self.turn_active = False
+
+    async def _send_backchannel(self) -> None:
+        """Pre-cached acknowledgement so the caller never hears dead air.
+
+        The client holds it for ~300ms and drops it if the real answer arrives
+        first, so fast turns stay clean and slow turns get instant feedback.
+        """
+        global _first_backchannel
+        tts = _tts
+        if tts is None or self.interrupted:
+            return
+        phrase = BACKCHANNELS[_first_backchannel % len(BACKCHANNELS)]
+        _first_backchannel += 1
+        try:
+            chunk = await cached_synthesize(tts, phrase)
+        except Exception:  # noqa: BLE001 - never break a turn for a filler
+            log.debug("backchannel failed", exc_info=True)
+            return
+        if chunk is None or not getattr(chunk, "pcm16", b"") or self.interrupted:
+            return
+        await self.send_json(
+            {
+                "type": "backchannel",
+                "text": phrase,
+                "sampleRate": chunk.sample_rate,
+                "encoding": "pcm16le",
+            }
+        )
+        data = chunk.pcm16
+        for i in range(0, len(data), 16384):
+            await self.send_bytes(data[i : i + 16384])
 
     async def enqueue(self, kind: str, payload) -> None:
         if self.turn_active or not self.queue.empty():
@@ -265,7 +337,11 @@ class Session:
                     frame = bytes(self.partial[:FRAME_BYTES])
                     del self.partial[:FRAME_BYTES]
                     event = self.vad.feed(frame)
-                    if event == "endpoint":
+                    if event == "speech_start":
+                        # Immediate UI feedback: the orb reacts while the caller is
+                        # still speaking, not only after transcription finishes.
+                        await self.send_json({"type": "hearing"})
+                    elif event == "endpoint":
                         pcm = self.vad.take()
                         if pcm and self.pipeline is not None:
                             await self.enqueue_utterance(pcm)

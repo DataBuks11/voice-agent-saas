@@ -85,7 +85,8 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
         silence = b"\x00" * (16000 * 2)  # 1s endpoint silence
         print(f"[audio] utterance {len(pcm)} bytes (~{len(pcm)/2/16000:.1f}s)")
     t0 = time.time()
-    got = {"user": None, "assistant": None, "audio": 0, "ready": None, "errors": []}
+    got = {"user": None, "assistant": None, "audio": 0, "ready": None, "errors": [],
+           "backchannel": None, "backchannel_bytes": 0, "user_at": None}
     async with websockets.connect(url, max_size=2**24, open_timeout=30) as ws:
         await ws.send(json.dumps({"type": "start", "token": token, "workspaceId": ws_id}))
         if mode == "text":
@@ -99,16 +100,22 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
             except asyncio.TimeoutError:
                 break
             if isinstance(msg, bytes):
-                # Pre-answer audio = auto-greeting; only the answer's TTS counts.
+                # Pre-answer audio = auto-greeting or the "Got it" backchannel;
+                # only the answer's own TTS counts as the reply.
                 if got["assistant"]:
                     got["audio"] += len(msg)
+                elif got["backchannel"]:
+                    got["backchannel_bytes"] += len(msg)
                 continue
             data = json.loads(msg)
             kind = data.get("type")
             if kind == "ready":
                 got["ready"] = data
+            elif kind == "backchannel":
+                got["backchannel"] = data.get("text")
             elif kind == "user":
                 got["user"] = data.get("text")
+                got["user_at"] = time.time()
                 print(f"[stt] {got['user']!r}  (+{time.time()-t0:.1f}s)")
             elif kind == "assistant":
                 got["assistant"] = data.get("text")
@@ -137,6 +144,12 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
         print(f"FAIL: reply not grounded in knowledge: {got['assistant'][:200]!r}"); ok = False
     if got["audio"] <= 0:
         print("FAIL: no TTS audio"); ok = False
+    if not got["backchannel"]:
+        print("FAIL: no instant backchannel"); ok = False
+    elif got["backchannel_bytes"] <= 0:
+        print("FAIL: backchannel had no audio"); ok = False
+    else:
+        print(f"[ack] {got['backchannel']!r} ({got['backchannel_bytes']} bytes)  <-- fills the dead air")
     if got["errors"]:
         print(f"FAIL: errors {got['errors']}"); ok = False
     print(f"VOICE E2E[{mode}] " + ("PASS" if ok else "FAIL"))
