@@ -29,6 +29,7 @@ const check = (name: string, cond: boolean, extra = ""): void => {
 /* ---- unit level: phonetics ---- */
 console.log("\n[1] Phonetics / spell-out / digits");
 check("spell-out K-S-T-E-S-T", decodeSpellOut("K-S-T-E-S-T") === "Kstest", `-> ${decodeSpellOut("K-S-T-E-S-T")}`);
+check("two-part spell-out keeps first group", decodeSpellOut("J-O-H-N D-O-E") === "John", `-> ${decodeSpellOut("J-O-H-N D-O-E")}`);
 check("spell-out C-O-L-E", decodeSpellOut("it's going to be cold, C-O-L-E") === "Cole", `-> ${decodeSpellOut("it's going to be cold, C-O-L-E")}`);
 check("digits nine two seven eight zero", digitsFromSpoken("nine two seven eight zero") === "92780", `-> ${digitsFromSpoken("nine two seven eight zero")}`);
 check("spoken year nineteen ninety", digitsFromSpoken("nineteen ninety") === "1990", `-> ${digitsFromSpoken("nineteen ninety")}`);

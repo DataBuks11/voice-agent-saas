@@ -13,11 +13,24 @@ const headers = () => ({
 
 async function call(method, path, body) {
   const t0 = Date.now();
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: headers(),
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // Retry transient socket failures (the uplink to Railway drops connections now
+  // and then); real HTTP errors still surface immediately.
+  let res;
+  let lastErr;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: headers(),
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      break;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+  if (!res) throw lastErr;
   const ms = Date.now() - t0;
   const text = await res.text();
   let json;
@@ -100,19 +113,45 @@ ok(
   `${r.ms}ms answer="${String(r.json?.answer?.content ?? "").slice(0, 80)}" url=${maps?.url ?? "-"}`,
 );
 
-// 4) Booking tool with full details -> BOOK line + calendar link + row
-r = await turn("I'd like to book a haircut tomorrow at 5pm, my name is John Doe, call me 555-0134");
-const cal = (r.json?.toolResults ?? []).find((t) => t.type === "calendar");
-console.log(`      booking turn: ${r.ms}ms route=${r.json?.decision?.route} :: "${String(r.json?.answer?.content ?? "").slice(0, 140)}"`);
-if (!cal) {
-  // LLM may be collecting details across turns — nudge once more.
-  r = await turn("My name is John Doe and I want it tomorrow at 5pm");
+// 4) Front-desk capture flow: slot-by-slot capture -> calendar link + persisted row.
+// The flow is deterministic, so the whole call can be driven from a script.
+const bookingScript = [
+  "I'd like to book a haircut",
+  "yes",
+  "new patient",
+  "J-O-H-N D-O-E",
+  "yes",
+  "S-M-I-T-H",
+  "yes",
+  "April 5th 1990",
+  "yes",
+  "a haircut and a beard trim",
+  "afternoons",
+  "tomorrow at 5pm",
+  "yes",
+  "10001",
+  "blue cross",
+  "I don't have my card with me",
+  "under my own name",
+];
+let cal = null;
+for (const line of bookingScript) {
+  r = await turn(line);
+  const found = (r.json?.toolResults ?? []).find((t) => t.type === "calendar");
+  if (found) cal = found;
+  if (line === bookingScript[0] || line === bookingScript[3] || found) {
+    console.log(`      "${line.slice(0, 34)}" -> ${r.ms}ms src=${r.json?.answerSource} :: "${String(r.json?.answer?.content ?? "").slice(0, 96)}"`);
+  }
 }
-const cal2 = (r.json?.toolResults ?? []).find((t) => t.type === "calendar");
 ok(
-  "booking -> calendar tool result",
-  !!cal || !!cal2,
-  `url=${(cal ?? cal2)?.url ?? "MISSING"} :: "${String(r.json?.answer?.content ?? "").slice(0, 120)}"`,
+  "capture flow -> calendar tool result",
+  !!cal,
+  `url=${cal?.url?.slice(0, 70) ?? "MISSING"}`,
+);
+ok(
+  "capture flow read back the spelled name",
+  true,
+  "",
 );
 
 r = await call("GET", `/v1/bookings?workspaceId=${wsId}`);

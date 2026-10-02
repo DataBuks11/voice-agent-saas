@@ -120,23 +120,32 @@ export interface SpellOutRun {
  * separated run, so "it'll be fine" is never read as "It'llbf".
  */
 export function findSpellOutRun(text: string): SpellOutRun | null {
-  const best: SpellOutRun[] = [];
+  const best: Array<SpellOutRun & { priority: number }> = [];
 
   // (a) Explicit separated run: "K-S-T-E-S-T", "k. s. t.", "K S T E S T".
   // Either every letter is capitalised, or the run uses spelling separators
   // (dash/dot) — otherwise ordinary lowercase words ("it'll be fine") match.
   const separated = text.match(/[\p{Lu}](?:[\s\-.,'’]+[\p{Lu}]){2,}|\p{Ll}(?:[\-.'']+\p{Ll}){2,}/gu);
-  for (const chunk of separated ?? []) {
-    const tokens = chunk.split(/[\s\-.,'’]+/).filter(Boolean);
-    if (tokens.length < 2 || tokens.length > 14) continue;
-    if (!tokens.every((t) => /^\p{L}$/u.test(t))) continue;
-    const letters = tokens.map((t) => t.toLowerCase()).join("");
-    best.push({
-      letters: titleCase(letters),
-      replaced: letters,
-      length: tokens.length,
-      strict: true,
-    });
+  for (const raw of separated ?? []) {
+    // "J-O-H-N D-O-E" is two names: keep the dash/dot groups separate.
+    const chunks = /[-.]/.test(raw)
+      ? raw.split(/[\s]+/).filter(Boolean)
+      : [raw];
+    for (const chunk of chunks) {
+      const tokens = chunk.split(/[\s\-.,'’]+/).filter(Boolean);
+      if (tokens.length < 2 || tokens.length > 14) continue;
+      if (!tokens.every((t) => /^\p{L}$/u.test(t))) continue;
+      const letters = tokens.map((t) => t.toLowerCase()).join("");
+      best.push({
+        letters: titleCase(letters),
+        replaced: letters,
+        length: tokens.length,
+        strict: true,
+        // Explicit "J-O-H-N" beats a looser run that swallowed the next name too.
+        priority: 2,
+      });
+      break;
+    }
   }
 
   // (b)/(c) Whitespace run inside the sentence, scored by strictness + length
@@ -166,11 +175,16 @@ export function findSpellOutRun(text: string): SpellOutRun | null {
       replaced: `${tokens.slice(0, i).join(" ")} ${letters} ${tokens.slice(j).join(" ")}`.replace(/\s+/g, " ").trim(),
       length: consumed + strictChars / 10,
       strict: strictRun,
+      priority: strictRun ? 1 : 0,
     });
   }
 
   if (!best.length) return null;
-  best.sort((a, b) => (b.strict === a.strict ? b.length - a.length : b.strict ? 1 : -1));
+  best.sort((a, b) => {
+    if (a.strict !== b.strict) return a.strict ? -1 : 1;
+    if (a.priority !== b.priority) return b.priority - a.priority;
+    return b.length - a.length;
+  });
   const top = best[0];
   return top ? { letters: top.letters, replaced: top.replaced, length: top.length, strict: top.strict } : null;
 }
