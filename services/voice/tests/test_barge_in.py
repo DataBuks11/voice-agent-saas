@@ -281,3 +281,43 @@ async def test_words_spoken_during_our_audio_are_not_lost(monkeypatch):
     assert session.queue.qsize() == 1
     kind, _payload = session.queue.get_nowait()
     assert kind.startswith("audio")
+
+
+@pytest.mark.asyncio
+async def test_turn_is_closed_when_the_client_stops_sending_audio(monkeypatch):
+    """No trailing silence frames must not leave the caller hanging."""
+    monkeypatch.setattr(srv, "_stt", StubSTT())
+    session, ws, pipeline = await _session([frame(800, 0.3)])
+    await session.run()  # audio ends, VAD is still waiting for silence
+    assert session.vad.in_speech is True
+    assert session.queue.empty()
+    # the client went quiet without sending silence
+    session._last_frame_at -= 5.0
+    watcher = asyncio.create_task(session._turn_watchdog())
+    for _ in range(80):
+        if not session.queue.empty():
+            break
+        await asyncio.sleep(0.01)
+    watcher.cancel()
+    try:
+        await watcher
+    except asyncio.CancelledError:
+        pass
+    assert session.queue.qsize() == 1
+    assert session.vad.in_speech is False
+
+
+@pytest.mark.asyncio
+async def test_stale_turn_watchdog_ignores_a_healthy_stream(monkeypatch):
+    monkeypatch.setattr(srv, "_stt", StubSTT())
+    session, ws, pipeline = await _session([frame(400, 0.3)])
+    session.vad.feed(frame(200, 0.3))
+    assert session.vad.in_speech is True
+    watcher = asyncio.create_task(session._turn_watchdog())
+    await asyncio.sleep(0.4)  # audio is still "arriving"
+    watcher.cancel()
+    try:
+        await watcher
+    except asyncio.CancelledError:
+        pass
+    assert session.queue.empty()

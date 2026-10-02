@@ -38,13 +38,21 @@ Q2 = "Actually, tell me about the enterprise plan instead."
 
 
 def pcm16(rate: int, samples: bytes) -> bytes:
-    """Resample 22 kHz piper output to the 16 kHz the runtime expects."""
+    """Resample 22 kHz piper output to the 16 kHz the runtime expects.
+
+    Must be a real resample: duplicating samples slows the audio down and
+    whisper then transcribes nonsense, which looks like an STT bug but is not.
+    """
     if rate == NATIVE:
         return samples
-    out = bytearray()
-    for i in range(0, len(samples) - 1, 2):
-        out += samples[i : i + 2] * 2
-    return bytes(out)
+    import numpy as np
+    import av
+
+    arr = np.frombuffer(samples, dtype=np.int16).reshape(1, -1)
+    frame = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")
+    frame.sample_rate = rate
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=NATIVE)
+    return b"".join(f.to_ndarray().tobytes() for f in resampler.resample(frame))
 
 
 def speak(text: str, rate: int = 22050) -> bytes:
@@ -139,26 +147,33 @@ async def main() -> int:
     second = speak(Q2)
     print(f"[audio] q1={len(first) // 3200 * 100}ms q2={len(second) // 3200 * 100}ms")
 
-    async with websockets.connect(WS_URL, max_size=8 * 1024 * 1024, open_timeout=30) as sock:
-        await sock.send(json.dumps({"type": "start", "token": token, "workspaceId": ws_id}))
-        ready = await rec.wait_for(sock, {"ready"}, timeout=30)
-        print(f"[ready] {'ok' if ready else 'MISSING'}")
-        # let the greeting finish so we measure the answer, not the greeting
-        await rec.wait_for(sock, {"audio_end"}, timeout=25)
+    try:
+        async with websockets.connect(WS_URL, max_size=8 * 1024 * 1024, open_timeout=30) as sock:
+            await sock.send(json.dumps({"type": "start", "token": token, "workspaceId": ws_id}))
+            if not await rec.wait_for(sock, {"ready"}, timeout=30):
+                print("FAIL: session never became ready")
+                return 1
+            print("[ready] ok")
 
-        # ---- phase 1: normal question
-        print("\n--- phase 1: normal question")
-        task = asyncio.create_task(send_audio(sock, first))
-        got_user = await rec.wait_for(sock, {"user"}, timeout=25)
-        await task
-        print(f"[phase1] transcript in {time.time() - t0 - (got_user[0] if got_user else 0):.1f}s")
-        await rec.wait_for(sock, {"assistant"}, timeout=25)
-        speaking = await rec.wait_for(sock, {"audio_start"}, timeout=25)
+            # ---- phase 1: ask straight away (this also cuts the greeting short)
+            print("\n--- phase 1: first question")
+            await send_audio(sock, first)
+            t_heard = time.time()
+            await rec.wait_for(sock, {"assistant"}, timeout=30)
+            print(f"[phase1] answered {time.time() - t_heard:.1f}s after the caller stopped talking")
+            if not rec.replies:
+                print("FAIL: first question was never answered")
+                return 1
 
-        # ---- phase 2: talk over the answer
-        print("\n--- phase 2: caller interrupts the answer")
-        await send_audio(sock, second)
-        after = await rec.wait_for(sock, {"assistant"}, timeout=25)
+            # ---- phase 2: talk over the answer
+            print("\n--- phase 2: caller interrupts the answer")
+            got_speaking = await rec.wait_for(sock, {"audio_start"}, timeout=20)
+            if not got_speaking:
+                print("WARN: agent never started speaking; sending anyway")
+            await send_audio(sock, second)
+            await rec.wait_for(sock, {"assistant"}, timeout=30)
+    except Exception as exc:  # noqa: BLE001 - diagnostics matter more than the exit code
+        print(f"[warn] session ended early: {type(exc).__name__}: {exc}")
 
     print("\n=== summary ===")
     print(f"transcripts: {rec.transcripts}")
@@ -171,19 +186,19 @@ async def main() -> int:
         print("FAIL: nothing was transcribed")
         ok = False
     if len(rec.replies) < 2:
-        print(f"FAIL: expected 2 replies (answer + answer after interruption), got {len(rec.replies)}")
+        print(f"FAIL: expected 2 replies, got {len(rec.replies)}")
         ok = False
     if rec.interruptions != 1:
         print(f"FAIL: expected exactly 1 interruption, got {rec.interruptions}")
         ok = False
-    if rec.interruptions and len(rec.replies) > 2:
+    if len(rec.replies) > 2:
         print(f"FAIL: {len(rec.replies)} replies - agent is talking over itself")
         ok = False
     if rec.transcripts and "enterprise" not in rec.transcripts[-1].lower():
         print(f"FAIL: the words said during playback were lost: {rec.transcripts[-1]!r}")
         ok = False
-    if rec.replies and "1200" not in " ".join(rec.replies):
-        print(f"WARN: reply after interruption does not mention the enterprise price: {rec.replies[-1]!r}")
+    else:
+        print("OK: the words spoken during playback reached the model")
     print("VOICE BARGE-IN E2E " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 

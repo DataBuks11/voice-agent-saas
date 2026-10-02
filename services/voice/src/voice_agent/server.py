@@ -152,6 +152,8 @@ class Session:
         self.call_started = self.last_activity
         self.idle_nudges = 0
         self.watchdog: asyncio.Task | None = None
+        self.turn_watchdog: asyncio.Task | None = None
+        self._last_frame_at = __import__("time").time()
 
     # --- wire helpers (serialize sends: audio + json interleave) ---
     async def send_json(self, obj: dict) -> None:
@@ -321,6 +323,39 @@ class Session:
             _time.time() - t0,
             is_greeting,
         )
+
+    async def _finalise_utterance(self) -> None:
+        """Close the open utterance and hand it to the pipeline."""
+        self._barge_taken = False
+        if not self.vad.in_speech and self.vad.speech_ms <= 0:
+            return
+        pcm = self.vad.take()
+        if not pcm or self.pipeline is None:
+            return
+        await self._drain_draft()
+        await self._stt_delta(True)
+        await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm)
+
+    async def _turn_watchdog(self) -> None:
+        """Finalise a turn when the audio stream stops before the VAD sees silence.
+
+        A browser that pauses its microphone, a dropped socket or a caller who
+        simply stops talking must not leave the turn hanging forever.
+        """
+        stale = float(os.getenv("STALE_UTTERANCE_S", "0.7"))
+        while True:
+            await asyncio.sleep(0.12)
+            try:
+                if not self.started or self.speaking:
+                    continue
+                if not self.vad.in_speech:
+                    continue
+                if __import__("time").time() - self._last_frame_at < stale:
+                    continue
+                log.info("no audio for %.1fs: finalising the open turn", stale)
+                await self._finalise_utterance()
+            except Exception:  # noqa: BLE001 - never kill the session
+                log.exception("turn watchdog failed")
 
     async def _flush_interruption(self) -> None:
         """Transcribe and queue what the caller said while we were speaking."""
@@ -503,6 +538,7 @@ class Session:
                     if not self.started:
                         continue
                 self.last_activity = __import__("time").time()
+                self._last_frame_at = self.last_activity
                 self.partial.extend(message)
                 while len(self.partial) >= FRAME_BYTES:
                     frame = bytes(self.partial[:FRAME_BYTES])
@@ -541,13 +577,7 @@ class Session:
                         self.hypothesis = ""
                         await self.send_json({"type": "hearing"})
                     elif event == "endpoint":
-                        self._barge_taken = False
-                        pcm = self.vad.take()
-                        if pcm and self.pipeline is not None:
-                            await self._drain_draft()
-                            await self._stt_delta(True)
-                            kind_now = "audio-draft" if self.hypothesis else "audio"
-                            await self.enqueue(kind_now, pcm)
+                        await self._finalise_utterance()
                     else:
                         buffered = self.vad.peek()
                         if (
@@ -583,6 +613,8 @@ class Session:
     async def _start_watchdog(self) -> None:
         if self.watchdog is None:
             self.watchdog = asyncio.create_task(self._watchdog())
+        if self.turn_watchdog is None:
+            self.turn_watchdog = asyncio.create_task(self._turn_watchdog())
 
     async def _watchdog(self) -> None:
         """Call guardrails: nudge on silence, hang up when it continues, cap length."""
@@ -617,6 +649,8 @@ class Session:
                 log.exception("watchdog tick failed")
 
     async def close(self) -> None:
+        if self.turn_watchdog:
+            self.turn_watchdog.cancel()
         if self.watchdog:
             self.watchdog.cancel()
         if self.greet_task:
