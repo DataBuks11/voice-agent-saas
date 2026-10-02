@@ -74,8 +74,12 @@ if (String(plain.answer?.content ?? "").length < 10) { console.error("FAIL: empt
 const t1b = Date.now();
 const filler = await j(`/v1/conversations/${conv1}/messages`, { method: "POST", body: JSON.stringify({ workspaceId: ws, content: "Okay, no problem." }) }, token, ws);
 const fillerMs = Date.now() - t1b;
-console.log(`[filler fast-path] ${fillerMs}ms src=${filler.answerSource}`);
-if (filler.answerSource !== "fast-path" || fillerMs > 700) { console.error(`FAIL: filler ${fillerMs}ms src=${filler.answerSource}`); process.exit(1); }
+const fillerText = String(filler.answer?.content ?? "");
+console.log(`[acknowledgement] ${fillerMs}ms src=${filler.answerSource} :: ${fillerText.slice(0, 80)}`);
+const canned = /happy to help|anything else i can take care of/i.test(fillerText);
+if (canned) { console.error(`FAIL: canned acknowledgement hijacked the call: ${fillerText}`); process.exit(1); }
+if (fillerText.length < 5) { console.error("FAIL: empty acknowledgement reply"); process.exit(1); }
+if (fillerMs > 4000) { console.error(`FAIL: acknowledgement took ${fillerMs}ms`); process.exit(1); }
 
 // 2) No knowledge, streamed: LLM answer paints live (no retrieval, no embed)
 const s1 = await runStream(ws, token, conv1, "Do you offer student discounts?");

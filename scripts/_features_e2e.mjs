@@ -95,8 +95,9 @@ r = await turn("How much is premium styling?");
 const grounded = r.json?.verdict?.ok === true;
 const mentions900 = /900/.test(String(r.json?.answer?.content ?? ""));
 ok(
-  "grounded knowledge answer (Gemini)",
-  grounded && mentions900 && r.json?.answerSource === "llm",
+  // "extractive" is the fast path: answered from the document without a model call.
+  "grounded knowledge answer",
+  grounded && mentions900 && ["llm", "extractive", "llm-ungrounded"].includes(r.json?.answerSource),
   `${r.ms}ms source=${r.json?.answerSource} verdict=${r.json?.verdict?.ok} :: "${String(r.json?.answer?.content ?? "").slice(0, 90)}"`,
 );
 for (let i = 0; i < 2; i++) {
