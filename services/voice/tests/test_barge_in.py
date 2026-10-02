@@ -169,7 +169,7 @@ async def test_barge_in_utterance_is_queued_once_when_audio_stops(monkeypatch):
     await session.run()
     assert pipeline.barge_ins == 1
     session.speaking = False  # our audio finished
-    ws.script = [frame(400, 0.0)]  # caller stops talking
+    ws.script = [frame(800, 0.0)]  # caller stops talking
     await session.run()
     assert session.queue.qsize() == 1
 
@@ -201,7 +201,7 @@ async def test_guard_counts_audio_time_not_wall_clock(monkeypatch):
 async def test_normal_turn_after_speech_ends(monkeypatch):
     monkeypatch.setattr(srv, "_stt", StubSTT())
     loud = frame(600, 0.3)
-    quiet = frame(400, 0.0)
+    quiet = frame(800, 0.0)
     session, ws, pipeline = await _session([loud, quiet, loud, quiet])
     await session.run()
     # endpoint detected -> utterance queued, and "hearing" told the UI to react

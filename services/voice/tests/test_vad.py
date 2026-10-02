@@ -128,3 +128,27 @@ def test_reset_keeps_noise_floor_but_drops_audio():
     assert vad.peek() == b""
     assert not vad.sustained()
     assert vad.noise_rms == floor
+
+
+def test_pause_inside_a_sentence_does_not_end_the_turn():
+    """A 300 ms gap between words must not split one sentence into two turns."""
+    vad = Vad(VadConfig(), 16000)
+    events = []
+    for piece in (_frame(700, 0.3), _frame(300, 0.0), _frame(700, 0.3)):
+        for i in range(0, len(piece), 640):
+            ev = vad.feed(piece[i : i + 640])
+            if ev:
+                events.append(ev)
+    assert events == ["speech_start"]
+    assert len(vad.peek()) > 0
+
+
+def test_a_real_pause_does_end_the_turn():
+    vad = Vad(VadConfig(), 16000)
+    events = []
+    for piece in (_frame(700, 0.3), _frame(700, 0.0)):
+        for i in range(0, len(piece), 640):
+            ev = vad.feed(piece[i : i + 640])
+            if ev:
+                events.append(ev)
+    assert events == ["speech_start", "endpoint"]

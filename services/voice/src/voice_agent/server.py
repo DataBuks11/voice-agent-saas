@@ -208,7 +208,7 @@ class Session:
             setter = getattr(provider, "set_language", None)
             if callable(setter):
                 setter(language)
-        asyncio.create_task(self._load_dictionary(headers))
+        asyncio.create_task(self._load_dictionary(headers, workspace_id))
         cfg = VoiceConfig(
             allow_barge_in=os.getenv("VOICE_ALLOW_BARGE_IN", "true").lower() == "true",
             max_turns=int(os.getenv("VOICE_MAX_CONVERSATION_TURNS", "50")),
@@ -238,13 +238,23 @@ class Session:
         if greeting and greeting.strip().lower() not in {"off", "none", "disabled", "false"}:
             self.greet_task = asyncio.create_task(self._auto_greet(greeting.strip()))
 
-    async def _load_dictionary(self, headers: dict) -> None:
+    async def _load_dictionary(self, headers: dict, workspace_id: str | None) -> None:
         """Prime the recogniser with this workspace's names and terms."""
+        if not workspace_id:
+            return
         try:
             async with httpx.AsyncClient(base_url=API_BASE, timeout=10.0) as c:
-                r = await c.get("/v1/agents/speech-dictionary", headers=headers)
+                r = await c.get(
+                    "/v1/agents/speech-dictionary",
+                    headers=headers,
+                    params={"workspaceId": workspace_id},
+                )
                 if r.status_code == 200:
-                    set_stt_dictionary(list((r.json() or {}).get("terms") or []))
+                    terms = list((r.json() or {}).get("terms") or [])
+                    set_stt_dictionary(terms)
+                    log.info("speech dictionary: %d terms", len(terms))
+                else:
+                    log.warning("speech dictionary unavailable: HTTP %s", r.status_code)
         except Exception:  # noqa: BLE001 - biasing is best-effort
             log.debug("speech dictionary unavailable", exc_info=True)
 

@@ -51,7 +51,9 @@ class VadConfig:
     noise_down: float = 8.0  # per second: drop quickly when the room gets quiet
     noise_up: float = 0.25  # per second: creep up so a burst of speech cannot raise it
     min_speech_ms: int = 170
-    endpoint_silence_ms: int = 250
+    # Must sit above the longest natural pause inside a sentence, otherwise the
+    # turn is cut mid-sentence and whisper transcribes a fragment.
+    endpoint_silence_ms: int = 450
     max_utterance_ms: int = 45000
     # Neural threshold (Silero probability) when the model is in use.
     neural_threshold: float = 0.55
