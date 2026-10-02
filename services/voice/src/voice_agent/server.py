@@ -153,6 +153,10 @@ class Session:
     async def _speak(self, text: str, *, is_greeting: bool = False) -> None:
         """Sentence-streamed TTS: synthesize + ship sentence by sentence so
         first audio leaves before the whole reply is rendered."""
+        import time as _time
+
+        t0 = _time.time()
+        t_first: float | None = None
         started = False
         for sentence in _split_sentences(text):
             if self.interrupted:
@@ -168,6 +172,7 @@ class Session:
                     {"type": "audio_start", "sampleRate": chunk.sample_rate, "encoding": "pcm16le"}
                 )
                 started = True
+                t_first = _time.time()
             data = chunk.pcm16
             for i in range(0, len(data), 16384):
                 if self.interrupted or (is_greeting and self.turn_active):
@@ -175,6 +180,12 @@ class Session:
                 await self.send_bytes(data[i : i + 16384])
         if started:
             await self.send_json({"type": "audio_end"})
+        log.info(
+            "stage speak first=%s total=%.2fs greeting=%s",
+            f"{t_first - t0:.2f}s" if t_first else "none",
+            _time.time() - t0,
+            is_greeting,
+        )
 
     async def _auto_greet(self, text: str) -> None:
         try:

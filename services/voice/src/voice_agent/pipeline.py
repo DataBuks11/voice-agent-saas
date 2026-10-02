@@ -42,8 +42,13 @@ class VoicePipeline:
             log.info("barge-in: stopping TTS playback")
 
     async def handle_audio(self, pcm16: bytes, on_transcript=None) -> str:
+        import time as _time
+
+        t0 = _time.time()
         tr = await self.stt.transcribe(pcm16, self.config.sample_rate)
+        t_stt = _time.time()
         if not tr.text:
+            log.info("stage stt %.2fs (empty)", t_stt - t0)
             return ""
         self.state.add("user", tr.text)
         if on_transcript is not None:
@@ -51,6 +56,8 @@ class VoicePipeline:
             if result is not None and hasattr(result, "__await__"):
                 await result
         answer = await self.llm.complete(system="You are a helpful voice assistant.", context=self.state.history_text(), user=tr.text)
+        t_llm = _time.time()
+        log.info("stage stt %.2fs llm %.2fs", t_stt - t0, t_llm - t_stt)
         self.state.add("assistant", answer)
         self.interrupted = False
         return answer

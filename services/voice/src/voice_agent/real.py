@@ -293,9 +293,13 @@ class PiperTTS(TTSProvider):
 
     def _load(self):
         if self._voice is None:
+            import time as _time
+
             from piper import PiperVoice
 
+            t0 = _time.time()
             self._voice = PiperVoice.load(self._voice_path)
+            log.info("piper load %.2fs", _time.time() - t0)
         return self._voice
 
     async def synthesize(self, text: str, voice: str = "default") -> AudioChunk:
@@ -303,6 +307,9 @@ class PiperTTS(TTSProvider):
             return await asyncio.to_thread(self._sync, text)
 
     def _sync(self, text: str) -> AudioChunk:
+        import time as _time
+
+        t0 = _time.time()
         v = self._load()
         parts: list[bytes] = []
         sample_rate = 22050
@@ -316,4 +323,7 @@ class PiperTTS(TTSProvider):
                 data = getattr(chunk, "audio_int16_bytes", None) or getattr(chunk, "_audio_int16_bytes", b"")
                 if data:
                     parts.append(bytes(data))
-        return AudioChunk(pcm16=b"".join(parts), sample_rate=int(sample_rate))
+        pcm = b"".join(parts)
+        audio_s = len(pcm) / 2 / max(sample_rate, 1)
+        log.info("piper synth %.2fs (audio %.2fs, text=%r)", _time.time() - t0, audio_s, text[:40])
+        return AudioChunk(pcm16=pcm, sample_rate=int(sample_rate))
