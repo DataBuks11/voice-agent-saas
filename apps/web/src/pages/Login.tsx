@@ -2,6 +2,7 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import { setSession, getToken } from "../lib/session";
+import { BrandLogo, BgScene } from "../main";
 
 export function LoginPage() {
   const nav = useNavigate();
@@ -36,9 +37,10 @@ export function LoginPage() {
 
   return (
     <div className="setup-wrap">
+      <BgScene />
       <div className="setup-card card">
         <div className="brand" style={{ padding: "0 0 18px" }}>
-          <div className="brand-logo">VA</div>
+          <BrandLogo />
           <div>
             <div className="brand-name">Voice Agent OS</div>
             <div className="brand-sub">sign in to your console</div>

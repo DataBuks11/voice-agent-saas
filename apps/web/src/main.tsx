@@ -10,6 +10,7 @@ import { DashboardPage } from "./pages/Dashboard";
 import { AgentsPage } from "./pages/Agents";
 import { KnowledgePage } from "./pages/Knowledge";
 import { ConversationsPage } from "./pages/Conversations";
+import { VoicePage } from "./pages/Voice";
 import { BASENAME } from "./lib/base";
 
 export interface Toast {
@@ -24,9 +25,33 @@ export function useToast() {
   return React.useContext(ToastCtx);
 }
 
+const LOGO = `${import.meta.env.BASE_URL}logo.webp`;
+const BG_VIDEO =
+  "https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260809_012548_ef22562c-c0ae-4816-ad9d-f8922af4e6a7.mp4";
+
+export function BrandLogo({ size = 38 }: { size?: number }) {
+  return (
+    <div className="brand-logo" style={{ width: size, height: size }}>
+      <img src={LOGO} alt="" width={size} height={size} />
+    </div>
+  );
+}
+
+export function BgScene() {
+  return (
+    <div className="bg-scene" aria-hidden="true">
+      <video className="bg-video" autoPlay muted loop playsInline>
+        <source src={BG_VIDEO} type="video/mp4" />
+      </video>
+      <div className="bg-veil" />
+    </div>
+  );
+}
+
 function Shell({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = React.useState<Toast[]>([]);
   const [health, setHealth] = React.useState<"checking" | "up" | "down">("checking");
+  const [menuOpen, setMenuOpen] = React.useState(false);
   const ws = getWorkspace();
   const user = getUser();
   const loc = useLocation();
@@ -44,19 +69,25 @@ function Shell({ children }: { children: React.ReactNode }) {
       .catch(() => setHealth("down"));
   }, [loc.pathname]);
 
+  React.useEffect(() => setMenuOpen(false), [loc.pathname]);
+
   const nav = [
-    { to: "/", label: "Dashboard", ico: "◈" },
-    { to: "/agents", label: "Agents", ico: "◉" },
-    { to: "/knowledge", label: "Knowledge", ico: "▤" },
-    { to: "/conversations", label: "Conversations", ico: "◆" },
+    { to: "/", label: "Dashboard", ico: "fa-solid fa-gauge-high" },
+    { to: "/voice", label: "Voice", ico: "fa-solid fa-microphone" },
+    { to: "/agents", label: "Agents", ico: "fa-solid fa-robot" },
+    { to: "/knowledge", label: "Knowledge", ico: "fa-solid fa-book-open" },
+    { to: "/conversations", label: "Conversations", ico: "fa-solid fa-comments" },
   ];
+  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "Voice Agent OS";
 
   return (
     <ToastCtx.Provider value={push}>
-      <div className="app">
+      <BgScene />
+      <div className={`app${menuOpen ? " menu-open" : ""}`}>
+        <div className="menu-scrim" onClick={() => setMenuOpen(false)} />
         <aside className="sidebar">
           <div className="brand">
-            <div className="brand-logo">VA</div>
+            <BrandLogo />
             <div>
               <div className="brand-name">Voice Agent OS</div>
               <div className="brand-sub">multi-tenant · RAG · voice</div>
@@ -64,14 +95,19 @@ function Shell({ children }: { children: React.ReactNode }) {
           </div>
           <div className="nav-section">Workspace</div>
           {nav.map((n) => (
-            <NavLink key={n.to} to={n.to} end={n.to === "/"} className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
-              <span className="ico">{n.ico}</span>
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.to === "/"}
+              className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
+            >
+              <span className="ico"><i className={n.ico} /></span>
               {n.label}
             </NavLink>
           ))}
           <div className="nav-section">Runtime</div>
           <a className="nav-link" href={`${api.base}/health`} target="_blank" rel="noreferrer">
-            <span className="ico">◍</span>
+            <span className="ico"><i className="fa-solid fa-wave-square" /></span>
             API health
           </a>
           <div className="sidebar-footer">
@@ -79,7 +115,7 @@ function Shell({ children }: { children: React.ReactNode }) {
               <span className="ws-dot" />
               <span>{ws?.name ?? "no workspace"}</span>
             </div>
-            <div className="brand-sub mono" style={{ marginTop: 4 }}>
+            <div className="brand-sub mono" style={{ marginTop: 6 }}>
               {user?.email ?? ""}
             </div>
             <button
@@ -96,7 +132,17 @@ function Shell({ children }: { children: React.ReactNode }) {
         </aside>
         <div className="main">
           <header className="topbar">
-            <h1>{nav.find((n) => n.to === loc.pathname)?.label ?? "Voice Agent OS"}</h1>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button
+                className="app-burger"
+                type="button"
+                aria-label="Toggle menu"
+                onClick={() => setMenuOpen((v) => !v)}
+              >
+                <span></span><span></span><span></span>
+              </button>
+              <h1>{title}</h1>
+            </div>
             <div className="topbar-right">
               <span className={`badge ${health === "up" ? "ok" : health === "down" ? "danger" : "muted"}`}>
                 {health === "checking" ? "checking api…" : health === "up" ? "api online" : "api offline"}
@@ -128,6 +174,7 @@ createRoot(document.getElementById("root")!).render(
       <Route path="/login" element={<LoginPage />} />
       <Route path="/setup" element={<SetupPage />} />
       <Route path="/" element={<Shell><RequireAuth><DashboardPage /></RequireAuth></Shell>} />
+      <Route path="/voice" element={<Shell><RequireAuth><VoicePage /></RequireAuth></Shell>} />
       <Route path="/agents" element={<Shell><RequireAuth><AgentsPage /></RequireAuth></Shell>} />
       <Route path="/knowledge" element={<Shell><RequireAuth><KnowledgePage /></RequireAuth></Shell>} />
       <Route path="/conversations" element={<Shell><RequireAuth><ConversationsPage /></RequireAuth></Shell>} />

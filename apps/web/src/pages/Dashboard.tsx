@@ -38,20 +38,26 @@ export function DashboardPage() {
         <div>
           <h3>{ws?.name} · voice agent control plane</h3>
           <p>
-            Ingest knowledge → pgvector retrieval → grounded answer with citations → voice pipeline.
-            Every turn is validated by the response harness before it reaches the caller.
+            Ingest what your business knows, and the agent answers from it — with citations, a
+            response harness in front of every turn, and a live voice pipeline on top. Nothing is
+            made up: retrieval decides what the model is allowed to say.
           </p>
         </div>
-        <div className="pipeline">
-          <span className="pipe-step">Ingest</span>
-          <span className="pipe-arrow">→</span>
-          <span className="pipe-step">Embed 1536d</span>
-          <span className="pipe-arrow">→</span>
-          <span className="pipe-step">Retrieve</span>
-          <span className="pipe-arrow">→</span>
-          <span className="pipe-step">Context</span>
-          <span className="pipe-arrow">→</span>
-          <span className="pipe-step">Harness</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "flex-start" }}>
+          <div className="pipeline">
+            <span className="pipe-step">Ingest</span>
+            <span className="pipe-arrow">→</span>
+            <span className="pipe-step">Embed 1536d</span>
+            <span className="pipe-arrow">→</span>
+            <span className="pipe-step">Retrieve</span>
+            <span className="pipe-arrow">→</span>
+            <span className="pipe-step">Context</span>
+            <span className="pipe-arrow">→</span>
+            <span className="pipe-step">Harness</span>
+          </div>
+          <Link className="btn btn-primary" to="/voice">
+            <i className="fa-solid fa-microphone" /> Test the voice agent
+          </Link>
         </div>
       </div>
 

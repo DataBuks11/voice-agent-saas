@@ -2,6 +2,7 @@ import React from "react";
 import { api, ApiError, type WorkspaceLite } from "../lib/api";
 import { setWorkspace } from "../lib/session";
 import { BASENAME } from "../lib/base";
+import { BrandLogo, BgScene } from "../main";
 
 export function SetupPage() {
   const [mode, setMode] = React.useState<"create" | "join">("create");
@@ -43,9 +44,10 @@ export function SetupPage() {
 
   return (
     <div className="setup-wrap">
+      <BgScene />
       <div className="setup-card card">
         <div className="brand" style={{ padding: "0 0 18px" }}>
-          <div className="brand-logo">VA</div>
+          <BrandLogo />
           <div>
             <div className="brand-name">Voice Agent OS</div>
             <div className="brand-sub">create or pick a workspace to continue</div>
