@@ -116,7 +116,7 @@ export const newPatientFlow = (opts: { office?: string; service?: string } = {})
     key: "appointment",
     kind: "slot",
     prompt: "What day and time works best for you?",
-    readback: (v) => `So that's ${v}. Shall I lock that in?`,
+    readback: (v) => `So that's ${v.replace(/[.?!]+\s*$/, "")}. Shall I lock that in?`,
     singleQuestion: true,
   },
   {
@@ -289,8 +289,12 @@ export function extractText(text: string): string | null {
 export interface ExtractionContext {
   /** Canonicalizer for names (phonetic/homophone resolution). */
   canonicalName?: (spoken: string) => Promise<string>;
-  /** LLM fallback for messy utterances; must return JSON {value, present}. */
-  llm?: (slot: SlotDef, text: string, data: CaptureData) => Promise<{ value?: string | null; present?: boolean } | null>;
+  /** LLM fallback for messy utterances; JSON {value, present, iso?}. */
+  llm?: (
+    slot: SlotDef,
+    text: string,
+    data: CaptureData,
+  ) => Promise<{ value?: string | null; present?: boolean; iso?: string | null } | null>;
 }
 
 export async function extractSlotValue(
@@ -298,13 +302,13 @@ export async function extractSlotValue(
   text: string,
   data: CaptureData,
   ctx: ExtractionContext = {},
-): Promise<{ value: string | null; present: boolean }> {
-  if (slot.absentPhrases?.test(text)) return { value: null, present: false };
+): Promise<{ value: string | null; present: boolean; iso: string | null }> {
+  if (slot.absentPhrases?.test(text)) return { value: null, present: false, iso: null };
 
   // Slot-specific patterns win (new vs returning patient, mornings vs afternoons).
   if (slot.patterns) {
     for (const [value, pattern] of Object.entries(slot.patterns)) {
-      if (pattern.test(text)) return { value, present: true };
+      if (pattern.test(text)) return { value, present: true, iso: null };
     }
   }
 
@@ -339,13 +343,15 @@ export async function extractSlotValue(
       value = extractText(text);
       break;
   }
-  if (value) return { value, present: true };
+  if (value) return { value, present: true, iso: null };
 
   if (ctx.llm) {
     const fallback = await ctx.llm(slot, text, data);
-    if (fallback && fallback.value) return { value: fallback.value, present: fallback.present !== false };
+    if (fallback && fallback.value) {
+      return { value: fallback.value, present: fallback.present !== false, iso: fallback.iso ?? null };
+    }
   }
-  return { value: null, present: false };
+  return { value: null, present: false, iso: null };
 }
 
 /* --------------------------------------------------------------- transitions */
@@ -413,9 +419,15 @@ export async function applyAnswer(
   if (state.status === "confirming" && state.pendingKey) {
     const head = text.split(/[?.!,]/)[0]?.slice(0, 40) ?? text;
     if (isAffirmative(head)) {
+      const confirmedIso = state.pendingIso;
       const next = save({
         ...withoutPending(state),
-        data: { ...state.data, [state.pendingKey]: state.pendingValue ?? "" },
+        ...(confirmedIso ? { pendingIso: confirmedIso } : {}),
+        data: {
+          ...state.data,
+          [state.pendingKey]: state.pendingValue ?? "",
+          ...(state.pendingKey === "appointment" && confirmedIso ? { appointment_iso: confirmedIso } : {}),
+        },
         status: "capturing",
         step: state.step + 1,
       });
@@ -436,7 +448,7 @@ export async function applyAnswer(
     // or an answer plus a new question — fall through and re-read the slot.
   }
 
-  const { value, present } = await extractSlotValue(slot, text, state.data, ctx);
+  const { value, present, iso } = await extractSlotValue(slot, text, state.data, ctx);
   if (!present) {
     if (slot.absentPhrases?.test(text)) {
       const skipped = save({ ...state, skipped: [...new Set([...state.skipped, slot.key])], step: state.step + 1 });
@@ -468,7 +480,8 @@ export async function applyAnswer(
   }
   if (slot.readback) {
     const captured = value;
-    const pending = save({ ...state, status: "confirming", pendingKey: slot.key, pendingValue: captured });
+    const withIso: CaptureState = iso ? { ...state, pendingIso: iso } : state;
+    const pending = save({ ...withIso, status: "confirming", pendingKey: slot.key, pendingValue: captured });
     return { state: pending, reply: slot.readback(captured, state.data) };
   }
   return store(value);

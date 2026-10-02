@@ -113,13 +113,15 @@ OFFER|YYYY-MM-DD HH:MM
 - Never claim the booking is confirmed here; the customer confirms after hearing it read back.`;
 
 const SLOT_EXTRACT_INSTRUCTIONS = `You extract one captured booking detail from a front-desk call.
-Answer with ONLY compact JSON, no markdown: {"value": <string or null>, "present": true|false}
+Answer with ONLY compact JSON, no markdown: {"value": <string or null>, "present": true|false, "iso": "YYYY-MM-DD HH:MM" | null}
 - value: exactly what the customer gave, cleaned up (names in proper case, dates as "Month D, YYYY", times as "3:00 p.m.", digits as digits).
+- iso: ONLY for a day+time the customer actually gave (appointment slot), resolved against today's date. Null otherwise.
 - present false when the customer says they do not have it, or when they ignored the question.`;
 
 interface SlotExtractResult {
   value?: string | null;
   present?: boolean;
+  iso?: string | null;
 }
 
 const parseJsonLoose = (raw: string): unknown => {
@@ -139,12 +141,14 @@ async function slotExtractLlm(slot: SlotDef, text: string, data: Record<string, 
   const result = await complete({
     system: SLOT_EXTRACT_INSTRUCTIONS,
     context: "",
-    user: `Pending question: ${slot.prompt}\nAlready captured: ${JSON.stringify(data)}\nCustomer said: "${text}"`,
+    user: `${todayInfo()}\nPending question: ${slot.prompt}\nAlready captured: ${JSON.stringify(data)}\nCustomer said: "${text}"`,
     fallback: "",
   });
   if (!result.text) return null;
   const parsed = parseJsonLoose(result.text) as SlotExtractResult | null;
-  return parsed && typeof parsed === "object" ? parsed : null;
+  if (!parsed || typeof parsed !== "object") return null;
+  if (parsed.iso && !/^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}$/.test(parsed.iso)) delete parsed.iso;
+  return parsed;
 }
 
 /** LLM turn that offers a concrete appointment slot, parsed back into the flow. */
