@@ -210,33 +210,38 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     }
     const db = getSupabase();
 
-    const agent = await loadAgent(body.workspaceId, body.agentId);
-
-    const [histRows, docCountRes] = await Promise.all([
-      db
-        .from("messages")
-        .select("id, role, content, citations, created_at")
-        .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: false })
-        .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20)),
+    const [agent, docCountRes] = await Promise.all([
+      loadAgent(body.workspaceId, body.agentId),
       db
         .from("documents")
         .select("id", { count: "exact", head: true })
         .eq("workspace_id", body.workspaceId),
     ]);
-    const history: ConversationMessage[] = (histRows.data ?? [])
-      .reverse()
-      .map((m) => ({
-        id: String(m.id),
-        conversationId,
-        role: m.role as ConversationMessage["role"],
-        content: String(m.content),
-        citations: (m.citations ?? []) as string[],
-        createdAt: String(m.created_at),
-      }));
-
     const docCount = docCountRes.count ?? 0;
     const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
+
+    // Fast paths (greeting / instant location) never build a context — skip the history query.
+    const earlyTool = decision.route === "use_tools" ? decision.requiredTools?.[0] : undefined;
+    const needsHistory = decision.route !== "small_talk" && !(earlyTool === "get_location" && !!agent.location);
+    let history: ConversationMessage[] = [];
+    if (needsHistory) {
+      const { data: histRows } = await db
+        .from("messages")
+        .select("id, role, content, citations, created_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: false })
+        .limit(Number(process.env.MEMORY_SHORT_TERM_TURNS ?? 20));
+      history = (histRows ?? [])
+        .reverse()
+        .map((m) => ({
+          id: String(m.id),
+          conversationId,
+          role: m.role as ConversationMessage["role"],
+          content: String(m.content),
+          citations: (m.citations ?? []) as string[],
+          createdAt: String(m.created_at),
+        }));
+    }
 
     let retrieved: RetrievalResult[] = [];
     const needsRetrieval =
