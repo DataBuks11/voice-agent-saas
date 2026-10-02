@@ -37,6 +37,7 @@ const REFUSALS = [
   "i'm not sure",
   "i am not sure",
   "could you rephrase",
+  "check with the team",
 ];
 
 const api = async (path, { method = "GET", token, body, headers = {} } = {}) => {
@@ -110,9 +111,14 @@ const main = async () => {
     const refused = REFUSALS.some((r) => low.includes(r));
     const hit = expect.some((e) => low.includes(e));
     let verdict = "ok";
-    if (absent && !refused) {
-      verdict = "HALLUCINATED";
-      failures++;
+    if (absent) {
+      // A question the document cannot answer must NOT be invented.
+      if (!refused) {
+        verdict = "HALLUCINATED";
+        failures++;
+      } else {
+        verdict = "declined as expected";
+      }
     } else if (refused && !chitchat) {
       verdict = "CANNED REFUSAL";
       failures++;
