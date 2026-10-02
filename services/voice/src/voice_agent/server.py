@@ -46,6 +46,10 @@ DRAFT_JOIN_TIMEOUT = float(os.getenv("DRAFT_JOIN_TIMEOUT_S", "0.8"))
 # Don't speculate on short replies ("yes", "okay") - it only burns CPU.
 STT_DRAFT_MIN_BYTES = int(float(os.getenv("STT_DRAFT_MIN_MS", "1200")) * 32)
 
+# Streaming deltas only pay off once the caller has been talking a while. Short
+# replies are transcribed in a single pass at the endpoint, which is faster.
+STT_DELTA_MIN_BYTES = int(float(os.getenv("STT_DELTA_MIN_MS", "2500")) * 32)
+
 # Short acknowledgements are synthesised once at boot and replayed from memory, so
 # the customer hears "Got it" within milliseconds of finishing their sentence
 # instead of dead air while the model thinks.
@@ -461,7 +465,7 @@ class Session:
                     else:
                         buffered = self.vad.peek()
                         if (
-                            len(buffered) >= STT_DRAFT_MIN_BYTES
+                            len(buffered) >= STT_DELTA_MIN_BYTES
                             and len(buffered) - self._stt_consumed >= STT_CHUNK_BYTES
                             and self._draft_task is None
                         ):
