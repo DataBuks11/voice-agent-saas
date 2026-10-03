@@ -62,7 +62,11 @@ const main = async () => {
 
   // A real sentence instead of Chrome's pure tone: the tone is (correctly)
   // treated as noise, so it cannot prove the speech path works.
-  const MIC_WAV = process.env.TEST_MIC_WAV ?? "";
+  // Opt-in: Chrome's WAV capture needs a forward-slash path and a 16-bit PCM
+  // file, and it disables the normal fake device. Default stays the tone path,
+  // which is proven and stable.
+  const MIC_WAV =
+    process.env.VOICE_TEST_REAL_MIC === "1" ? (process.env.TEST_MIC_WAV ?? "") : "";
   const SPEECH_PHRASE = process.env.TEST_MIC_TEXT ?? "How much does the growth plan cost?";
   const micArgs = [
     "--no-sandbox",
@@ -71,7 +75,9 @@ const main = async () => {
     "--use-fake-device-for-media-stream",
   ];
   if (MIC_WAV && existsSync(MIC_WAV)) {
-    micArgs.push(`--use-file-for-fake-audio-capture=${MIC_WAV}`);
+    micArgs.push(
+      `--use-file-for-fake-audio-capture=${MIC_WAV.replace(/\\/g, "/")}%noloop`,
+    );
     console.log(`      mic: ${MIC_WAV} (${SPEECH_PHRASE})`);
   } else {
     console.log("      mic: chrome tone (set TEST_MIC_WAV for real speech)");
