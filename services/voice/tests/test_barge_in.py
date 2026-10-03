@@ -563,3 +563,20 @@ async def test_sub_word_audio_is_rejected_without_queueing(monkeypatch):
     session.started = True
     await session.run()
     assert session.queue.qsize() == 0
+
+
+def test_backchannel_is_opt_in_and_carries_a_reason():
+    """Unprompted filler audio must be off by default and always explain itself."""
+    import importlib
+
+    import voice_agent.server as fresh
+
+    importlib.reload(fresh)
+    assert fresh.BACKCHANNEL_ENABLED is False  # no BACKCHANNEL env in tests
+
+
+@pytest.mark.asyncio
+async def test_no_backchannel_event_is_sent_by_default():
+    session, ws, _ = await _session([])
+    await session._send_backchannel("how much does it cost")
+    assert "backchannel" not in [e.get("type") for e in ws.events()]

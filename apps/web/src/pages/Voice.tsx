@@ -408,6 +408,8 @@ export function VoicePage() {
           interimRef.current = "";
           setVoiceState((prev) => (prev === "listening" ? "thinking" : prev));
         } else if (type === "backchannel") {
+          // A filler must never be an unexplained voice: show what it is and why.
+          pushLine("system", `filler (${String(msg.reason ?? "ack")}): ${String(msg.text ?? "")}`);
           const rate = Number(msg.sampleRate ?? 24000);
           backchannelRateRef.current = rate;
           backchannelChunksRef.current = [];

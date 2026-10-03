@@ -76,6 +76,10 @@ STT_DELTA_MIN_BYTES = int(float(os.getenv("STT_DELTA_MIN_MS", "2500")) * 32)
 # the customer hears "Got it" within milliseconds of finishing their sentence
 # instead of dead air while the model thinks.
 BACKCHANNELS = ["Got it.", "Sure, one moment.", "Okay.", "Thank you.", "You're welcome."]
+
+# Unprompted filler audio ("thank you", "you're welcome") is confusing when it
+# arrives with nothing on screen, so it is opt-in: BACKCHANNEL=on.
+BACKCHANNEL_ENABLED = os.getenv("BACKCHANNEL", "off").lower() in ("1", "on", "true", "yes")
 _tts_cache: dict[str, object] = {}
 _TTS_CACHE_MAX = 240
 _first_backchannel = 0
@@ -847,6 +851,8 @@ class Session:
         """
         global _first_backchannel
         tts = _tts
+        if not BACKCHANNEL_ENABLED:
+            return
         if tts is None or self.interrupted or not _wants_backchannel(text):
             return
         if turn is not None and self.orch is not None and not self.orch.turns.is_live(turn):
@@ -860,12 +866,19 @@ class Session:
             return
         if chunk is None or not getattr(chunk, "pcm16", b"") or self.interrupted:
             return
+        reason = "slow_turn"
         if self.orch is not None:
-            self.orch.bus.emit(EventType.BACKCHANNEL, turn.turn_id if turn else None, phrase=phrase)
+            self.orch.bus.emit(
+                EventType.BACKCHANNEL,
+                turn.turn_id if turn else None,
+                phrase=phrase,
+                reason=reason,
+            )
         await self.send_json(
             {
                 "type": "backchannel",
                 "text": phrase,
+                "reason": reason,
                 "sampleRate": chunk.sample_rate,
                 "encoding": "pcm16le",
                 "turnId": turn.turn_id if turn else None,
