@@ -290,3 +290,31 @@ def test_session_end_cancels_in_flight_turn():
     orch.end()
     assert turn.cancelled.is_set()
     assert orch.state is TurnState.ENDED
+
+@pytest.mark.asyncio
+async def test_late_playback_completion_does_not_block_the_next_turn():
+    """Turn N's audio window can finish after turn N+1 was accepted."""
+    orch, calls, _audio = make_orchestrator()
+    first = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("what are your hours")
+    orch.speaking_started(first)
+    # a new utterance interrupts while the first reply is still playing
+    second = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("book me for tomorrow")[0] is True
+    # turn 1's playback finishes late and resets the shared state
+    orch.state = TurnState.LISTENING
+    orch.reclaim_for(second)
+    answer = await orch.run_conversation(second)
+    assert answer == "Sure, that is booked."
+    assert calls == ["book me for tomorrow"]
+
+
+def test_reclaim_never_reinstates_a_cancelled_turn():
+    orch, _calls, _audio = make_orchestrator()
+    turn = orch.begin_speech()
+    orch.interrupt("caller_speech")
+    orch.state = TurnState.LISTENING
+    orch.reclaim_for(turn)
+    assert orch.state is TurnState.LISTENING

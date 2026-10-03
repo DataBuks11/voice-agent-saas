@@ -548,6 +548,19 @@ class VoiceOrchestrator:
         self.bus.emit(EventType.USER_TURN_ACCEPTED, turn.turn_id, text=clean)
         return True, None
 
+    def reclaim_for(self, turn: Turn) -> None:
+        """Re-enter TRANSCRIBING when a late playback reset the shared state.
+
+        The previous turn can finish its audio window after this turn has already
+        been accepted. That is legal; refusing to answer because of it is not.
+        """
+        if turn is not self.turns.current:
+            return
+        if turn.cancelled.is_set():
+            return
+        if self.state is TurnState.LISTENING:
+            self.state = TurnState.TRANSCRIBING
+
     async def run_conversation(self, turn: Turn) -> str:
         """THINKING -> SPEAKING. Cancelled work never speaks."""
         if not self._require(TurnState.THINKING, "accepted_turn"):

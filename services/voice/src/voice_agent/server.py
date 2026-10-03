@@ -487,15 +487,22 @@ class Session:
 
     def _turn_trace_line(self, turn: Turn) -> str:
         """One line per turn: the timings that explain every latency question."""
-        m = turn.metrics
-        speech = (m.get("speech_end", 0) - m.get("speech_start", 0)) if "speech_end" in m else 0
+
+        def gap(start: str, end: str) -> float:
+            a, b = turn.metrics.get(start), turn.metrics.get(end)
+            if a is None or b is None:
+                return 0.0
+            return round(b - a, 2)
+
         return (
-            f"speech={speech:.2f}s "
-            f"accepted->llm={(m.get('llm_done', 0) - m.get('accepted', 0)):.2f}s "
-            f"llm={(m.get('llm_done', 0) - m.get('accepted', 0)):.2f}s "
-            f"speak={(m.get('speak_total', 0) - m.get('assistant_text', m.get('llm_done', 0))):.2f}s "
-            f"turn={(m.get('turn_complete', 0) - m.get('speech_start', 0)):.2f}s "
-            f"transcript={turn.transcript[:48]!r}"
+            f"speech={gap('speech_start', 'speech_end')}s "
+            f"stt+llm={gap('accepted', 'llm_done')}s "
+            f"tts={gap('assistant_text', 'speak_total')}s "
+            f"turn={gap('speech_start', 'turn_complete')}s "
+            f"turns={self.orch.stats['turns'] if self.orch else 0} "
+            f"rejected={self.orch.stats['rejected'] if self.orch else 0} "
+            f"stale={self.orch.stats['stale_discarded'] if self.orch else 0} "
+            f"transcript={turn.transcript[:44]!r}"
         )
 
     async def _auto_greet(self, text: str) -> None:
@@ -585,6 +592,10 @@ class Session:
                     )
                     await self._send_backchannel(text, turn)
 
+                # A previous turn's playback can finish after this turn started and
+                # reset the shared state; make sure this turn can still proceed.
+                if orch is not None and turn is not None and orch.turns.current is turn:
+                    orch.reclaim_for(turn)
                 # ---- validate before the model is allowed to run ----
                 if kind == "text":
                     transcript = str(payload or "").strip()
@@ -630,17 +641,7 @@ class Session:
                 await self._speak(answer, turn=turn)
                 if turn is not None:
                     turn.mark("turn_complete")
-                    log.info(
-                        "TURN %s stt=%.2fs llm=%.2fs tts=%.2fs total=%.2fs turns=%s rejected=%s stale=%s",
-                        turn.turn_id,
-                        float(metric_or_zero(turn.metrics.get("llm_ms"), 0)) / 1000.0,
-                        float(metric_or_zero(turn.metrics.get("llm_done"), 0) - metric_or_zero(turn.metrics.get("accepted"), 0)),
-                        float(metric_or_zero(turn.metrics.get("speak_total"), 0) - metric_or_zero(turn.metrics.get("assistant_text"), 0)),
-                        float(metric_or_zero(turn.metrics.get("turn_complete"), 0) - metric_or_zero(turn.metrics.get("speech_start"), 0)),
-                        orch.stats["turns"] if orch else 0,
-                        orch.stats["rejected"] if orch else 0,
-                        orch.stats["stale_discarded"] if orch else 0,
-                    )
+                    log.info("TURN %s %s", turn.turn_id, self._turn_trace_line(turn))
             except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
                 raise
             except Exception as exc:  # noqa: BLE001 - surface to client
