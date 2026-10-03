@@ -1305,7 +1305,8 @@ async def serve_forever() -> None:
             )
             # websockets>=14 respond(status, text); the content type is text/plain
             return ws.respond(200, body)
-        return ws.respond(404, "not found")
+        # None = "not an HTTP health request": let the WebSocket handshake run.
+        return None
 
     async with serve(
         handler,
