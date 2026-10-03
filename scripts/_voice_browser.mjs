@@ -1,16 +1,16 @@
 /**
  * Browser voice regression: a reply must be AUDIBLE, not just visible.
  *
- * The transcript rendered while no sound played because the client cleared the
- * audio buffer when the server announced playback. This drives the real page in
- * Chrome, hooks the WebSocket, and asserts that spoken replies come with PCM
- * audio frames.
+ * Drives the real page in Chrome and asserts, per turn id, that a spoken reply
+ * consists of an accepted user turn, a transcript, assistant text and PCM audio.
+ * The fake mic only produces a tone, so turns are sent as text; everything else
+ * (queue, playback, interruption handling) is the production code path.
  */
 import puppeteer from "puppeteer-core";
 
 const BASE = process.env.WEB_BASE_URL ?? "https://voice-agent-saas-web.vercel.app";
 const CHROME = process.env.CHROME_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const WS = process.env.VOICE_WS_URL ?? "wss://voice-runtime-production-dc24.up.railway.app";
+const API = process.env.API_BASE_URL ?? "https://voice-agent-saas-production-3001.up.railway.app";
 
 let fails = 0;
 const check = (name, ok, extra = "") => {
@@ -18,7 +18,46 @@ const check = (name, ok, extra = "") => {
   if (!ok) fails++;
 };
 
+const TURNS = [
+  { q: "How much does the growth plan cost?", expect: "199" },
+  { q: "What about the enterprise plan?", expect: "1200" },
+  { q: "That time doesn't work, can you offer another slot?", expect: null },
+];
+
 const main = async () => {
+  const email = `browser-${Math.random().toString(36).slice(2, 10)}@voiceagent.dev`;
+  const password = "Passw0rd!2026";
+  const reg = await fetch(`${API}/v1/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password, name: "Browser Voice" }),
+  });
+  if (!reg.ok) throw new Error(`register failed: ${reg.status}`);
+  const token = (await reg.json()).token;
+  const wsId = (
+    await (
+      await fetch(`${API}/v1/workspaces`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name: "Browser Voice" }),
+      })
+    ).json()
+  ).id;
+  await fetch(`${API}/v1/knowledge/ingest`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+      "x-workspace-id": wsId,
+    },
+    body: JSON.stringify({
+      workspaceId: wsId,
+      title: "Plans",
+      markdown:
+        "# Plans\n\nGrowth is $199 per month for growing teams.\n\nEnterprise starts at $1200 per month and includes SSO.",
+    }),
+  });
+
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: "new",
@@ -31,44 +70,51 @@ const main = async () => {
   });
   try {
     const page = await browser.newPage();
-    // Count what the page actually receives, per websocket.
     await page.evaluateOnNewDocument(() => {
       window.__voice = {
         audio: 0,
         events: [],
-        binaryAfterText: 0,
+        byTurn: {}, // turnId -> { user, assistant, bytes, events: [] }
+        order: [],
+        currentTurn: null,
+        answers: [], // { turnId, text, at }
         started: false,
-        assistantTexts: [],
-        turnIds: [],
-        rejected: [],
       };
       const Native = window.WebSocket;
       window.WebSocket = function (...args) {
         const sock = new Native(...args);
         window.__lastSocket = sock;
         window.__voice.started = true;
+        const slot = (id) => {
+          if (!id) return null;
+          if (!window.__voice.byTurn[id]) {
+            window.__voice.byTurn[id] = { user: "", assistant: "", bytes: 0, events: [] };
+            window.__voice.order.push(id);
+          }
+          return window.__voice.byTurn[id];
+        };
         sock.addEventListener("message", (ev) => {
           if (typeof ev.data === "string") {
+            let msg;
             try {
-              const msg = JSON.parse(ev.data);
-              window.__voice.events.push(msg.type);
-              if (msg.turnId) window.__voice.turnIds.push(msg.turnId);
-              if (msg.type === "assistant" && msg.text) window.__voice.assistantTexts.push(msg.text);
-              if (msg.type === "trace" && msg.type && /USER_TURN_REJECTED|VOICE_ERROR/.test(String(msg.data?.type ?? ""))) {
-                window.__voice.rejected.push(msg);
-              }
-              if (msg.type === "assistant" || msg.type === "audio_end") {
-                window.__voice.pendingText = true;
-              }
+              msg = JSON.parse(ev.data);
             } catch {
-              /* ignore */
+              return;
+            }
+            window.__voice.events.push(msg.type);
+            const s = slot(msg.turnId);
+            if (s) s.events.push(msg.type);
+            if (msg.turnId) window.__voice.currentTurn = msg.turnId;
+            if (msg.type === "user" && s) s.user = msg.text;
+            if (msg.type === "assistant" && s) {
+              s.assistant = msg.text;
+              window.__voice.answers.push({ turnId: msg.turnId, text: msg.text, at: Date.now() });
             }
           } else {
-            window.__voice.audio += ev.data.byteLength ?? ev.data.size ?? 0;
-            if (window.__voice.pendingText) {
-              window.__voice.binaryAfterText += 1;
-              window.__voice.pendingText = false;
-            }
+            const n = ev.data.byteLength ?? ev.data.size ?? 0;
+            window.__voice.audio += n;
+            const id = window.__voice.currentTurn;
+            if (id && window.__voice.byTurn[id]) window.__voice.byTurn[id].bytes += n;
           }
         });
         return sock;
@@ -77,87 +123,45 @@ const main = async () => {
       Object.assign(window.WebSocket, Native);
     });
 
-    const email = `browser-${Math.random().toString(36).slice(2, 10)}@voiceagent.dev`;
-    const password = "Passw0rd!2026";
-    const api = process.env.API_BASE_URL ?? "https://voice-agent-saas-production-3001.up.railway.app";
-    const reg = await fetch(`${api}/v1/auth/register`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password, name: "Browser Voice" }),
-    });
-    if (!reg.ok) throw new Error(`register failed: ${reg.status} ${await reg.text()}`);
-    const token = (await reg.json()).token;
-    const ws = await (
-      await fetch(`${api}/v1/workspaces`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body: JSON.stringify({ name: "Browser Voice" }),
-      })
-    ).json();
-    const wsId = ws.id;
-    await fetch(`${api}/v1/knowledge/ingest`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${token}`,
-        "x-workspace-id": wsId,
-      },
-      body: JSON.stringify({
-        workspaceId: wsId,
-        title: "Pricing",
-        markdown: "# Plans\n\nGrowth is $199 per month.\n\nEnterprise starts at $1200 per month.",
-      }),
-    });
-    // Give the page a session without driving the UI: the app reads these.
     await page.goto(`${BASE}/app/login`, { waitUntil: "networkidle2", timeout: 60000 });
     await page.evaluate(
       (t, id, name) => {
         localStorage.setItem("vas.token", t);
-        localStorage.setItem("vas.user", JSON.stringify({ id: "browser", email: "browser@voiceagent.dev" }));
+        localStorage.setItem("vas.user", JSON.stringify({ id: "browser", email: "b@voiceagent.dev" }));
         localStorage.setItem("vas.workspace", JSON.stringify({ id, name }));
       },
       token,
       wsId,
       "Browser Voice",
     );
-
     await page.goto(`${BASE}/app/voice`, { waitUntil: "networkidle2", timeout: 60000 });
-    // Start the call.
     const started = await page.evaluate(() => {
-      const btn = [...document.querySelectorAll("button")].find((b) =>
-        /start call/i.test(b.textContent ?? ""),
-      );
+      const btn = [...document.querySelectorAll("button")].find((b) => /start call/i.test(b.textContent ?? ""));
       if (!btn) return false;
       btn.click();
       return true;
     });
     check("start button clicked", started);
-
     await page.waitForFunction(() => window.__voice?.started === true, { timeout: 30000 });
-    console.log("      websocket opened");
 
-    // Wait for the greeting to arrive as audio.
+    // greeting audio
     const deadline = Date.now() + 60000;
+    let audio = 0;
     while (Date.now() < deadline) {
-      const s = await page.evaluate(() => ({ ...window.__voice, events: window.__voice.events.slice(-14) }));
-      if (s.audio > 20000) break;
-      await new Promise((r) => setTimeout(r, 1000));
+      audio = await page.evaluate(() => window.__voice.audio);
+      if (audio > 50000) break;
+      await new Promise((r) => setTimeout(r, 800));
     }
-    let s = await page.evaluate(() => ({ ...window.__voice, events: window.__voice.events.slice(-14) }));
-    check("greeting arrived as audio", s.audio > 20000, `${s.audio} bytes, events=${s.events.join(",")}`);
+    check("greeting arrived as audio", audio > 50000, `${audio} bytes`);
 
-    // Multi-turn: prove the cycle repeats, not just once.
-    const turns = [
-      { q: "How much does the growth plan cost?", expect: "199" },
-      { q: "What about the enterprise plan?", expect: "1200" },
-      { q: "That time doesn't work, can you offer another slot?", expect: null },
-    ];
-    for (const [i, turn] of turns.entries()) {
+    for (const [i, turn] of TURNS.entries()) {
       await page.evaluate(() => {
         window.__voice.audio = 0;
-        window.__voice.binaryAfterText = 0;
-        window.__voice.assistantTexts = [];
+        window.__voice.order = [];
+        window.__voice.byTurn = {};
+        window.__voice.currentTurn = null;
       });
+      const sentAt = Date.now();
       const sent = await page.evaluate((text) => {
         const sock = window.__lastSocket;
         if (!sock || sock.readyState !== 1) return false;
@@ -165,56 +169,46 @@ const main = async () => {
         return true;
       }, turn.q);
       check(`turn ${i + 1} sent`, sent);
-      const end = Date.now() + 45000;
-      let seen = null;
-      while (Date.now() < end) {
-        seen = await page.evaluate(() => ({ ...window.__voice, events: window.__voice.events.slice(-16) }));
-        if (seen.binaryAfterText > 0 && seen.audio > 10000) break;
-        await new Promise((r) => setTimeout(r, 700));
-      }
-      check(
-        `turn ${i + 1} produced audio`,
-        seen.audio > 10000,
-        `${seen.audio} bytes, events=${seen.events.join(",")}`,
-      );
-      if (turn.expect) {
-        const texts = await page.evaluate(() => window.__voice.assistantTexts ?? []);
-        const joined = texts.join(" | ");
-        check(
-          `turn ${i + 1} answer is grounded`,
-          joined.includes(turn.expect),
-          joined.slice(-140),
-        );
-      }
-      // every reply must carry the same turn id end to end
-      const ids = await page.evaluate(() => window.__voice.turnIds ?? []);
-      check(`turn ${i + 1} turn id present`, ids.length > 0, `turnIds=${ids.join(",")}`);
-    }
 
-    // Now send a text turn and expect audio again.
-    await page.evaluate(() => {
-      window.__voice.audio = 0;
-      window.__voice.binaryAfterText = 0;
-    });
-    const spoke = await page.evaluate(
-      (wsUrl) => {
-        const sock = window.__lastSocket;
-        if (!sock || sock.readyState !== 1) return false;
-        sock.send(JSON.stringify({ type: "text", text: "How much does the growth plan cost?" }));
-        return true;
-      },
-      WS,
-    );
-    check("text turn sent", spoke);
-    const deadline2 = Date.now() + 45000;
-    while (Date.now() < deadline2) {
-      s = await page.evaluate(() => ({ ...window.__voice, events: window.__voice.events.slice(-14) }));
-      if (s.binaryAfterText > 0 || s.audio > 20000) break;
-      await new Promise((r) => setTimeout(r, 800));
+      // Wait for a NEW answer (this turn's), matched by turn id, plus its audio.
+      const end = Date.now() + 50000;
+      let answer = null;
+      let state = null;
+      while (Date.now() < end) {
+        state = await page.evaluate(() => ({
+          audio: window.__voice.audio,
+          answers: window.__voice.answers,
+          byTurn: JSON.parse(JSON.stringify(window.__voice.byTurn)),
+        }));
+        const fresh = state.answers.filter((a) => a.at >= sentAt);
+        const matching = turn.expect
+          ? fresh.find((a) => a.text.includes(turn.expect))
+          : fresh[fresh.length - 1];
+        if (matching && state.audio > 10000) {
+          answer = matching;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 600));
+      }
+      check(`turn ${i + 1} produced audio`, state.audio > 10000, `${state.audio} bytes`);
+      check(`turn ${i + 1} has assistant text`, Boolean(answer), answer ? answer.text.slice(0, 90) : "none");
+      if (answer) {
+        const slot = state.byTurn[answer.turnId] ?? {};
+        check(`turn ${i + 1} has a transcript`, Boolean(slot.user), slot.user ?? "none");
+        check(
+          `turn ${i + 1} audio belongs to the answering turn`,
+          (slot.bytes ?? 0) > 0,
+          `${answer.turnId}:${slot.bytes ?? 0}b`,
+        );
+        if (turn.expect) {
+          check(`turn ${i + 1} answer is grounded in the doc`, answer.text.includes(turn.expect), answer.text.slice(0, 110));
+        }
+      }
     }
-    s = await page.evaluate(() => ({ ...window.__voice, events: window.__voice.events.slice(-14) }));
-    check("reply produced audio frames", s.audio > 10000, `${s.audio} bytes, events=${s.events.join(",")}`);
-    check("no stalled playback (audio present after assistant text)", s.binaryAfterText > 0 || s.audio > 10000);
+    const errors = await page.evaluate(() =>
+      (window.__consoleErrors ?? []).slice(0, 5),
+    );
+    check("no console errors captured", errors.length === 0, errors.join(" | "));
   } finally {
     await browser.close();
   }

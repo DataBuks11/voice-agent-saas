@@ -585,7 +585,9 @@ class VoiceOrchestrator:
             return
         if turn.cancelled.is_set():
             return
-        if self.state is TurnState.LISTENING:
+        if self.state in (TurnState.LISTENING, TurnState.USER_SPEAKING):
+            # A rejected noise burst can leave the shared state on USER_SPEAKING
+            # while this accepted turn is waiting for the model. Take it back.
             self.state = TurnState.TRANSCRIBING
 
     def _settle_pending(self, new_turn: Turn, confirmed: bool) -> None:
@@ -629,7 +631,10 @@ class VoiceOrchestrator:
             return
         self.audio_playback_active = True
         self.bus.emit(EventType.ASSISTANT_TURN_STARTED, turn.turn_id)
-        self._require(TurnState.SPEAKING, "assistant_audio")
+        # Audio is already flowing; record it even if a newer turn moved the state
+        # on. Refusing here would hide real playback from the trace.
+        if self.state is not TurnState.SPEAKING:
+            self.state = TurnState.SPEAKING
         self.bus.emit(EventType.AUDIO_PLAYBACK_STARTED, turn.turn_id)
 
     def speaking_finished(self, turn: Turn | None) -> None:
@@ -638,7 +643,8 @@ class VoiceOrchestrator:
         self.audio_playback_active = False
         self.bus.emit(EventType.AUDIO_PLAYBACK_STOPPED, turn.turn_id)
         self.bus.emit(EventType.ASSISTANT_TURN_COMPLETED, turn.turn_id)
-        self._require(TurnState.LISTENING, "assistant_done")
+        if self.state is TurnState.SPEAKING:
+            self.state = TurnState.LISTENING
 
     def note_queued_utterance(self, turn: Turn | None) -> None:
         """A new utterance was queued. Interrupt only if it is already confirmed.

@@ -482,8 +482,7 @@ class Session:
                 else:
                     orch.assistant_audio_stopped()
         if turn is not None:
-            turn.mark("speak_total", round(_time.time() - t0, 3))
-            log.info("turn %s done: %s", turn.turn_id, self._turn_trace_line(turn))
+            turn.mark("speak_total", _time.time())
         log.info(
             "stage speak first=%s total=%.2fs greeting=%s turn=%s",
             f"{t_first - t0:.2f}s" if t_first else "none",

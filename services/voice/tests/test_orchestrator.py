@@ -408,3 +408,31 @@ async def test_queued_utterance_during_playback_is_an_interruption():
     other = orch.ensure_speech_turn()
     orch.note_queued_utterance(other)
     assert orch.stats["interruptions"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_noise_turn_steal_does_not_block_the_accepted_turn():
+    """A noise turn between enqueue and the worker must not strand the answer."""
+    orch, calls, _audio = make_orchestrator(answer="Enterprise starts at $1200", delay=0.02)
+    real = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("what about the enterprise plan")[0] is True
+    await asyncio.sleep(0)  # the fake mic opens a turn before the worker runs
+    noise = orch.ensure_speech_turn()
+    orch.end_speech()
+    orch.reclaim_for(real)
+    assert await orch.run_conversation(real) == "Enterprise starts at $1200"
+
+
+def test_playback_start_and_finish_are_recorded_even_after_a_state_change():
+    orch, _calls, _audio = make_orchestrator()
+    turn = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("hello there")
+    orch.state = TurnState.TRANSCRIBING  # a newer turn moved the state on
+    orch.speaking_started(turn)
+    assert orch.audio_playback_active is True
+    assert orch.state is TurnState.SPEAKING
+    orch.speaking_finished(turn)
+    assert orch.audio_playback_active is False
+    assert orch.state is TurnState.LISTENING
