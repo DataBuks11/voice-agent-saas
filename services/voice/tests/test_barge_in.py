@@ -580,3 +580,35 @@ async def test_no_backchannel_event_is_sent_by_default():
     session, ws, _ = await _session([])
     await session._send_backchannel("how much does it cost")
     assert "backchannel" not in [e.get("type") for e in ws.events()]
+
+
+@pytest.mark.asyncio
+async def test_a_full_queue_never_blocks_the_receive_loop(monkeypatch):
+    """Regression: put() on a full queue parked the receive loop forever."""
+    stt = RecordingSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    session, ws, pipeline = await _session([])
+    session.queue = asyncio.Queue(maxsize=2)
+    for _ in range(2):
+        session.queue.put_nowait(("audio", b"\x00\x01" * 3200, None))
+    # must return promptly, and the caller's question must be in the queue
+    await asyncio.wait_for(session.enqueue("text", "how much does it cost?", None), timeout=3)
+    kinds = [kind for kind, _p, _t in list(session.queue._queue)]
+    assert "text" in kinds
+
+
+@pytest.mark.asyncio
+async def test_empty_decode_is_rejected_without_queueing(monkeypatch):
+    class Silent:
+        name = "silent"
+
+        async def transcribe(self, pcm: bytes, sr: int = 16000):
+            return Transcript(text="", confidence=0.0)
+
+    monkeypatch.setattr(srv, "_stt", Silent())
+    session, ws, pipeline = await _session([frame(400, 0.3) + frame(700, 0.0)])
+    session._build_orchestrator()
+    session.started = True
+    await session.run()
+    assert session.queue.qsize() == 0
+    assert session.orch.stats["rejected"] >= 1

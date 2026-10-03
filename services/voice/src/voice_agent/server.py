@@ -659,12 +659,13 @@ class Session:
         await self._drain_draft()
         turn = self.orch.turns.current if self.orch else None
         await self._stt_final(buffered)
-        if not self.hypothesis and len(pcm) < MIN_UTTERANCE_BYTES:
-            # Too short to contain a word: reject it here instead of letting it
-            # fill the queue and delay real questions.
+        if not self.hypothesis:
+            # Nothing was decoded. Reject here: queueing empty utterances lets a
+            # steady noise source fill the queue and stall real questions.
             if turn is not None and self.orch is not None:
-                self.orch.on_final("", revision=turn.revision)
-                self.orch.turns.cancel(turn, "too_short")
+                orch = self.orch
+                orch.on_final("", revision=turn.revision, turn=turn)
+                orch.turns.cancel(turn, "no_speech")
             return
         await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm, turn)
 
@@ -701,12 +702,13 @@ class Session:
         await self._drain_draft()
         turn = self.orch.turns.current if self.orch else None
         await self._stt_final(buffered)
-        if not self.hypothesis and len(pcm) < MIN_UTTERANCE_BYTES:
-            # Too short to contain a word: reject it here instead of letting it
-            # fill the queue and delay real questions.
+        if not self.hypothesis:
+            # Nothing was decoded. Reject here: queueing empty utterances lets a
+            # steady noise source fill the queue and stall real questions.
             if turn is not None and self.orch is not None:
-                self.orch.on_final("", revision=turn.revision)
-                self.orch.turns.cancel(turn, "too_short")
+                orch = self.orch
+                orch.on_final("", revision=turn.revision, turn=turn)
+                orch.turns.cancel(turn, "no_speech")
             return
         await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm, turn)
 
@@ -1050,18 +1052,23 @@ class Session:
                 self.orch.note_queued_utterance(turn)
         if self.queue.full():
             if kind == "text":
-                # An explicit question is never dropped: wait for the worker.
-                for _ in range(40):
+                # Bounded wait: the receive loop must never park on the queue,
+                # otherwise the session goes silent for everyone.
+                for _ in range(20):
                     if not self.queue.full():
                         break
                     await asyncio.sleep(0.05)
-            else:
-                # Older speech is the least valuable thing in the queue.
-                try:
-                    self.queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-        await self.queue.put((kind, payload, turn))
+        if self.queue.full():
+            # Drop the oldest item (older speech is the least valuable) rather
+            # than block; the caller's question still gets in.
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            self.queue.put_nowait((kind, payload, turn))
+        except asyncio.QueueFull:  # pragma: no cover - lost race, worker will catch up
+            log.warning("dropping %s turn: queue full", kind)
 
     async def enqueue_utterance(self, pcm: bytes) -> None:
         await self.enqueue("audio", pcm, self.orch.turns.current if self.orch else None)
