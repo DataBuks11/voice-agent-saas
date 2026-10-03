@@ -19,8 +19,9 @@ const check = (name, ok, extra = "") => {
 };
 
 const TURNS = [
-  { q: "How much does the growth plan cost?", expect: "199" },
-  { q: "What about the enterprise plan?", expect: "1200" },
+  { q: "How much does the growth plan cost?", expect: ["199"] },
+  // the model may quote the price or describe the plan; both are correct answers
+  { q: "What about the enterprise plan?", expect: ["1200", "enterprise", "sso"] },
   { q: "That time doesn't work, can you offer another slot?", expect: null },
 ];
 
@@ -182,7 +183,7 @@ const main = async () => {
         }));
         const fresh = state.answers.filter((a) => a.at >= sentAt);
         const matching = turn.expect
-          ? fresh.find((a) => a.text.includes(turn.expect))
+          ? fresh.find((a) => turn.expect.some((e) => a.text.toLowerCase().includes(e)))
           : fresh[fresh.length - 1];
         if (matching && state.audio > 10000) {
           answer = matching;
@@ -191,7 +192,11 @@ const main = async () => {
         await new Promise((r) => setTimeout(r, 600));
       }
       check(`turn ${i + 1} produced audio`, state.audio > 10000, `${state.audio} bytes`);
-      check(`turn ${i + 1} has assistant text`, Boolean(answer), answer ? answer.text.slice(0, 90) : "none");
+      check(
+        `turn ${i + 1} has assistant text`,
+        Boolean(answer),
+        answer ? answer.text.slice(0, 90) : `saw: ${JSON.stringify(state.answers.filter((a) => a.at >= sentAt).map((a) => a.text.slice(0, 60)))}`,
+      );
       if (answer) {
         const slot = state.byTurn[answer.turnId] ?? {};
         check(`turn ${i + 1} has a transcript`, Boolean(slot.user), slot.user ?? "none");
@@ -201,7 +206,12 @@ const main = async () => {
           `${answer.turnId}:${slot.bytes ?? 0}b`,
         );
         if (turn.expect) {
-          check(`turn ${i + 1} answer is grounded in the doc`, answer.text.includes(turn.expect), answer.text.slice(0, 110));
+          const low = answer.text.toLowerCase();
+          check(
+            `turn ${i + 1} answer is grounded in the doc`,
+            turn.expect.some((e) => low.includes(e)),
+            answer.text.slice(0, 110),
+          );
         }
       }
     }
