@@ -155,7 +155,21 @@ const main = async () => {
     }
     check("greeting arrived as audio", audio > 50000, `${audio} bytes`);
 
+    // A human waits for the agent to finish. Sending the next question while the
+    // previous answer is still playing is a real barge-in, which would cancel it.
+    const waitForSilence = async () => {
+      let last = -1;
+      for (let i = 0; i < 40; i++) {
+        const now = await page.evaluate(() => window.__voice.audio);
+        if (now === last && now > 0) return now;
+        last = now;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+      return last;
+    };
+
     for (const [i, turn] of TURNS.entries()) {
+      await waitForSilence();
       await page.evaluate(() => {
         window.__voice.audio = 0;
         window.__voice.order = [];
