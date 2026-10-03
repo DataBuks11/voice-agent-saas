@@ -47,14 +47,16 @@ _tts: TTSProvider | None = None
 _models_lock = asyncio.Lock()
 _models_warmed = False
 
-# How much speech to accumulate before running a speculative transcript
-# (draft). ~700ms keeps the draft warm without flooding the transcriber.
-STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
-
 # Speaker bleed reaches the mic a moment after our audio starts; ignore that window.
 ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.12"))
 # Expressed in 20 ms frames so the guard follows audio time, not wall-clock.
 ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
+# Delta STT tuning: how much new audio before a window, how much context each
+# window carries, and how close the last window must reach the end to be trusted.
+STT_CHUNK_BYTES = int(float(os.getenv("STT_CHUNK_BYTES", "22400")))      # ~700 ms new
+STT_OVERLAP_BYTES = int(float(os.getenv("STT_OVERLAP_BYTES", "20000")))  # ~625 ms context
+STT_MIN_DELTA_BYTES = int(float(os.getenv("STT_MIN_DELTA_BYTES", "9600")))  # ~300 ms
+STT_TAIL_TOLERANCE_BYTES = int(float(os.getenv("STT_TAIL_TOLERANCE_BYTES", "4000")))  # ~125 ms
 # A stalled synthesiser must not hold a turn open.
 TTS_TIMEOUT_S = float(os.getenv("TTS_TIMEOUT_S", "12"))
 # A stalled socket must not block the session for longer than this.
@@ -203,6 +205,9 @@ class Session:
         self._draft_api_task: asyncio.Task | None = None
         self._stt_consumed = 0
         self._hyp_parts: list[str] = []
+        # (start byte, text) windows that together cover the utterance
+        self._stt_parts: list[tuple[int, str]] = []
+        self._stt_covered_to = 0
         self.hypothesis = ""
         self.start_error_sent = False
         self.greet_task: asyncio.Task | None = None
@@ -916,13 +921,22 @@ class Session:
         return await self.pipeline.handle_audio(pcm, on_transcript=on_transcript, hypothesis=hypothesis)
 
     async def _stt_final(self, buffered: bytes) -> str:
-        """Transcribe the complete utterance.
+        """Return the transcript for a finished utterance.
 
-        A tail chunk on its own carries no context, so whisper drops or garbles
-        the last words ("...about the enterprise plan instead" -> "...about the
-        enterprise"). Accuracy is worth the extra pass.
+        The delta passes already cover the audio in overlapping windows, so the
+        tail is decoded with context and no full re-transcription is needed. The
+        full pass is kept as a fallback when the last window did not reach the
+        end of the speech - that is what used to cost 1.8-3.2 s on every turn.
         """
         if not buffered or self.pipeline is None:
+            return self.hypothesis
+        covered = self._stt_covered_to >= len(buffered) - STT_TAIL_TOLERANCE_BYTES
+        if covered and self.hypothesis:
+            log.info(
+                "stt final from deltas (%.1fs audio, no re-transcription)",
+                len(buffered) / float(SAMPLE_RATE * 2),
+            )
+            self._stt_consumed = len(buffered)
             return self.hypothesis
         self._stt_consumed = len(buffered)
         text = ""
@@ -933,39 +947,57 @@ class Session:
             log.debug("final stt failed", exc_info=True)
             self._last_stt_confidence = None
         if text:
-            self._hyp_parts = [text]
+            self._stt_parts = [(0, text)]
             self.hypothesis = text.strip()
+            self._stt_covered_to = len(buffered)
             if len(self.hypothesis.split()) >= 3:
                 await self.send_json({"type": "partial", "text": self.hypothesis})
         return self.hypothesis
 
-    async def _stt_delta(self, final: bool = False) -> str:
-        """Transcribe only the audio since the last delta and stitch the pieces.
+    async def _stt_delta(self, final: bool = False) -> str:  # noqa: C901
+        """Transcribe the newest audio in an overlapping window and stitch it.
 
-        Deltas of ~0.7s keep partials and the speculative draft cheap; the final
-        transcript comes from _stt_final on the whole utterance.
+        Overlap matters: a short tail chunk with no context decodes badly, which
+        is what used to cut the last words off ("...about the enterprise").
         """
         if self.pipeline is None:
             return ""
+        try:
+            return await self._stt_delta_inner()
+        finally:
+            # Never leave the slot occupied: a finished task must not stop the
+            # next delta from running.
+            self._draft_task = None
+
+    async def _stt_delta_inner(self) -> str:
         buffered = self.vad.peek()
-        start = self._stt_consumed
-        if len(buffered) <= start:
+        new_bytes = len(buffered) - self._stt_consumed
+        if new_bytes < STT_CHUNK_BYTES:
             return self.hypothesis
-        chunk = buffered[start:]
-        if len(chunk) < STT_CHUNK_BYTES:
+        window_start = max(0, self._stt_consumed - STT_OVERLAP_BYTES)
+        chunk = buffered[window_start:]
+        if len(chunk) < STT_MIN_DELTA_BYTES:
             return self.hypothesis
-        self._stt_consumed = len(buffered)
         text = ""
         try:
-            text = await self.pipeline.transcribe(chunk)
+            text, confidence = await self.pipeline.transcribe_detailed(chunk)
+            self._last_stt_confidence = confidence
         except Exception:  # noqa: BLE001 - partials are best-effort
             log.debug("delta stt failed", exc_info=True)
-        if text:
-            self._hyp_parts.append(text)
-            self.hypothesis = " ".join(self._hyp_parts).strip()
-            if len(self.hypothesis.split()) >= 3:
-                await self.send_json({"type": "partial", "text": self.hypothesis})
-                self.start_draft(self.hypothesis)
+            self._stt_consumed = len(buffered)
+            return self.hypothesis
+        self._stt_consumed = len(buffered)
+        self._stt_covered_to = len(buffered)
+        if not text:
+            return self.hypothesis
+        # the new window re-covers everything from window_start onwards
+        kept = [part for part in self._stt_parts if part[0] < window_start]
+        kept.append((window_start, text))
+        self._stt_parts = kept
+        self.hypothesis = " ".join(t for _off, t in kept).strip()
+        if len(self.hypothesis.split()) >= 3:
+            await self.send_json({"type": "partial", "text": self.hypothesis})
+            self.start_draft(self.hypothesis)
         return self.hypothesis
 
     async def _drain_draft(self) -> None:
@@ -1156,7 +1188,9 @@ class Session:
                         # Immediate UI feedback: the orb reacts while the caller is
                         # still speaking, not only after transcription finishes.
                         self._hyp_parts = []
+                        self._stt_parts = []
                         self._stt_consumed = 0
+                        self._stt_covered_to = 0
                         self.hypothesis = ""
                         turn = self.orch.ensure_speech_turn() if self.orch else None
                         if turn is not None:

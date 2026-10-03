@@ -624,3 +624,64 @@ def test_only_health_paths_are_answered_over_http():
     # the socket upgrade path must never be answered here
     for path in ("/", "", "/ws", "/v1", "/healthcheck/other"):
         assert is_health_path(path) is False, path
+
+
+class OverlapSTT:
+    """Decodes a window and returns exactly the words inside it."""
+
+    name = "overlap"
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    async def transcribe(self, pcm: bytes, sr: int = 16000):
+        self.calls.append(len(pcm))
+        # pretend the tail decodes correctly thanks to the overlap context
+        return Transcript(text="how much does the growth plan cost", confidence=0.8)
+
+
+@pytest.mark.asyncio
+async def test_final_transcript_needs_no_second_full_pass(monkeypatch):
+    """Regression: every turn re-transcribed the whole utterance (1.8-3.2 s)."""
+    stt = OverlapSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    session, ws, pipeline = await _session([])
+    session._build_orchestrator()
+    session.started = True
+    # feed the speech in real time so the delta windows actually run
+    loud = frame(2600, 0.3)
+    for i in range(0, len(loud), 6400):
+        ws.script.append(loud[i : i + 6400])
+        await asyncio.sleep(0.02)
+    runner = asyncio.create_task(session.run())
+    for _ in range(200):
+        if session.hypothesis:
+            break
+        await asyncio.sleep(0.02)
+    assert session.hypothesis, "deltas should produce a hypothesis while speaking"
+    before = len(stt.calls)
+    # the endpoint must not trigger another decode of the same audio
+    await session._finalise_utterance()
+    after = len(stt.calls)
+    assert after == before, f"endpoint re-transcribed: {stt.calls[before:]}"
+    assert session.hypothesis == "how much does the growth plan cost"
+    runner.cancel()
+    try:
+        await runner
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_a_short_tail_triggers_the_full_pass_fallback(monkeypatch):
+    stt = OverlapSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    session, ws, pipeline = await _session([])
+    session._build_orchestrator()
+    session.started = True
+    await session.run()
+    session.vad.feed(frame(300, 0.3))
+    assert session.vad.in_speech
+    await session._finalise_utterance()
+    # the newest window did not reach the end, so the full pass ran
+    assert max(stt.calls) > 0
