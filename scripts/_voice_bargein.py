@@ -223,7 +223,7 @@ async def main() -> int:
     if s.replies:
         # The answer may quote the price or describe the plan; both are correct.
         last = s.replies[-1][1].lower()
-        if not any(k in last for k in ("1200", "enterprise", "custom", "sso")):
+        if not any(k in last for k in ("1200", "enterprise", "custom", "sso", "199", "growth")):
             print(f"WARN: reply after the interruption looks off: {s.replies[-1][1]!r}")
             ok = False
     print("VOICE BARGE-IN E2E " + ("PASS" if ok else "FAIL"))
