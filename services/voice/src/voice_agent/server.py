@@ -54,7 +54,9 @@ STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.12"))
 # Expressed in 20 ms frames so the guard follows audio time, not wall-clock.
 ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
-# How much post-guard audio to keep while we speak (~3 s of 16 kHz PCM16).
+# Below this an "utterance" cannot contain a word (~150 ms at 16 kHz mono s16).
+MIN_UTTERANCE_BYTES = int(float(os.getenv("MIN_UTTERANCE_BYTES", "6000")))
+# How much post-guard audio to keep while we speaks (~3 s of 16 kHz PCM16).
 INTERRUPT_KEEP_BYTES = 16000 * 2 * 3
 # How long the endpoint waits for the in-flight model warm-up before answering anyway.
 # Race the draft: if it lands within this window the answer comes from cache,
@@ -170,7 +172,9 @@ class Session:
         self.llm: ApiLLM | None = None
         self.vad = Vad(VadConfig(), SAMPLE_RATE)
         self.partial = bytearray()
-        self.queue: asyncio.Queue[tuple[str, bytes | str, Turn | None]] = asyncio.Queue(maxsize=2)
+        # Room for a real turn plus the audio that produced it. A steady noise
+        # source must never be able to push a genuine question out of the queue.
+        self.queue: asyncio.Queue[tuple[str, bytes | str, Turn | None]] = asyncio.Queue(maxsize=4)
         self.worker: asyncio.Task | None = None
         self.interrupted = False
         self.turn_active = False
@@ -534,6 +538,13 @@ class Session:
         await self._drain_draft()
         turn = self.orch.turns.current if self.orch else None
         await self._stt_final(buffered)
+        if not self.hypothesis and len(pcm) < MIN_UTTERANCE_BYTES:
+            # Too short to contain a word: reject it here instead of letting it
+            # fill the queue and delay real questions.
+            if turn is not None and self.orch is not None:
+                self.orch.on_final("", revision=turn.revision)
+                self.orch.turns.cancel(turn, "too_short")
+            return
         await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm, turn)
 
     async def _turn_watchdog(self) -> None:
@@ -569,6 +580,13 @@ class Session:
         await self._drain_draft()
         turn = self.orch.turns.current if self.orch else None
         await self._stt_final(buffered)
+        if not self.hypothesis and len(pcm) < MIN_UTTERANCE_BYTES:
+            # Too short to contain a word: reject it here instead of letting it
+            # fill the queue and delay real questions.
+            if turn is not None and self.orch is not None:
+                self.orch.on_final("", revision=turn.revision)
+                self.orch.turns.cancel(turn, "too_short")
+            return
         await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm, turn)
 
     async def _turn_worker(self) -> None:
@@ -820,7 +838,15 @@ class Session:
                 self.interrupted = True
             if self.orch is not None:
                 self.orch.note_queued_utterance(turn)
-            if self.queue.full():
+        if self.queue.full():
+            if kind == "text":
+                # An explicit question is never dropped: wait for the worker.
+                for _ in range(40):
+                    if not self.queue.full():
+                        break
+                    await asyncio.sleep(0.05)
+            else:
+                # Older speech is the least valuable thing in the queue.
                 try:
                     self.queue.get_nowait()
                 except asyncio.QueueEmpty:

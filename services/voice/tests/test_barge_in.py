@@ -510,3 +510,40 @@ async def test_barge_in_opens_a_turn_for_the_interrupting_speech(monkeypatch):
     assert session.queue.qsize() == 1
     _kind, _pcm, turn = session.queue.get_nowait()
     assert turn is not None and turn.turn_id
+
+
+@pytest.mark.asyncio
+async def test_a_real_question_is_never_dropped_by_a_noise_flood(monkeypatch):
+    """Regression: queue pressure from noise pushed a genuine turn out."""
+    stt = RecordingSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    session, ws, pipeline = await _session([])
+    session._build_orchestrator()
+    session.started = True
+    # fill the queue with noise, then send a real question
+    session.queue = asyncio.Queue(maxsize=4)
+    for _ in range(4):
+        session.queue.put_nowait(("audio", b"\x00\x01" * 3200, None))
+    text_turn = session.orch.begin_speech()
+    session.orch.end_speech()
+    task = asyncio.create_task(session.enqueue("text", "how much does it cost?", text_turn))
+    await asyncio.sleep(0.3)
+    # still waiting for room rather than dropping the caller's question
+    assert task.done() is False
+    assert all(kind == "audio" for kind, _p, _t in list(session.queue._queue))
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_sub_word_audio_is_rejected_without_queueing(monkeypatch):
+    stt = RecordingSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    session, ws, pipeline = await _session([frame(100, 0.3) + frame(700, 0.0)])
+    session._build_orchestrator()
+    session.started = True
+    await session.run()
+    assert session.queue.qsize() == 0
