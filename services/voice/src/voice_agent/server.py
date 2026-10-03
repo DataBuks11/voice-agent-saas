@@ -684,6 +684,7 @@ class Session:
                         transcript or "",
                         revision=turn.revision,
                         confidence=self._last_stt_confidence,
+                        turn=turn,
                     )
                     if not accepted:
                         log.info("turn %s rejected: %s", turn.turn_id, reason)

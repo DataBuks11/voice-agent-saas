@@ -604,16 +604,27 @@ class VoiceOrchestrator:
         turn.transcript = self.validator.normalizer.normalize(text)
         self.bus.emit(EventType.STT_PARTIAL, turn.turn_id, revision=revision, text=turn.transcript)
 
-    def on_final(self, text: str, revision: int = 0, confidence: float | None = None) -> tuple[bool, str | None]:
-        """Returns (accepted, reason). Only an accepted turn may reach the LLM."""
-        turn = self.turns.current
+    def on_final(
+        self,
+        text: str,
+        revision: int = 0,
+        confidence: float | None = None,
+        turn: Turn | None = None,
+    ) -> tuple[bool, str | None]:
+        """Validate a final transcript for the turn that OWNS it.
+
+        The owning turn is passed in: `turns.current` may already be a noise turn
+        that opened while this utterance waited in the queue. Validating against
+        `current` silently moved one turn's words onto another turn.
+        """
+        turn = turn or self.turns.current
         log.info("validate %s text=%r", turn.turn_id if turn else "-", (text or "")[:40])
         if turn is None:
             return False, "no_turn"
-        if turn.cancelled.is_set() or turn is not self.turns.current:
+        if turn.cancelled.is_set():
             self.stats["stale_discarded"] += 1
-            self.bus.emit(EventType.STAGE_REJECTED, turn.turn_id, reason="stale_final", stage="stt")
-            return False, "stale_final"
+            self.bus.emit(EventType.STAGE_REJECTED, turn.turn_id, reason="cancelled_final", stage="stt")
+            return False, "cancelled_final"
         duplicate_of = None
         norm = self.validator.normalizer.normalize(text)
         for other_id, other in self._accepted_transcripts.items():
@@ -644,6 +655,10 @@ class VoiceOrchestrator:
         self._accepted_transcripts[turn.turn_id] = clean
         self.bus.emit(EventType.USER_TURN_ACCEPTED, turn.turn_id, text=clean)
         self._settle_pending(turn, confirmed=True)
+        # The accepted turn owns the session again; a noise turn must not keep it.
+        self.turns.current = turn
+        if self.state in (TurnState.USER_SPEAKING, TurnState.LISTENING):
+            self.state = TurnState.TRANSCRIBING
         return True, None
 
     def reclaim_for(self, turn: Turn) -> None:

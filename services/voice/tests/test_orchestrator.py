@@ -531,3 +531,33 @@ def test_long_utterance_is_capped():
         if ev:
             events.append(ev)
     assert "endpoint" in events, "a 22 s blob must not be treated as one utterance"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_keeps_its_own_words_when_a_noise_turn_opens_first():
+    """Regression: validation used turns.current and moved words between turns."""
+    orch, calls, _audio = make_orchestrator(answer="Enterprise starts at $1200")
+    mine = orch.begin_speech()
+    orch.end_speech()
+    # a noise turn becomes current while our utterance waits in the queue
+    noise = orch.begin_speech()
+    orch.end_speech()
+    accepted, reason = orch.on_final("what about the enterprise plan", turn=mine)
+    assert accepted is True, reason
+    # the words landed on the turn that owned them, and it owns the session again
+    assert mine.transcript == "what about the enterprise plan"
+    assert mine.accepted is True
+    assert orch.turns.current is mine
+    assert orch.on_final("uh huh", turn=noise)[0] is False
+    assert await orch.run_conversation(mine) == "Enterprise starts at $1200"
+    assert calls == ["what about the enterprise plan"]
+
+
+def test_cancelled_turn_cannot_be_validated():
+    orch, calls, _audio = make_orchestrator()
+    turn = orch.begin_speech()
+    orch.interrupt("caller_speech")
+    accepted, reason = orch.on_final("hello", turn=turn)
+    assert accepted is False
+    assert reason == "cancelled_final"
+    assert calls == []
