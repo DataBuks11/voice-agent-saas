@@ -86,7 +86,11 @@ const tail = (out, n = 3) =>
 
 const main = async () => {
   const results = [];
+  const heavy = new Set(["voice in the browser", "web app", "showcase (8 capabilities)"]);
   for (const step of steps) {
+    // The deployed app is a real website: give it a moment between heavy browser
+    // steps instead of racing Vercel's cold start.
+    if (heavy.has(step.name)) await new Promise((r) => setTimeout(r, 5000));
     process.stdout.write(`\n=== ${step.name} ... `);
     const { code, out, ms } = await run(step);
     results.push({ step, code, ms });

@@ -76,7 +76,7 @@ async function main() {
   try {
     // 1. Landing
     console.log("\n[1] Landing");
-    await page.goto(`${BASE}/`, { waitUntil: "networkidle2", timeout: 60000 });
+    await page.goto(`${BASE}/`, { waitUntil: "networkidle2", timeout: 90000 });
     check("title exact", (await page.title()) === "Intelligence Designed To Evolve", await page.title());
     check("video background", Boolean(await page.$("video")));
     check("hero headline", await page.evaluate(() => document.body.innerText.includes("Voice Agents")));
@@ -88,7 +88,7 @@ async function main() {
     // 2. Sign in link → login (no double /app)
     console.log("\n[2] Sign in link");
     await clickText(page, "a", "Sign in");
-    await page.waitForFunction(() => location.pathname.endsWith("/login"), { timeout: 20000 });
+    await page.waitForFunction(() => location.pathname.endsWith("/login"), { timeout: 45000 });
     check("url is /app/login", page.url().endsWith("/app/login"), page.url());
     check("no double /app", !page.url().includes("/app/app"));
     await waitForText(page, "sign in to your console");
@@ -181,7 +181,7 @@ async function main() {
     // 8. Sign out
     console.log("\n[8] Sign out");
     await clickText(page, "button", "Sign out");
-    await page.waitForFunction(() => location.pathname.endsWith("/login"), { timeout: 20000 });
+    await page.waitForFunction(() => location.pathname.endsWith("/login"), { timeout: 45000 });
     check("signed out → /app/login", page.url().endsWith("/app/login"), page.url());
 
     // 9. Re-login → setup (pick existing workspace)
@@ -194,7 +194,7 @@ async function main() {
     await page.waitForFunction(() => location.pathname.endsWith("/setup"), { timeout: 30000 });
     await waitForText(page, "Existing (");
     await clickText(page, "button", "Existing (");
-    await page.waitForFunction(() => (document.querySelector("select.select")?.options.length ?? 0) > 1, { timeout: 20000 });
+    await page.waitForFunction(() => (document.querySelector("select.select")?.options.length ?? 0) > 1, { timeout: 45000 });
     const wsValue = await page.evaluate(() => document.querySelector("select.select").options[1].value);
     await page.select("select.select", wsValue);
     await clickText(page, "button", "Open workspace");
@@ -213,8 +213,8 @@ async function main() {
     const ctx = await browser.createBrowserContext().catch(() => browser.createIncognitoBrowserContext());
     const fresh = await ctx.newPage();
     fresh.on("pageerror", (e) => consoleErrors.push(`pageerror(fresh): ${e.message}`));
-    await fresh.goto(`${BASE}/app/knowledge`, { waitUntil: "networkidle2", timeout: 60000 });
-    await fresh.waitForFunction(() => location.pathname.endsWith("/login") || location.pathname === "/app", { timeout: 20000 }).catch(() => undefined);
+    await fresh.goto(`${BASE}/app/knowledge`, { waitUntil: "networkidle2", timeout: 90000 });
+    await fresh.waitForFunction(() => location.pathname.endsWith("/login") || location.pathname === "/app", { timeout: 45000 }).catch(() => undefined);
     const freshUrl = fresh.url();
     check("deep link lands on login (no /app/app)", freshUrl.endsWith("/app/login"), freshUrl);
     check("deep link page not blank", await fresh.evaluate(() => document.body.innerText.length > 20));
@@ -223,7 +223,7 @@ async function main() {
     // 11. Mobile viewport smoke (landing burger)
     console.log("\n[11] Mobile landing");
     await page.setViewport({ width: 390, height: 844 });
-    await page.goto(`${BASE}/`, { waitUntil: "networkidle2", timeout: 60000 });
+    await page.goto(`${BASE}/`, { waitUntil: "networkidle2", timeout: 90000 });
     check("burger visible on mobile", await page.evaluate(() => Boolean(document.querySelector(".burger, .m-signin, [class*=burger]"))));
     await shot(page, "11-mobile");
     await page.setViewport({ width: 1440, height: 900 });
