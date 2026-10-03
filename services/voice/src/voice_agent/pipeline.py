@@ -46,6 +46,11 @@ class VoicePipeline:
         result = await self.stt.transcribe(pcm16, self.config.sample_rate)
         return result.text
 
+    async def transcribe_detailed(self, pcm16: bytes) -> tuple[str, float]:
+        """Text plus decode confidence, so noise can be rejected before the LLM."""
+        result = await self.stt.transcribe(pcm16, self.config.sample_rate)
+        return result.text, float(getattr(result, "confidence", 1.0) or 0.0)
+
     async def handle_audio(self, pcm16: bytes, on_transcript=None, hypothesis: str = "") -> str:
         import time as _time
 

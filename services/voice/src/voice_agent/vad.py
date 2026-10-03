@@ -54,7 +54,7 @@ class VadConfig:
     # Must sit above the longest natural pause inside a sentence, otherwise the
     # turn is cut mid-sentence and whisper transcribes a fragment.
     endpoint_silence_ms: int = 450
-    max_utterance_ms: int = 45000
+    max_utterance_ms: int = 20000
     # Neural threshold (Silero probability) when the model is in use.
     neural_threshold: float = 0.55
     # Energy gate on top of the neural score, as dograh does with min_volume.

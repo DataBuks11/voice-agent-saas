@@ -463,3 +463,71 @@ async def test_reject_cooldown_stops_a_noise_source_from_spamming_turns():
     orch.reject_cooldown_until = _t.time() - 1
     noise = orch.ensure_speech_turn()
     assert noise is not None and noise is not first
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6/18: decoder artefacts must never reach the model
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Call with a phone call with a phone call with a phone call",
+        "thank you thank you thank you thank you thank you thank you",
+        "no no no no no no no no no",
+        "the the the the the the the the the the",
+    ],
+)
+def test_decoder_loops_are_rejected(text):
+    """The raw decode is checked before stutter collapsing can hide the loop."""
+    norm = TranscriptNormalizer()
+    assert norm.looks_like_loop(text) is True
+    ok, reason = norm.is_meaningful(text)
+    assert ok is False
+    assert reason == "decoder_loop"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I want to book an appointment for tomorrow morning",
+        "My name is Sudhanshu and I need to see the dentist",
+        "that time doesn't work, can you offer another slot",
+        "no problem",
+        "yes",
+    ],
+)
+def test_real_speech_is_not_mistaken_for_a_loop(text):
+    norm = TranscriptNormalizer()
+    ok, _reason = norm.is_meaningful(norm.normalize(text))
+    assert ok is True, text
+
+
+def test_low_confidence_decode_is_rejected():
+    orch, calls, _audio = make_orchestrator()
+    orch.begin_speech()
+    orch.end_speech()
+    accepted, reason = orch.on_final("word word word", confidence=0.11)
+    assert accepted is False
+    assert reason.startswith("low_confidence")
+    assert calls == []
+
+
+def test_high_confidence_real_speech_is_accepted():
+    orch, calls, _audio = make_orchestrator()
+    orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("book me for tomorrow at nine", confidence=0.82)[0] is True
+
+
+def test_long_utterance_is_capped():
+    from voice_agent.vad import Vad, VadConfig
+
+    assert VadConfig().max_utterance_ms <= 25000
+    vad = Vad(VadConfig(), 16000)
+    events = []
+    loud = b"\x00\x30" * 640  # 20 ms at a constant loud level
+    for _ in range(1100):  # 22 s of continuous tone
+        ev = vad.feed(loud)
+        if ev:
+            events.append(ev)
+    assert "endpoint" in events, "a 22 s blob must not be treated as one utterance"

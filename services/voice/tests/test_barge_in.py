@@ -100,8 +100,15 @@ class StubPipeline:
     def handle_barge_in(self) -> None:
         self.barge_ins += 1
 
-    async def transcribe(self, pcm: bytes):
-        return await srv._stt.transcribe(pcm)
+    async def transcribe(self, pcm: bytes) -> str:
+        result = await srv._stt.transcribe(pcm)
+        return getattr(result, "text", result) if result is not None else ""
+
+    async def transcribe_detailed(self, pcm: bytes):
+        result = await srv._stt.transcribe(pcm)
+        if result is None:
+            return "", 0.0
+        return getattr(result, "text", str(result)), float(getattr(result, "confidence", 1.0))
 
     async def handle_text(self, text: str, on_transcript=None):
         self.turns.append(text)
@@ -133,8 +140,8 @@ class StubSTT:
 
     name = "stub"
 
-    async def transcribe(self, pcm: bytes, sr: int = 16000) -> str:
-        return "are you still there"
+    async def transcribe(self, pcm: bytes, sr: int = 16000):
+        return Transcript(text="are you still there", confidence=0.9)
 
 
 async def _session(script: list[bytes | str]) -> tuple[Session, FakeWS, StubPipeline]:
@@ -370,6 +377,13 @@ async def test_playback_window_keeps_barge_in_armed(monkeypatch):
         pass
 
 
+class Transcript:
+    def __init__(self, text: str = "", confidence: float = 1.0, language: str = "en") -> None:
+        self.text = text
+        self.confidence = confidence
+        self.language = language
+
+
 class RecordingSTT:
     """STT stub that records what it was asked to transcribe."""
 
@@ -379,9 +393,11 @@ class RecordingSTT:
         self.seen: list[int] = []
         self.text = "Actually, tell me about the enterprise plan instead."
 
-    async def transcribe(self, pcm: bytes, sr: int = 16000) -> str:
+    async def transcribe(self, pcm: bytes, sr: int = 16000):
         self.seen.append(len(pcm))
-        return "Actually, tell me about the enterprise plan instead."
+        return Transcript(
+            text="Actually, tell me about the enterprise plan instead.", confidence=0.9, language="en"
+        )
 
 
 @pytest.mark.asyncio

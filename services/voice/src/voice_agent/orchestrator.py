@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import enum
 import logging
+import re
 import time
 import uuid
 from collections import deque
@@ -288,7 +289,15 @@ class TurnRegistry:
 # Ignore new speech for this long after a turn was rejected as noise.
 REJECT_COOLDOWN_S = float(__import__("os").getenv("REJECT_COOLDOWN_S", "0.6"))
 
+# A decode below this confidence is far more likely to be a hallucination on
+# noise than a real word.
+MIN_STT_CONFIDENCE = float(__import__("os").getenv("MIN_STT_CONFIDENCE", "0.35"))
+
 _WS = " \t\r\n\u200b"
+
+
+def self_repeat_min() -> int:
+    return 3
 # Turned away from: these must never reach the model.
 _REJECT_EXACT = {
     "uh huh", "mm hmm", "hmm", "uh", "um", "erm", "huh", "so", "yeah yeah",
@@ -297,11 +306,12 @@ _REJECT_EXACT = {
 
 
 class TranscriptNormalizer:
-    """Whitespace, control characters, casing noise and duplicated revisions."""
+    """Whitespace, control characters, casing noise, decoder loops."""
 
-    def __init__(self, min_chars: int = 2, min_words: int = 1) -> None:
+    def __init__(self, min_chars: int = 2, min_words: int = 1, max_repeat: int = 2) -> None:
         self.min_chars = min_chars
         self.min_words = min_words
+        self.max_repeat = max_repeat
 
     def normalize(self, text: str) -> str:
         t = (text or "").replace("\u200b", " ")
@@ -322,6 +332,34 @@ class TranscriptNormalizer:
             out.append(w)
         return " ".join(out)
 
+    @staticmethod
+    def looks_like_loop(text: str) -> bool:
+        """Decoder loops on non-speech: "call with a phone call with a phone".
+
+        Whisper repeats a short phrase when it is fed a tone or a clipped word.
+        Such a transcript must never reach the model.
+        """
+        words = [w for w in re.findall(r"[a-z']+", text.lower()) if w]
+        if len(words) < 6:
+            return False
+        for size in (2, 3, 4):
+            if len(words) < size * self_repeat_min():
+                continue
+            pattern = words[:size]
+            repeats = 1
+            for i in range(size, len(words) - size + 1, size):
+                if words[i : i + size] == pattern:
+                    repeats += 1
+                else:
+                    break
+            if repeats >= 3 and repeats * size >= 6:
+                return True
+        # single-token spam ("no no no no no no")
+        counts: dict[str, int] = {}
+        for w in words:
+            counts[w] = counts.get(w, 0) + 1
+        return max(counts.values()) >= max(6, len(words) // 2)
+
     def is_meaningful(self, text: str) -> tuple[bool, str | None]:
         """Returns (usable, reason)."""
         if not text:
@@ -338,17 +376,36 @@ class TranscriptNormalizer:
         # A transcript that is mostly punctuation is a decoding artefact.
         if letters / max(len(text), 1) < 0.4:
             return False, "not_speech"
+        if self.looks_like_loop(text.strip()):
+            return False, "decoder_loop"
         return True, None
 
 
 class TurnValidator:
     """The single gate between 'we heard something' and 'the model may answer'."""
 
-    def __init__(self, normalizer: TranscriptNormalizer, require_final: bool = True) -> None:
+    def __init__(
+        self,
+        normalizer: TranscriptNormalizer,
+        require_final: bool = True,
+        min_confidence: float = MIN_STT_CONFIDENCE,
+    ) -> None:
         self.normalizer = normalizer
         self.require_final = require_final
+        self.min_confidence = min_confidence
 
-    def validate(self, *, text: str, is_final: bool, revision: int, last_revision: int, duplicate_of: str | None) -> tuple[bool, str | None, str]:
+    def validate(
+        self,
+        *,
+        text: str,
+        is_final: bool,
+        revision: int,
+        last_revision: int,
+        duplicate_of: str | None,
+        confidence: float | None = None,
+    ) -> tuple[bool, str | None, str]:
+        if confidence is not None and confidence < self.min_confidence:
+            return False, f"low_confidence:{confidence:.2f}", (text or "").strip()
         if self.require_final and not is_final:
             return False, "partial_not_final", ""
         if duplicate_of:
@@ -547,7 +604,7 @@ class VoiceOrchestrator:
         turn.transcript = self.validator.normalizer.normalize(text)
         self.bus.emit(EventType.STT_PARTIAL, turn.turn_id, revision=revision, text=turn.transcript)
 
-    def on_final(self, text: str, revision: int = 0) -> tuple[bool, str | None]:
+    def on_final(self, text: str, revision: int = 0, confidence: float | None = None) -> tuple[bool, str | None]:
         """Returns (accepted, reason). Only an accepted turn may reach the LLM."""
         turn = self.turns.current
         if turn is None:
@@ -568,6 +625,7 @@ class VoiceOrchestrator:
             revision=revision,
             last_revision=turn.revision,
             duplicate_of=duplicate_of,
+            confidence=confidence,
         )
         self.bus.emit(EventType.STT_FINAL, turn.turn_id, revision=revision, text=clean, accepted=accepted, reason=reason)
         if not accepted:

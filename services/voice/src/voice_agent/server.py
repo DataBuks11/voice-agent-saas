@@ -206,6 +206,7 @@ class Session:
         # Staged orchestrator: owns turns, events and cancellation.
         self.session_id = uuid.uuid4().hex[:12]
         self.orch: VoiceOrchestrator | None = None
+        self._last_stt_confidence: float | None = None
         self.trace_to_client = os.getenv("VOICE_TRACE", "").lower() in ("1", "true", "on")
         self._audio_seq = 0
 
@@ -640,7 +641,11 @@ class Session:
                     (transcript or "")[:60],
                 )
                 if turn is not None and orch is not None:
-                    accepted, reason = orch.on_final(transcript or "", revision=turn.revision)
+                    accepted, reason = orch.on_final(
+                        transcript or "",
+                        revision=turn.revision,
+                        confidence=self._last_stt_confidence,
+                    )
                     if not accepted:
                         log.info("turn %s rejected: %s", turn.turn_id, reason)
                         self.turn_active = False
@@ -715,9 +720,11 @@ class Session:
         self._stt_consumed = len(buffered)
         text = ""
         try:
-            text = await self.pipeline.transcribe(buffered)
+            text, confidence = await self.pipeline.transcribe_detailed(buffered)
+            self._last_stt_confidence = confidence
         except Exception:  # noqa: BLE001 - keep the stitched hypothesis
             log.debug("final stt failed", exc_info=True)
+            self._last_stt_confidence = None
         if text:
             self._hyp_parts = [text]
             self.hypothesis = text.strip()
