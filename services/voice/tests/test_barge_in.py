@@ -69,9 +69,25 @@ class FakeWS:
 
 
 class StubPipeline:
+    class _State:
+        def __init__(self) -> None:
+            self.items: list[dict] = []
+
+        def add(self, role: str, content: str) -> None:
+            self.items.append({"role": role, "content": content})
+
+        def history_text(self, last: int = 20) -> str:
+            return ""
+
+    class _LLM:
+        async def complete(self, system: str, context: str, user: str, draft: bool = False) -> str:
+            return "Got it."
+
     def __init__(self):
         self.barge_ins = 0
         self.turns: list[str] = []
+        self.state = self._State()
+        self.llm = self._LLM()
 
     async def synthesize(self, text: str):
         await asyncio.sleep(0.02)  # real TTS takes time; let the test interleave
@@ -463,3 +479,34 @@ async def test_session_start_never_drops_the_socket_silently(monkeypatch):
     assert "error" in kinds
     err = next(e for e in ws.events() if e.get("type") == "error")
     assert err.get("reason") == "start_failed"
+
+
+@pytest.mark.asyncio
+async def test_barge_in_opens_a_turn_for_the_interrupting_speech(monkeypatch):
+    """Regression: speech over the agent had no turn owner, so it was dropped."""
+    stt = RecordingSTT()
+    monkeypatch.setattr(srv, "_stt", stt)
+    monkeypatch.setattr(srv, "_tts", StubTTS())
+    session, ws, pipeline = await _session([])
+    session._build_orchestrator()
+    session.started = True
+    ws.script = [frame(1500, 0.3) + frame(700, 0.0)]
+    ws.gate = asyncio.Event()
+    runner = asyncio.create_task(session.run())
+    greeting = asyncio.create_task(
+        session._speak("Hello there. Thanks for calling. How can I help you today.")
+    )
+    for _ in range(400):
+        if session.speaking:
+            break
+        await asyncio.sleep(0.001)
+    ws.gate.set()
+    await asyncio.wait_for(greeting, timeout=5)
+    await asyncio.wait_for(runner, timeout=5)
+    assert session.orch is not None
+    assert session.orch.stats["turns"] >= 1
+    assert session.orch.stats["interruptions"] >= 1
+    # the interrupted speech is queued with an owner
+    assert session.queue.qsize() == 1
+    _kind, _pcm, turn = session.queue.get_nowait()
+    assert turn is not None and turn.turn_id

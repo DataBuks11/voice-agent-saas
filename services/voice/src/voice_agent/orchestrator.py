@@ -452,12 +452,25 @@ class VoiceOrchestrator:
         return self.transitions(self.state, target, reason)
 
     # ---------------- turn lifecycle ----------------
+    def assistant_audio_started(self, turn_id: str | None = None) -> None:
+        """Assistant audio is playing (greeting or backchannel may have no turn)."""
+        self.audio_playback_active = True
+        self.bus.emit(EventType.AUDIO_PLAYBACK_STARTED, turn_id)
+
+    def assistant_audio_stopped(self, turn_id: str | None = None) -> None:
+        self.audio_playback_active = False
+        self.bus.emit(EventType.AUDIO_PLAYBACK_STOPPED, turn_id)
+
     def begin_speech(self) -> Turn:
         """USER_SPEECH_STARTED. Returns None when the transition is not legal."""
-        if self.state is TurnState.SPEAKING and not self.allow_barge_in:
+        if self.audio_playback_active and not self.allow_barge_in:
             self.bus.emit(EventType.STAGE_REJECTED, None, reason="barge_in_disabled", stage="turn_detector")
             return None  # type: ignore[return-value]
-        if self.state in (TurnState.SPEAKING, TurnState.THINKING, TurnState.TRANSCRIBING):
+        if self.audio_playback_active or self.state in (
+            TurnState.SPEAKING,
+            TurnState.THINKING,
+            TurnState.TRANSCRIBING,
+        ):
             # The caller started a new utterance before we finished the last one.
             self.interrupt("caller_speech")
         if not self._require(TurnState.USER_SPEAKING, "speech_start"):

@@ -428,8 +428,12 @@ class Session:
                 self._interrupt_buf.clear()
                 self.vad.reset()
                 await self.send_json({"type": "speak_start", "turnId": turn.turn_id if turn else None})
-                if orch is not None and turn is not None:
-                    orch.speaking_started(turn)
+                if orch is not None:
+                    if turn is not None:
+                        orch.speaking_started(turn)
+                    else:
+                        # Greeting/backchannel: audio is playing but no turn owns it.
+                        orch.assistant_audio_started()
                 started = True
                 t_first = _time.time()
             out_rate = chunk.sample_rate or SAMPLE_RATE
@@ -465,8 +469,11 @@ class Session:
                 # Pure playback bleed: throw it away.
                 self.vad.reset()
             self._barge_taken = False
-            if orch is not None and turn is not None and orch.turns.owner(turn):
-                orch.speaking_finished(turn)
+            if orch is not None:
+                if turn is not None and orch.turns.owner(turn):
+                    orch.speaking_finished(turn)
+                else:
+                    orch.assistant_audio_stopped()
         if turn is not None:
             turn.mark("speak_total", round(_time.time() - t0, 3))
             log.info("turn %s done: %s", turn.turn_id, self._turn_trace_line(turn))
@@ -582,9 +589,15 @@ class Session:
                 if kind == "text":
                     transcript = str(payload or "").strip()
                 else:
-                    hypothesis = self.hypothesis if kind == "audio-draft" else ""
+                    transcript = self.hypothesis if kind == "audio-draft" else ""
+                    if not transcript and turn is None:
+                        # No turn owner (legacy path): transcribe here so the
+                        # utterance is still understood rather than dropped.
+                        try:
+                            transcript = await self.pipeline.transcribe(payload)
+                        except Exception:  # noqa: BLE001
+                            log.exception("late stt failed")
                     self.hypothesis = ""
-                    transcript = hypothesis
                 if turn is not None and orch is not None:
                     accepted, reason = orch.on_final(transcript or "", revision=turn.revision)
                     if not accepted:
@@ -852,7 +865,10 @@ class Session:
                             self._barge_taken = True
                             self.interrupted = True
                             if self.orch is not None:
-                                self.orch.interrupt("barge_in")
+                                # The caller now owns a turn: open it here so the
+                                # words spoken over our audio have an owner and can
+                                # never be answered as an unowned utterance.
+                                self.orch.begin_speech()
                             # Replay the kept audio so the opening words survive.
                             self.vad.reset()
                             kept = bytes(self._interrupt_buf)
