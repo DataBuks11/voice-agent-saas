@@ -461,6 +461,17 @@ class VoiceOrchestrator:
         self.audio_playback_active = False
         self.bus.emit(EventType.AUDIO_PLAYBACK_STOPPED, turn_id)
 
+    def ensure_speech_turn(self) -> Turn | None:
+        """Reuse the open turn when the caller is already mid-utterance.
+
+        The receive loop and the barge-in path can both see the same speech. Two
+        opens meant the second one cancelled the first, so the utterance was
+        dropped without ever reaching the model.
+        """
+        if self.state is TurnState.USER_SPEAKING and self.turns.current is not None:
+            return self.turns.current
+        return self.begin_speech()
+
     def begin_speech(self) -> Turn:
         """USER_SPEECH_STARTED. Returns None when the transition is not legal."""
         if self.audio_playback_active and not self.allow_barge_in:

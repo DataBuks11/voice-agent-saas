@@ -598,6 +598,12 @@ class Session:
                         except Exception:  # noqa: BLE001
                             log.exception("late stt failed")
                     self.hypothesis = ""
+                log.info(
+                    "worker turn=%s kind=%s transcript=%r",
+                    turn.turn_id if turn else "-",
+                    kind,
+                    (transcript or "")[:60],
+                )
                 if turn is not None and orch is not None:
                     accepted, reason = orch.on_final(transcript or "", revision=turn.revision)
                     if not accepted:
@@ -868,7 +874,7 @@ class Session:
                                 # The caller now owns a turn: open it here so the
                                 # words spoken over our audio have an owner and can
                                 # never be answered as an unowned utterance.
-                                self.orch.begin_speech()
+                                self.orch.ensure_speech_turn()
                             # Replay the kept audio so the opening words survive.
                             self.vad.reset()
                             kept = bytes(self._interrupt_buf)
@@ -886,7 +892,7 @@ class Session:
                         self._hyp_parts = []
                         self._stt_consumed = 0
                         self.hypothesis = ""
-                        turn = self.orch.begin_speech() if self.orch else None
+                        turn = self.orch.ensure_speech_turn() if self.orch else None
                         if turn is not None:
                             turn_id = turn.turn_id
                         else:
