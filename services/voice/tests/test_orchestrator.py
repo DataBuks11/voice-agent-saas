@@ -318,3 +318,43 @@ def test_reclaim_never_reinstates_a_cancelled_turn():
     orch.state = TurnState.LISTENING
     orch.reclaim_for(turn)
     assert orch.state is TurnState.LISTENING
+
+
+# --------------------------------------------------------------------------- #
+# Noise must not delete an answer that is already on its way
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_noise_does_not_cancel_a_pending_answer():
+    orch, calls, _audio = make_orchestrator()
+    first = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("what are your opening hours")
+    task = asyncio.create_task(orch.run_conversation(first))
+    await asyncio.sleep(0)
+
+    # a noise burst opens a turn while the answer is still being generated
+    noise = orch.ensure_speech_turn()
+    orch.end_speech()
+    accepted, reason = orch.on_final("uh huh")
+    assert accepted is False and reason
+    # the real answer survives and still belongs to the session
+    assert await task == "Sure, that is booked."
+    assert orch.turns.current is first
+    assert first.cancelled.is_set() is False
+    assert noise is not first
+
+
+@pytest.mark.asyncio
+async def test_confirmed_interruption_cancels_the_pending_answer():
+    orch, calls, _audio = make_orchestrator(answer="STALE", delay=0.05)
+    first = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("what are your opening hours")
+    task = asyncio.create_task(orch.run_conversation(first))
+    await asyncio.sleep(0.01)
+    second = orch.ensure_speech_turn()
+    orch.end_speech()
+    assert orch.on_final("actually book me for tomorrow")[0] is True
+    assert await task == ""
+    assert first.cancelled.is_set() is True
+    assert orch.stats["interruptions"] >= 1

@@ -33,7 +33,15 @@ const main = async () => {
     const page = await browser.newPage();
     // Count what the page actually receives, per websocket.
     await page.evaluateOnNewDocument(() => {
-      window.__voice = { audio: 0, events: [], binaryAfterText: 0, started: false };
+      window.__voice = {
+        audio: 0,
+        events: [],
+        binaryAfterText: 0,
+        started: false,
+        assistantTexts: [],
+        turnIds: [],
+        rejected: [],
+      };
       const Native = window.WebSocket;
       window.WebSocket = function (...args) {
         const sock = new Native(...args);
@@ -44,6 +52,11 @@ const main = async () => {
             try {
               const msg = JSON.parse(ev.data);
               window.__voice.events.push(msg.type);
+              if (msg.turnId) window.__voice.turnIds.push(msg.turnId);
+              if (msg.type === "assistant" && msg.text) window.__voice.assistantTexts.push(msg.text);
+              if (msg.type === "trace" && msg.type && /USER_TURN_REJECTED|VOICE_ERROR/.test(String(msg.data?.type ?? ""))) {
+                window.__voice.rejected.push(msg);
+              }
               if (msg.type === "assistant" || msg.type === "audio_end") {
                 window.__voice.pendingText = true;
               }
@@ -132,6 +145,51 @@ const main = async () => {
     }
     let s = await page.evaluate(() => ({ ...window.__voice, events: window.__voice.events.slice(-14) }));
     check("greeting arrived as audio", s.audio > 20000, `${s.audio} bytes, events=${s.events.join(",")}`);
+
+    // Multi-turn: prove the cycle repeats, not just once.
+    const turns = [
+      { q: "How much does the growth plan cost?", expect: "199" },
+      { q: "What about the enterprise plan?", expect: "1200" },
+      { q: "That time doesn't work, can you offer another slot?", expect: null },
+    ];
+    for (const [i, turn] of turns.entries()) {
+      await page.evaluate(() => {
+        window.__voice.audio = 0;
+        window.__voice.binaryAfterText = 0;
+        window.__voice.assistantTexts = [];
+      });
+      const sent = await page.evaluate((text) => {
+        const sock = window.__lastSocket;
+        if (!sock || sock.readyState !== 1) return false;
+        sock.send(JSON.stringify({ type: "text", text }));
+        return true;
+      }, turn.q);
+      check(`turn ${i + 1} sent`, sent);
+      const end = Date.now() + 45000;
+      let seen = null;
+      while (Date.now() < end) {
+        seen = await page.evaluate(() => ({ ...window.__voice, events: window.__voice.events.slice(-16) }));
+        if (seen.binaryAfterText > 0 && seen.audio > 10000) break;
+        await new Promise((r) => setTimeout(r, 700));
+      }
+      check(
+        `turn ${i + 1} produced audio`,
+        seen.audio > 10000,
+        `${seen.audio} bytes, events=${seen.events.join(",")}`,
+      );
+      if (turn.expect) {
+        const texts = await page.evaluate(() => window.__voice.assistantTexts ?? []);
+        const joined = texts.join(" | ");
+        check(
+          `turn ${i + 1} answer is grounded`,
+          joined.includes(turn.expect),
+          joined.slice(-140),
+        );
+      }
+      // every reply must carry the same turn id end to end
+      const ids = await page.evaluate(() => window.__voice.turnIds ?? []);
+      check(`turn ${i + 1} turn id present`, ids.length > 0, `turnIds=${ids.join(",")}`);
+    }
 
     // Now send a text turn and expect audio again.
     await page.evaluate(() => {

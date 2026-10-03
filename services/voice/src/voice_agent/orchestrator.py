@@ -55,6 +55,7 @@ LEGAL_TRANSITIONS: dict[TurnState, set[TurnState]] = {
     # A turn can be abandoned back to LISTENING (noise, echo, too short).
     TurnState.USER_SPEAKING: {
         TurnState.TRANSCRIBING,
+        TurnState.USER_SPEAKING,  # same utterance seen by two stages
         TurnState.LISTENING,
         TurnState.INTERRUPTED,
         TurnState.ENDING,
@@ -62,6 +63,7 @@ LEGAL_TRANSITIONS: dict[TurnState, set[TurnState]] = {
     },
     TurnState.TRANSCRIBING: {
         TurnState.THINKING,
+        TurnState.USER_SPEAKING,  # caller started speaking while we were transcribing
         TurnState.LISTENING,
         TurnState.INTERRUPTED,
         TurnState.ENDING,
@@ -70,6 +72,7 @@ LEGAL_TRANSITIONS: dict[TurnState, set[TurnState]] = {
     # THINKING -> SPEAKING only. Cancelled work falls back to LISTENING.
     TurnState.THINKING: {
         TurnState.SPEAKING,
+        TurnState.USER_SPEAKING,  # caller spoke; the prepared answer is held, not cancelled
         TurnState.LISTENING,
         TurnState.INTERRUPTED,
         TurnState.ENDING,
@@ -232,15 +235,26 @@ class TurnRegistry:
         self.current: Turn | None = None
         self.history: deque[Turn] = deque(maxlen=50)
 
-    def open(self) -> Turn:
+    def open(self) -> tuple[Turn, Turn | None]:
+        """Start a new turn. Returns (new_turn, previous_turn_not_yet_cancelled).
+
+        The previous turn is NOT cancelled here: a noise burst must not throw away
+        an answer that is already being prepared. It is cancelled only once the
+        new utterance is confirmed as real speech.
+        """
         self._counter += 1
         turn = Turn(turn_id=f"t{self._counter}-{uuid.uuid4().hex[:6]}", index=self._counter)
-        if self.current is not None:
-            self.cancel(self.current, reason="superseded")
+        previous = self.current
         self.current = turn
         self.history.append(turn)
         self.bus.emit(EventType.USER_SPEECH_STARTED, turn.turn_id, turnIndex=turn.index)
-        return turn
+        return turn, previous
+
+    def restore(self, turn: Turn) -> None:
+        """Put an unconfirmed turn back in charge (the new speech was noise)."""
+        if turn.cancelled.is_set():
+            return
+        self.current = turn
 
     def cancel(self, turn: Turn, reason: str) -> None:
         if turn.cancelled.is_set():
@@ -422,6 +436,8 @@ class VoiceOrchestrator:
         self.validator = TurnValidator(normalizer or TranscriptNormalizer())
         self.allow_barge_in = allow_barge_in
         self.audio_playback_active = False
+        # An accepted turn whose answer is still being prepared.
+        self.pending_answer_turn: Turn | None = None
         self._accepted_transcripts: dict[str, str] = {}
         self.stats = {
             "turns": 0,
@@ -477,16 +493,16 @@ class VoiceOrchestrator:
         if self.audio_playback_active and not self.allow_barge_in:
             self.bus.emit(EventType.STAGE_REJECTED, None, reason="barge_in_disabled", stage="turn_detector")
             return None  # type: ignore[return-value]
-        if self.audio_playback_active or self.state in (
-            TurnState.SPEAKING,
-            TurnState.THINKING,
-            TurnState.TRANSCRIBING,
-        ):
-            # The caller started a new utterance before we finished the last one.
+        # Audio already playing is an unambiguous interruption.
+        if self.audio_playback_active or self.state is TurnState.SPEAKING:
             self.interrupt("caller_speech")
         if not self._require(TurnState.USER_SPEAKING, "speech_start"):
             return None  # type: ignore[return-value]
-        turn = self.turns.open()
+        turn, previous = self.turns.open()
+        if previous is not None and not previous.cancelled.is_set() and previous.accepted:
+            # An answer is already on its way: hold it until the new speech is
+            # confirmed, so a cough cannot delete a correct reply.
+            self.pending_answer_turn = previous
         turn.audio_start = time.time()
         turn.mark("speech_start")
         self.stats["turns"] += 1
@@ -538,6 +554,7 @@ class VoiceOrchestrator:
             self.stats["rejected"] += 1
             self.bus.emit(EventType.USER_TURN_REJECTED, turn.turn_id, reason=reason, text=clean)
             turn.reject_reason = reason
+            self._settle_pending(turn, confirmed=False)
             # Back to listening; the model is never called.
             self._require(TurnState.LISTENING, f"rejected:{reason}")
             return False, reason
@@ -546,6 +563,7 @@ class VoiceOrchestrator:
         turn.mark("accepted")
         self._accepted_transcripts[turn.turn_id] = clean
         self.bus.emit(EventType.USER_TURN_ACCEPTED, turn.turn_id, text=clean)
+        self._settle_pending(turn, confirmed=True)
         return True, None
 
     def reclaim_for(self, turn: Turn) -> None:
@@ -560,6 +578,24 @@ class VoiceOrchestrator:
             return
         if self.state is TurnState.LISTENING:
             self.state = TurnState.TRANSCRIBING
+
+    def _settle_pending(self, new_turn: Turn, confirmed: bool) -> None:
+        """Resolve the turn whose answer was waiting for this utterance."""
+        pending = self.pending_answer_turn
+        self.pending_answer_turn = None
+        if pending is None or pending is new_turn:
+            return
+        if confirmed:
+            self.turns.cancel(pending, "confirmed_interruption")
+            self.stats["interruptions"] += 1
+            self.bus.emit(EventType.INTERRUPTION_STARTED, pending.turn_id, reason="confirmed_interruption")
+            self.bus.emit(EventType.AUDIO_QUEUE_FLUSH, pending.turn_id, reason="interruption")
+            self.bus.emit(EventType.INTERRUPTION_COMPLETED, pending.turn_id)
+            log.info("cancelled pending answer for %s (real interruption)", pending.turn_id)
+        else:
+            # Noise: the prepared answer continues and owns the session again.
+            self.turns.restore(pending)
+            log.info("new speech rejected (%s); keeping the pending answer", new_turn.reject_reason)
 
     async def run_conversation(self, turn: Turn) -> str:
         """THINKING -> SPEAKING. Cancelled work never speaks."""
