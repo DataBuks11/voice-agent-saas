@@ -179,6 +179,7 @@ const main = async () => {
       // The synthetic mic injects a continuous tone, which the runtime correctly
       // treats as an interruption. Retry once so the check measures the pipeline
       // rather than the fake device.
+      const sentAt = Date.now();
       const sendIt = () =>
         page.evaluate((text) => {
           const sock = window.__lastSocket;

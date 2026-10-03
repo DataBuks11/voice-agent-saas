@@ -54,6 +54,8 @@ STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.12"))
 # Expressed in 20 ms frames so the guard follows audio time, not wall-clock.
 ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
+# A stalled socket must not block the session for longer than this.
+SEND_TIMEOUT_S = float(os.getenv("SEND_TIMEOUT_S", "5"))
 # Below this an "utterance" cannot contain a word (~150 ms at 16 kHz mono s16).
 MIN_UTTERANCE_BYTES = int(float(os.getenv("MIN_UTTERANCE_BYTES", "6000")))
 # How much post-guard audio to keep while we speaks (~3 s of 16 kHz PCM16).
@@ -207,17 +209,49 @@ class Session:
         self.session_id = uuid.uuid4().hex[:12]
         self.orch: VoiceOrchestrator | None = None
         self._last_stt_confidence: float | None = None
+        self.dropped_frames = 0
         self.trace_to_client = os.getenv("VOICE_TRACE", "").lower() in ("1", "true", "on")
         self._audio_seq = 0
 
     # --- wire helpers (serialize sends: audio + json interleave) ---
     async def send_json(self, obj: dict) -> None:
-        async with self.send_lock:
-            await self.ws.send(json.dumps(obj))
+        if not await self._acquire_send_lock("json"):
+            return
+        try:
+            await asyncio.wait_for(self.ws.send(json.dumps(obj)), timeout=SEND_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.warning("send_json timed out (%s)", obj.get("type"))
+        except Exception:  # noqa: BLE001 - a dead socket must not kill the turn
+            log.debug("send_json failed", exc_info=True)
+        finally:
+            self.send_lock.release()
 
     async def send_bytes(self, data: bytes) -> None:
-        async with self.send_lock:
-            await self.ws.send(data)
+        if not await self._acquire_send_lock("audio"):
+            return
+        try:
+            await asyncio.wait_for(self.ws.send(data), timeout=SEND_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self.dropped_frames += len(data) // 2
+            log.warning("audio send timed out, dropped %d bytes", len(data))
+        except Exception:  # noqa: BLE001
+            self.dropped_frames += len(data) // 2
+            log.debug("audio send failed", exc_info=True)
+        finally:
+            self.send_lock.release()
+
+    async def _acquire_send_lock(self, what: str) -> bool:
+        """Never let a stalled socket block the whole session.
+
+        Without this a slow client holds the send lock forever and every later
+        turn waits on it: transcripts stop, answers never reach the browser.
+        """
+        try:
+            await asyncio.wait_for(self.send_lock.acquire(), timeout=SEND_TIMEOUT_S)
+            return True
+        except asyncio.TimeoutError:
+            log.warning("send lock busy (%s); dropping", what)
+            return False
 
     # --- session start ---
     async def start(self, msg: dict) -> None:
