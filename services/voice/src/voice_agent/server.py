@@ -1291,7 +1291,9 @@ async def serve_forever() -> None:
         waits 6-10 s for the container to boot and the models to load.
         """
         path = (request.path if hasattr(request, "path") else "").split("?")[0]
-        if path in ("/health", "/healthz", "/"):
+        # ONLY the health paths: returning None lets the WebSocket handshake
+        # continue. Answering "/" would reject every socket upgrade with HTTP 200.
+        if path in ("/health", "/healthz"):
             ready["ok"] = True
             body = json.dumps(
                 {
