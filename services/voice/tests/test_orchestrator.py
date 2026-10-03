@@ -475,6 +475,8 @@ async def test_reject_cooldown_stops_a_noise_source_from_spamming_turns():
         "thank you thank you thank you thank you thank you thank you",
         "no no no no no no no no no",
         "the the the the the the the the the the",
+        # a cut-off second repetition is still a loop
+        "Phone call with a customer. Phone call w",
     ],
 )
 def test_decoder_loops_are_rejected(text):

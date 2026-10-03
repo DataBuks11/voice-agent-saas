@@ -930,15 +930,37 @@ class Session:
         """
         if not buffered or self.pipeline is None:
             return self.hypothesis
-        covered = self._stt_covered_to >= len(buffered) - STT_TAIL_TOLERANCE_BYTES
-        if covered and self.hypothesis:
-            log.info(
-                "stt final from deltas (%.1fs audio, no re-transcription)",
-                len(buffered) / float(SAMPLE_RATE * 2),
-            )
-            self._stt_consumed = len(buffered)
-            return self.hypothesis
         self._stt_consumed = len(buffered)
+        if self.hypothesis and self._stt_covered_to > 0:
+            # Only the tail is still undecoded. Re-reading the whole utterance cost
+            # 1.8-3.2 s on every turn; a ~1 s tail window costs a fraction of that.
+            tail_start = max(0, self._stt_covered_to - STT_OVERLAP_BYTES)
+            tail = buffered[tail_start:]
+            if len(tail) < STT_MIN_DELTA_BYTES or (
+                self._stt_covered_to >= len(buffered) - STT_TAIL_TOLERANCE_BYTES
+            ):
+                log.info(
+                    "stt final from deltas (%.1fs audio, tail %d bytes, no full pass)",
+                    len(buffered) / float(SAMPLE_RATE * 2),
+                    len(tail),
+                )
+                self._stt_covered_to = len(buffered)
+                return self.hypothesis
+            try:
+                text, confidence = await self.pipeline.transcribe_detailed(tail)
+                self._last_stt_confidence = confidence
+            except Exception:  # noqa: BLE001 - keep what we have
+                log.debug("tail stt failed", exc_info=True)
+                return self.hypothesis
+            if text:
+                kept = [part for part in self._stt_parts if part[0] < tail_start]
+                kept.append((tail_start, text))
+                self._stt_parts = kept
+                self.hypothesis = " ".join(t for _o, t in kept).strip()
+                self._stt_covered_to = len(buffered)
+                if len(self.hypothesis.split()) >= 3:
+                    await self.send_json({"type": "partial", "text": self.hypothesis})
+            return self.hypothesis
         text = ""
         try:
             text, confidence = await self.pipeline.transcribe_detailed(buffered)

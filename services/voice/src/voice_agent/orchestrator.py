@@ -339,23 +339,33 @@ class TranscriptNormalizer:
         """Decoder loops on non-speech: "call with a phone call with a phone".
 
         Whisper repeats a short phrase when it is fed a tone or a clipped word.
-        Such a transcript must never reach the model.
+        Such a transcript must never reach the model. Content words are compared
+        (fillers dropped) so a repeated phrase is caught even when the second copy
+        is cut short.
         """
-        words = [w for w in re.findall(r"[a-z']+", text.lower()) if w]
+        filler = {
+            "a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "is", "are", "was",
+            "were", "be", "been", "being", "with", "at", "it", "this", "that", "as", "by", "from",
+            "do", "does", "did", "have", "has", "had", "will", "would", "can", "could", "should",
+        }
+        raw = re.findall(r"[a-z']+", (text or "").lower())
+        if len(raw) >= 6:
+            # "the the the the..." - filler spam still has to be caught
+            raw_counts: dict[str, int] = {}
+            for w in raw:
+                raw_counts[w] = raw_counts.get(w, 0) + 1
+            if max(raw_counts.values()) >= 5:
+                return True
+        words = [w for w in raw if w not in filler]
         if len(words) < 6:
             return False
-        for size in (2, 3, 4):
-            if len(words) < size * self_repeat_min():
-                continue
-            pattern = words[:size]
-            repeats = 1
-            for i in range(size, len(words) - size + 1, size):
-                if words[i : i + size] == pattern:
-                    repeats += 1
-                else:
-                    break
-            if repeats >= 3 and repeats * size >= 6:
+        # the same two-word phrase twice in one utterance is a loop
+        seen: set[tuple[str, str]] = set()
+        for i in range(len(words) - 1):
+            pair = (words[i], words[i + 1])
+            if pair in seen:
                 return True
+            seen.add(pair)
         # single-token spam ("no no no no no no")
         counts: dict[str, int] = {}
         for w in words:
