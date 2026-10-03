@@ -314,7 +314,9 @@ class FasterWhisperSTT(STTProvider):
         from faster_whisper import WhisperModel
 
         size = model_size or os.getenv("STT_MODEL", "base.en")
+        self._model_name = size
         self._model_is_english_only = size.endswith(".en")
+        self._cpu_threads = cpu_threads
         self._model = WhisperModel(size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
         self._lock = asyncio.Lock()
         configured = (os.getenv("STT_LANGUAGE") or "auto").strip().lower() or "auto"
@@ -323,20 +325,59 @@ class FasterWhisperSTT(STTProvider):
         self._configured_language = configured if configured != "auto" else ""
         log.info("STT ready: faster-whisper %s (int8) lang=%s", size, self._language or "auto")
 
+    def describe(self) -> dict:
+        """What the client and the dev UI need to know about STT."""
+        return {
+            "engine": self.name,
+            "model": self._model_name,
+            "language": self._language or "auto",
+            "englishOnly": self._model_is_english_only,
+            "beamSize": BEAM_SIZE,
+            "inputSampleRate": 16000,
+        }
+
     def set_language(self, language: str) -> None:
-        """Pin the decoder to the agent's language when the operator asked for one."""
+        """Pin the decoder to the agent's language.
+
+        An English-only model cannot decode Hindi/Marathi/... so the multilingual
+        model is loaded lazily the first time such an agent connects, instead of
+        silently mistaking the language for English.
+        """
         if self._configured_language:
             return
         lang = (language or "en").strip().lower()[:2]
         if not lang:
             return
-        # A .en model only decodes English; other languages need the multilingual one.
         if self._model_is_english_only and lang != "en":
-            log.info("stt stays auto (english-only model, got %s)", lang)
+            # base.en literally cannot decode Hindi: swap models instead of guessing.
+            self._load_multilingual(lang)
             return
-        if lang != (self._language or "en")[:2]:
-            self._language = None if lang == "en" and not self._configured_language else lang
-            log.info("stt language -> %s", self._language or "auto")
+        # "auto" stays in force when the operator did not pin a language.
+        self._language = lang if self._configured_language else (None if lang == "en" else lang)
+        log.info("stt language -> %s (model %s)", self._language or "auto", self._model_name)
+
+    def _load_multilingual(self, lang: str) -> None:
+        """Swap to the multilingual model (once) so the agent language is real."""
+        target = os.getenv("STT_MODEL_MULTILINGUAL", "small")
+        if target.endswith(".en"):
+            target = target[:-3]
+        if self._model_name == target:
+            self._language = lang
+            log.info("stt language -> %s (multilingual %s)", lang, target)
+            return
+        try:
+            from faster_whisper import WhisperModel
+
+            log.info("loading multilingual STT %s for language %s", target, lang)
+            self._model = WhisperModel(
+                target, device="cpu", compute_type="int8", cpu_threads=self._cpu_threads
+            )
+            self._model_name = target
+            self._model_is_english_only = False
+            self._language = lang
+        except Exception:  # noqa: BLE001 - never fail a call over this
+            log.exception("multilingual STT unavailable; staying on %s", self._model_name)
+            self._language = None
 
     async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> Transcript:
         async with self._lock:

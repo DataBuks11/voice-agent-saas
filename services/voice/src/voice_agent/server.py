@@ -6,10 +6,20 @@ import json
 import logging
 import os
 import re
+import uuid
 
 import httpx
 from websockets.asyncio.server import serve
 
+from .contract import MIC, validate_mic_frame
+from .orchestrator import (
+    ConversationEngine,
+    EventType,
+    TranscriptNormalizer,
+    Turn,
+    VoiceOrchestrator,
+    split_for_tts,
+)
 from .pipeline import VoiceConfig, VoicePipeline
 from .providers import STTProvider, TTSProvider
 from .real import ApiLLM, VoiceAuth, build_stt, build_tts, set_stt_dictionary
@@ -143,6 +153,14 @@ async def shared_models() -> tuple[STTProvider, TTSProvider]:
         return _stt, _tts
 
 
+def metric_or_zero(value: float | None) -> float:
+    return float(value or 0.0)
+
+
+def workspace_id_hint(session: "Session") -> str:
+    return str(getattr(session, "workspace_id", "") or "")
+
+
 class Session:
     def __init__(self, ws):
         self.ws = ws
@@ -151,7 +169,7 @@ class Session:
         self.llm: ApiLLM | None = None
         self.vad = Vad(VadConfig(), SAMPLE_RATE)
         self.partial = bytearray()
-        self.queue: asyncio.Queue[tuple[str, bytes | str]] = asyncio.Queue(maxsize=2)
+        self.queue: asyncio.Queue[tuple[str, bytes | str, Turn | None]] = asyncio.Queue(maxsize=2)
         self.worker: asyncio.Task | None = None
         self.interrupted = False
         self.turn_active = False
@@ -180,6 +198,11 @@ class Session:
         self.watchdog: asyncio.Task | None = None
         self.turn_watchdog: asyncio.Task | None = None
         self._last_frame_at = __import__("time").time()
+        # Staged orchestrator: owns turns, events and cancellation.
+        self.session_id = uuid.uuid4().hex[:12]
+        self.orch: VoiceOrchestrator | None = None
+        self.trace_to_client = os.getenv("VOICE_TRACE", "").lower() in ("1", "true", "on")
+        self._audio_seq = 0
 
     # --- wire helpers (serialize sends: audio + json interleave) ---
     async def send_json(self, obj: dict) -> None:
@@ -247,6 +270,8 @@ class Session:
             sample_rate=SAMPLE_RATE,
         )
         self.pipeline = VoicePipeline(stt, self.llm, tts, cfg)
+        self.workspace_id = workspace_id
+        self._build_orchestrator()
         self.started = True
         self.call_started = __import__("time").time()
         self.last_activity = self.call_started
@@ -255,9 +280,12 @@ class Session:
         await self.send_json(
             {
                 "type": "ready",
+                "sessionId": self.session_id,
                 "conversationId": conversation_id,
                 "workspaceId": workspace_id,
                 "language": str(conversation_payload.get("language") or "en"),
+                "audio": MIC.to_dict(),
+                "stt": getattr(stt, "describe", lambda: {})(),
             }
         )
         log.info("session ready: workspace=%s conversation=%s", workspace_id, conversation_id)
@@ -269,6 +297,51 @@ class Session:
         )
         if greeting and greeting.strip().lower() not in {"off", "none", "disabled", "false"}:
             self.greet_task = asyncio.create_task(self._auto_greet(greeting.strip()))
+
+    def _build_orchestrator(self) -> None:
+        """Stages + turn ownership. Business logic stays in the pipeline."""
+        assert self.pipeline is not None
+        pipeline = self.pipeline
+
+        async def complete(transcript: str, history: str) -> str:
+            # The API owns RAG, capture, availability, booking and the LLM.
+            return await pipeline.llm.complete(
+                system="You are a helpful voice assistant.",
+                context=history,
+                user=transcript,
+            )
+
+        async def on_audio(pcm: bytes, rate: int, turn: Turn) -> None:
+            await self._send_audio_chunk(pcm, rate, turn)
+
+        orch = VoiceOrchestrator(
+            self.session_id,
+            engine=ConversationEngine(complete, pipeline.state.history_text),
+            on_audio=on_audio,
+            normalizer=TranscriptNormalizer(),
+            allow_barge_in=cfg.allow_barge_in,
+        )
+
+        async def forward(event) -> None:
+            if not self.trace_to_client:
+                return
+            await self.send_json({"type": "trace", **event.to_dict()})
+
+        orch.bus.subscribe(forward)
+        self.orch = orch
+        self.session_id = orch.session_id
+        self.orch.bus.emit(EventType.VOICE_SESSION_STARTED, None, workspaceId=workspace_id_hint(self))
+
+    async def _send_audio_chunk(self, pcm: bytes, rate: int, turn: Turn | None) -> None:
+        """One ordered, sequence-numbered audio frame on the wire."""
+        if self.orch is not None and turn is not None and not self.orch.turns.owner(turn):
+            return  # stale turn: the audio must never reach the speaker
+        self._audio_seq += 1
+        await self.send_bytes(pcm)
+        if self.orch is not None:
+            self.orch.bus.emit(
+                EventType.AUDIO_QUEUE_ADD, turn.turn_id if turn else None, seq=self._audio_seq, bytes=len(pcm)
+            )
 
     async def _load_dictionary(self, headers: dict, workspace_id: str | None) -> None:
         """Prime the recogniser with this workspace's names and terms."""
@@ -300,9 +373,12 @@ class Session:
             return items[0]["id"] if items else None
 
     # --- turn loop ---
-    async def _speak(self, text: str, *, is_greeting: bool = False) -> None:
-        """Sentence-streamed TTS: synthesize + ship sentence by sentence so
-        first audio leaves before the whole reply is rendered."""
+    async def _speak(self, text: str, *, is_greeting: bool = False, turn: Turn | None = None) -> None:
+        """Stream TTS sentence by sentence, owned by one turn.
+
+        Phrase boundaries only (never half a sentence), and nothing is shipped if
+        the turn was cancelled while the synthesiser was working.
+        """
         import time as _time
 
         t0 = _time.time()
@@ -310,26 +386,39 @@ class Session:
         started = False
         total_bytes = 0
         out_rate = SAMPLE_RATE
-        for sentence in _split_sentences(text):
+        orch = self.orch
+        for phrase in split_for_tts(text):
             if self.interrupted:
+                break
+            if turn is not None and orch is not None and not orch.turns.owner(turn):
+                log.info("dropping stale TTS for %s", turn.turn_id)
                 break
             # A queued user utterance cancels the greeting so answers never overlap.
             if is_greeting and self.turn_active:
                 break
-            chunk = await self.pipeline.synthesize(sentence) if self.pipeline else None
+            if orch is not None:
+                orch.bus.emit(EventType.TTS_STARTED, turn.turn_id if turn else None, chars=len(phrase))
+            chunk = await self.pipeline.synthesize(phrase) if self.pipeline else None
             if not chunk or not chunk.pcm16:
                 continue
             if not started:
                 await self.send_json(
-                    {"type": "audio_start", "sampleRate": chunk.sample_rate, "encoding": "pcm16le"}
+                    {
+                        "type": "audio_start",
+                        "sampleRate": chunk.sample_rate,
+                        "encoding": "pcm16le",
+                        "turnId": turn.turn_id if turn else None,
+                    }
                 )
-                # Mute the microphone for the duration of our own voice.
+                # Half-duplex: ignore the echo of our own voice while it plays.
                 self.speaking = True
                 self._echo_candidate = False
                 self._echo_guard_frames = ECHO_GUARD_FRAMES
                 self._interrupt_buf.clear()
                 self.vad.reset()
-                await self.send_json({"type": "speak_start"})
+                await self.send_json({"type": "speak_start", "turnId": turn.turn_id if turn else None})
+                if orch is not None and turn is not None:
+                    orch.speaking_started(turn)
                 started = True
                 t_first = _time.time()
             out_rate = chunk.sample_rate or SAMPLE_RATE
@@ -338,46 +427,71 @@ class Session:
             for i in range(0, len(data), 16384):
                 if self.interrupted or (is_greeting and self.turn_active):
                     break
-                await self.send_bytes(data[i : i + 16384])
+                if turn is not None and orch is not None and not orch.turns.owner(turn):
+                    break
+                await self._send_audio_chunk(data[i : i + 16384], out_rate, turn)
+            if orch is not None:
+                orch.bus.emit(
+                    EventType.TTS_COMPLETED, turn.turn_id if turn else None, phrase=True
+                )
         if started:
-            await self.send_json({"type": "audio_end"})
-        if started:
-            # Audio is buffered by the client, so we are still "speaking" after the
-            # last byte is sent. Stay armed for the playback length, otherwise a
-            # caller who talks over the tail is treated as a fresh turn.
+            await self.send_json({"type": "audio_end", "turnId": turn.turn_id if turn else None})
+            # The client buffers audio, so we are still speaking after the last byte.
             playback_s = total_bytes / float(out_rate * 2)
             if t_first is not None and not self.interrupted:
                 remaining = (t_first + playback_s) - _time.time()
                 if 0 < remaining < 30:
-                    try:
-                        await asyncio.sleep(remaining)
-                    except asyncio.CancelledError:  # noqa: PERF203
-                        raise
+                    await asyncio.sleep(remaining)
             self.speaking = False
             self._echo_candidate = False
-            await self.send_json({"type": "speak_end"})
+            await self.send_json({"type": "speak_end", "turnId": turn.turn_id if turn else None})
             if self._barge_taken and self.vad.in_speech:
-                # The caller is still talking. Leave the utterance open so the
-                # endpoint captures the whole sentence; flushing here would
-                # answer the first word only ("Actually" -> "how can I help you?").
+                # They are still talking: let the endpoint capture the sentence.
                 pass
             elif self._barge_taken:
-                # They stopped while we were still speaking: answer what we have.
                 await self._flush_interruption()
             else:
                 # Pure playback bleed: throw it away.
                 self.vad.reset()
             self._barge_taken = False
+            if orch is not None and turn is not None and orch.turns.owner(turn):
+                orch.speaking_finished(turn)
+        if turn is not None:
+            turn.mark("speak_total", round(_time.time() - t0, 3))
+            log.info("turn %s done: %s", turn.turn_id, self._turn_trace_line(turn))
         log.info(
-            "stage speak first=%s total=%.2fs greeting=%s",
+            "stage speak first=%s total=%.2fs greeting=%s turn=%s",
             f"{t_first - t0:.2f}s" if t_first else "none",
             _time.time() - t0,
             is_greeting,
+            turn.turn_id if turn else "-",
         )
 
+    def _turn_trace_line(self, turn: Turn) -> str:
+        """One line per turn: the timings that explain every latency question."""
+        m = turn.metrics
+        speech = (m.get("speech_end", 0) - m.get("speech_start", 0)) if "speech_end" in m else 0
+        return (
+            f"speech={speech:.2f}s "
+            f"accepted->llm={(m.get('llm_done', 0) - m.get('accepted', 0)):.2f}s "
+            f"llm={(m.get('llm_done', 0) - m.get('accepted', 0)):.2f}s "
+            f"speak={(m.get('speak_total', 0) - m.get('assistant_text', m.get('llm_done', 0))):.2f}s "
+            f"turn={(m.get('turn_complete', 0) - m.get('speech_start', 0)):.2f}s "
+            f"transcript={turn.transcript[:48]!r}"
+        )
+
+    async def _auto_greet(self, text: str) -> None:
+        try:
+            if self.turn_active:
+                return
+            await self._speak(text, is_greeting=True)
+        except Exception:  # noqa: BLE001 - greeting is best-effort
+            log.exception("auto greeting failed")
+
     async def _finalise_utterance(self) -> None:
-        """Close the open utterance and hand it to the pipeline."""
-        self._barge_taken = False
+        """Close the open utterance and hand it to the worker, with its turn."""
+        if self.orch is not None:
+            self.orch.end_speech()
         if not self.vad.in_speech and self.vad.speech_ms <= 0:
             return
         # Read the buffer BEFORE take() resets it, otherwise the final transcript
@@ -387,8 +501,9 @@ class Session:
         if not pcm or self.pipeline is None:
             return
         await self._drain_draft()
+        turn = self.orch.turns.current if self.orch else None
         await self._stt_final(buffered)
-        await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm)
+        await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm, turn)
 
     async def _turn_watchdog(self) -> None:
         """Finalise a turn when the audio stream stops before the VAD sees silence.
@@ -421,46 +536,117 @@ class Session:
         if not pcm or self.pipeline is None:
             return
         await self._drain_draft()
+        turn = self.orch.turns.current if self.orch else None
         await self._stt_final(buffered)
-        await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm)
-
-    async def _auto_greet(self, text: str) -> None:
-        try:
-            if self.turn_active:
-                return
-            await self._speak(text, is_greeting=True)
-        except Exception:  # noqa: BLE001 - greeting is best-effort
-            log.exception("auto greeting failed")
+        await self.enqueue("audio-draft" if self.hypothesis else "audio", pcm, turn)
 
     async def _turn_worker(self) -> None:
+        """One worker, one turn at a time. Every utterance is validated first."""
         while True:
-            kind, payload = await self.queue.get()
-            self.interrupted = False
+            item = await self.queue.get()
+            kind, payload, turn = item if len(item) == 3 else (item[0], item[1], None)
             self.turn_active = True
             self.last_activity = __import__("time").time()
+            orch = self.orch
+            if turn is not None and orch is not None and not orch.turns.owner(turn):
+                # A newer turn superseded this one before we got to it.
+                self.turn_active = False
+                continue
+            # Interruption resets the flag only for the turn that owns it.
+            self.interrupted = bool(turn is not None and turn.cancelled.is_set())
             try:
                 assert self.pipeline is not None
+                if turn is not None:
+                    self.interrupted = False
 
                 async def on_transcript(text: str) -> None:
-                    await self.send_json({"type": "user", "text": text})
-                    await self._send_backchannel(text)
+                    if turn is not None and orch is not None and not orch.turns.owner(turn):
+                        return
+                    await self.send_json(
+                        {"type": "user", "text": text, "turnId": turn.turn_id if turn else None}
+                    )
+                    await self._send_backchannel(text, turn)
 
+                # ---- validate before the model is allowed to run ----
                 if kind == "text":
-                    answer = await self.pipeline.handle_text(payload, on_transcript=on_transcript)
+                    transcript = str(payload or "").strip()
                 else:
                     hypothesis = self.hypothesis if kind == "audio-draft" else ""
                     self.hypothesis = ""
-                    answer = await self.pipeline.handle_audio(
-                        payload, on_transcript=on_transcript, hypothesis=hypothesis
+                    transcript = hypothesis
+                if turn is not None and orch is not None:
+                    accepted, reason = orch.on_final(transcript or "", revision=turn.revision)
+                    if not accepted:
+                        log.info("turn %s rejected: %s", turn.turn_id, reason)
+                        self.turn_active = False
+                        continue
+                if kind == "text":
+                    answer = await self._complete_turn_text(transcript, on_transcript, turn)
+                else:
+                    answer = await self._complete_turn_audio(
+                        payload, on_transcript, turn, hypothesis=transcript
                     )
-                if answer and not self.interrupted:
-                    await self.send_json({"type": "assistant", "text": answer})
-                    await self._speak(answer)
+                if not answer:
+                    self.turn_active = False
+                    continue
+                if turn is not None and orch is not None and not orch.turns.owner(turn):
+                    self.turn_active = False
+                    continue
+                await self.send_json(
+                    {"type": "assistant", "text": answer, "turnId": turn.turn_id if turn else None}
+                )
+                if turn is not None:
+                    turn.mark("assistant_text")
+                await self._speak(answer, turn=turn)
+                if turn is not None:
+                    turn.mark("turn_complete")
+                    log.info(
+                        "TURN %s stt=%.2fs llm=%.2fs tts=%.2fs total=%.2fs turns=%s rejected=%s stale=%s",
+                        turn.turn_id,
+                        float(metric_or_zero(turn.metrics.get("llm_ms"), 0)) / 1000.0,
+                        float(metric_or_zero(turn.metrics.get("llm_done"), 0) - metric_or_zero(turn.metrics.get("accepted"), 0)),
+                        float(metric_or_zero(turn.metrics.get("speak_total"), 0) - metric_or_zero(turn.metrics.get("assistant_text"), 0)),
+                        float(metric_or_zero(turn.metrics.get("turn_complete"), 0) - metric_or_zero(turn.metrics.get("speech_start"), 0)),
+                        orch.stats["turns"] if orch else 0,
+                        orch.stats["rejected"] if orch else 0,
+                        orch.stats["stale_discarded"] if orch else 0,
+                    )
+            except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
+                raise
             except Exception as exc:  # noqa: BLE001 - surface to client
                 log.exception("turn failed")
+                if self.orch is not None:
+                    self.orch.error("turn_failed", message=str(exc))
                 await self.send_json({"type": "error", "reason": "turn_failed", "message": str(exc)})
             finally:
                 self.turn_active = False
+
+    async def _complete_turn_text(self, text: str, on_transcript, turn: Turn | None) -> str:
+        orch = self.orch
+        assert self.pipeline is not None
+        if orch is not None and turn is not None:
+            await on_transcript(text)
+            self.pipeline.state.add("user", text)
+            answer = await orch.run_conversation(turn)
+            self.pipeline.state.add("assistant", answer)
+            return answer
+        return await self.pipeline.handle_text(text, on_transcript=on_transcript)
+
+    async def _complete_turn_audio(
+        self, pcm: bytes, on_transcript, turn: Turn | None, hypothesis: str = ""
+    ) -> str:
+        orch = self.orch
+        assert self.pipeline is not None
+        # The validated transcript is authoritative; audio is only a fallback for
+        # clients that do not send text.
+        if hypothesis:
+            await on_transcript(hypothesis)
+            self.pipeline.state.add("user", hypothesis)
+            if orch is not None and turn is not None:
+                answer = await orch.run_conversation(turn)
+                self.pipeline.state.add("assistant", answer)
+                return answer
+        return await self.pipeline.handle_audio(pcm, on_transcript=on_transcript, hypothesis=hypothesis)
 
     async def _stt_final(self, buffered: bytes) -> str:
         """Transcribe the complete utterance.
@@ -548,7 +734,7 @@ class Session:
         if self._draft_api_task is None or self._draft_api_task.done():
             self._draft_api_task = asyncio.create_task(self.draft_text(text))
 
-    async def _send_backchannel(self, text: str = "") -> None:
+    async def _send_backchannel(self, text: str = "", turn: Turn | None = None) -> None:
         """Pre-cached acknowledgement so the caller never hears dead air.
 
         The client holds it for ~300ms and drops it if the real answer arrives
@@ -560,6 +746,8 @@ class Session:
         tts = _tts
         if tts is None or self.interrupted or not _wants_backchannel(text):
             return
+        if turn is not None and self.orch is not None and not self.orch.turns.owner(turn):
+            return
         phrase = BACKCHANNELS[_first_backchannel % len(BACKCHANNELS)]
         _first_backchannel += 1
         try:
@@ -569,30 +757,36 @@ class Session:
             return
         if chunk is None or not getattr(chunk, "pcm16", b"") or self.interrupted:
             return
+        if self.orch is not None:
+            self.orch.bus.emit(EventType.BACKCHANNEL, turn.turn_id if turn else None, phrase=phrase)
         await self.send_json(
             {
                 "type": "backchannel",
                 "text": phrase,
                 "sampleRate": chunk.sample_rate,
                 "encoding": "pcm16le",
+                "turnId": turn.turn_id if turn else None,
             }
         )
         data = chunk.pcm16
         for i in range(0, len(data), 16384):
             await self.send_bytes(data[i : i + 16384])
 
-    async def enqueue(self, kind: str, payload) -> None:
+    async def enqueue(self, kind: str, payload, turn: Turn | None = None) -> None:
+        """Queue one utterance for the worker, newest wins, owner travels with it."""
         if self.turn_active or not self.queue.empty():
             self.interrupted = True
+            if self.orch is not None:
+                self.orch.interrupt("superseded_by_new_utterance")
             if self.queue.full():
                 try:
                     self.queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-        await self.queue.put((kind, payload))
+        await self.queue.put((kind, payload, turn))
 
     async def enqueue_utterance(self, pcm: bytes) -> None:
-        await self.enqueue("audio", pcm)
+        await self.enqueue("audio", pcm, self.orch.turns.current if self.orch else None)
 
     # --- receive loop ---
     async def run(self) -> None:
@@ -646,6 +840,8 @@ class Session:
                             self._echo_candidate = False
                             self._barge_taken = True
                             self.interrupted = True
+                            if self.orch is not None:
+                                self.orch.interrupt("barge_in")
                             # Replay the kept audio so the opening words survive.
                             self.vad.reset()
                             kept = bytes(self._interrupt_buf)
@@ -663,8 +859,15 @@ class Session:
                         self._hyp_parts = []
                         self._stt_consumed = 0
                         self.hypothesis = ""
-                        await self.send_json({"type": "hearing"})
+                        turn = self.orch.begin_speech() if self.orch else None
+                        if turn is not None:
+                            turn_id = turn.turn_id
+                        else:
+                            turn_id = None
+                        await self.send_json({"type": "hearing", "turnId": turn_id})
                     elif event == "endpoint":
+                        if self.orch is not None:
+                            self.orch.end_speech()
                         await self._finalise_utterance()
                     else:
                         buffered = self.vad.peek()
@@ -690,7 +893,10 @@ class Session:
                         if draft:
                             await self.draft_text(text)
                         else:
-                            await self.enqueue("text", text)
+                            turn = self.orch.begin_speech() if self.orch else None
+                            if self.orch is not None:
+                                self.orch.end_speech()
+                            await self.enqueue("text", text, turn)
                 elif kind == "interrupt":
                     self.interrupted = True
                     if self.pipeline is not None:
@@ -737,6 +943,19 @@ class Session:
                 log.exception("watchdog tick failed")
 
     async def close(self) -> None:
+        if self.orch is not None:
+            try:
+                self.orch.end()
+                log.info(
+                    "voice trace session=%s turns=%s rejected=%s stale=%s interruptions=%s",
+                    self.session_id,
+                    self.orch.stats["turns"],
+                    self.orch.stats["rejected"],
+                    self.orch.stats["stale_discarded"],
+                    self.orch.stats["interruptions"],
+                )
+            except Exception:  # noqa: BLE001 - teardown must not raise
+                log.exception("orchestrator shutdown failed")
         if self.turn_watchdog:
             self.turn_watchdog.cancel()
         if self.watchdog:

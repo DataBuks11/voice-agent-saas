@@ -2,6 +2,7 @@ import React from "react";
 import { api, type AgentRow } from "../lib/api";
 import { getWorkspace, getToken } from "../lib/session";
 import { useToast } from "../main";
+import { PlaybackQueue } from "../lib/playbackQueue";
 
 const WS_URL = (
   import.meta.env.VITE_VOICE_WS_URL ?? "wss://voice-runtime-production-dc24.up.railway.app"
@@ -25,6 +26,10 @@ export function VoicePage() {
   const [agentId, setAgentId] = React.useState<string>("");
   const [elapsed, setElapsed] = React.useState(0);
   const [interim, setInterim] = React.useState("");
+  // Ordered, turn-aware assistant audio queue (see lib/playbackQueue).
+  const playbackQueueRef = React.useRef(new PlaybackQueue());
+  const audioSeqRef = React.useRef(0);
+  const playTurnRef = React.useRef<string | null>(null);
   // "server" = our faster-whisper (accurate, tunable); "browser" = Chrome Web Speech (fast, rougher)
   const [sttMode, setSttMode] = React.useState<"server" | "browser">(
     (import.meta.env.VITE_STT_MODE as "server" | "browser") || "server",
@@ -35,8 +40,7 @@ export function VoicePage() {
   const micCtxRef = React.useRef<AudioContext | null>(null);
   const micNodeRef = React.useRef<ScriptProcessorNode | null>(null);
   const playCtxRef = React.useRef<AudioContext | null>(null);
-  const chunksRef = React.useRef<Uint8Array[]>([]);
-  const rateRef = React.useRef<number | null>(null);
+    const rateRef = React.useRef<number | null>(null);
   const pingRef = React.useRef<number | null>(null);
   const timerRef = React.useRef<number | null>(null);
   const lineIdRef = React.useRef(1);
@@ -213,7 +217,6 @@ export function VoicePage() {
       /* noop */
     }
     playCtxRef.current = null;
-    chunksRef.current = [];
     rateRef.current = null;
     setStatus("idle");
     setVoiceState("idle");
@@ -222,7 +225,9 @@ export function VoicePage() {
 
   React.useEffect(() => teardown, [teardown]);
 
-  const stopPlayback = React.useCallback(() => {
+  const stopPlayback = React.useCallback((reason = "flush") => {
+    const dropped = playbackQueueRef.current.flush();
+    if (dropped > 0) pushLine("system", `audio queue flushed (${reason}): ${dropped} bytes dropped`);
     for (const n of playNodesRef.current) {
       try {
         n.onended = null;
@@ -235,7 +240,6 @@ export function VoicePage() {
     playNextRef.current = null;
     if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
     playEndTimerRef.current = null;
-    chunksRef.current = [];
     rateRef.current = null;
     resumeRecog();
   }, [resumeRecog]);
@@ -245,7 +249,6 @@ export function VoicePage() {
     playEndTimerRef.current = null;
     playNodesRef.current = [];
     playNextRef.current = null;
-    chunksRef.current = [];
     rateRef.current = null;
     setVoiceState((s) => (s === "speaking" ? "listening" : s));
     resumeRecog();
@@ -300,50 +303,31 @@ export function VoicePage() {
     }
   };
 
-  const flushAudio = (final: boolean) => {
-    const rate = rateRef.current;
-    if (!rate) return;
-    const parts = chunksRef.current;
-    const total = parts.reduce((s, p) => s + p.byteLength, 0);
-    if (total < 2) return;
-    const merged = new Uint8Array(total);
-    let off = 0;
-    for (const p of parts) {
-      merged.set(p, off);
-      off += p.byteLength;
-    }
-    chunksRef.current = [];
-    const blockSize = 8192; // 4096 samples @ any rate
-    const processLen = final
-      ? merged.byteLength - (merged.byteLength % 2)
-      : Math.floor(merged.byteLength / blockSize) * blockSize;
-    if (processLen === 0) {
-      chunksRef.current = [merged];
-      return;
-    }
-    const block = merged.subarray(0, processLen);
-    const leftover = merged.subarray(processLen);
-    if (leftover.byteLength) chunksRef.current = [new Uint8Array(leftover)];
-    try {
-      const ctx = playCtxRef.current ?? new AudioContext();
-      playCtxRef.current = ctx;
-      void ctx.resume();
-      const pcm = new Int16Array(block.buffer, block.byteOffset, block.byteLength / 2);
-      const buffer = ctx.createBuffer(1, pcm.length, rate);
-      const ch = buffer.getChannelData(0);
-      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-      const node = ctx.createBufferSource();
-      node.buffer = buffer;
-      node.connect(ctx.destination);
-      const now = ctx.currentTime;
-      if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.05;
-      node.start(playNextRef.current);
-      playNextRef.current += buffer.duration;
-      playNodesRef.current.push(node);
-      if (final) schedulePlayEnd((playNextRef.current - ctx.currentTime) * 1000 + 150);
-    } catch (err) {
-      pushLine("system", `playback failed: ${(err as Error).message}`);
-      finishPlayback();
+  /** Schedule every complete block the queue can hand over, in order. */
+  const scheduleAudio = (final: boolean) => {
+    const blocks = playbackQueueRef.current.drain(final);
+    for (const { pcm, rate } of blocks) {
+      try {
+        const ctx = playCtxRef.current ?? new AudioContext();
+        playCtxRef.current = ctx;
+        void ctx.resume();
+        const samples = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.byteLength / 2);
+        const buffer = ctx.createBuffer(1, samples.length, rate);
+        const ch = buffer.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 32768;
+        const node = ctx.createBufferSource();
+        node.buffer = buffer;
+        node.connect(ctx.destination);
+        const now = ctx.currentTime;
+        if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.05;
+        node.start(playNextRef.current);
+        playNextRef.current += buffer.duration;
+        playNodesRef.current.push(node);
+        if (final) schedulePlayEnd((playNextRef.current - ctx.currentTime) * 1000 + 150);
+      } catch (err) {
+        pushLine("system", `playback failed: ${(err as Error).message}`);
+        finishPlayback();
+      }
     }
   };
 
@@ -401,10 +385,13 @@ export function VoicePage() {
             backchannelChunksRef.current.push(new Uint8Array(buf));
             return;
           }
-          if (rateRef.current != null) {
+          if (playbackQueueRef.current.sampleRate > 0) {
             if (backchannelRateRef.current != null) dropBackchannel();
-            chunksRef.current.push(new Uint8Array(buf));
-            flushAudio(false);
+            // Ordered, deduplicated, turn-aware. A rejected frame (duplicate or
+            // stale turn) is dropped here instead of being played out of order.
+            if (playbackQueueRef.current.push(playTurnRef.current, audioSeqRef.current++, buf)) {
+              scheduleAudio(false);
+            }
           }
           return;
         }
@@ -463,25 +450,29 @@ export function VoicePage() {
           // audio_start, so stopping playback here would discard the reply that
           // is already buffered (transcript visible, no sound).
         } else if (type === "interrupted") {
-          stopPlayback();
+          stopPlayback("interrupted");
           setVoiceState("listening");
           pushLine("system", "barge-in: caller interrupted");
         } else if (type === "audio_start") {
           replyStartedRef.current = true;
+          playTurnRef.current = (msg.turnId as string | undefined) ?? null;
+          audioSeqRef.current = 0;
+          playbackQueueRef.current.reset(Number(msg.sampleRate ?? 24000), playTurnRef.current);
           if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
           backchannelTimerRef.current = null;
           backchannelChunksRef.current = [];
           backchannelRateRef.current = null;
           rateRef.current = Number(msg.sampleRate ?? 24000);
-          chunksRef.current = [];
-          playNextRef.current = null;
+                playNextRef.current = null;
           if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
           playEndTimerRef.current = null;
           setVoiceState("speaking");
           pauseRecog();
         } else if (type === "audio_end") {
-          if (chunksRef.current.length === 0 && playNodesRef.current.length === 0) finishPlayback();
-          else flushAudio(true);
+          scheduleAudio(true);
+          if (playbackQueueRef.current.pendingBytes() === 0 && playNodesRef.current.length === 0) {
+            finishPlayback();
+          }
         } else if (type === "pong") {
           /* keepalive */
         } else if (type === "error") {

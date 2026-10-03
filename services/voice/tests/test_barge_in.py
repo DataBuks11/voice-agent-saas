@@ -280,7 +280,7 @@ async def test_words_spoken_during_our_audio_are_not_lost(monkeypatch):
     assert session.speaking is False
     # their words were queued for an answer instead of discarded
     assert session.queue.qsize() == 1
-    kind, _payload = session.queue.get_nowait()
+    kind, _payload, _turn = session.queue.get_nowait()
     assert kind.startswith("audio")
 
 
@@ -377,7 +377,7 @@ async def test_final_transcript_covers_the_whole_utterance(monkeypatch):
     session, ws, pipeline = await _session([frame(1500, 0.3), frame(600, 0.0)])
     await session.run()
     assert session.queue.qsize() == 1
-    kind, _pcm = session.queue.get_nowait()
+    kind, _pcm, _turn = session.queue.get_nowait()
     assert kind == "audio-draft"
     # the whole utterance reached the recogniser, not just the trailing delta
     assert max(stt.seen) >= 1500 * 16000 // 1000 * 2
@@ -431,7 +431,7 @@ async def test_caller_who_keeps_talking_is_captured_whole(monkeypatch):
     assert pipeline.barge_ins == 1
     # one utterance, containing everything the caller said
     assert session.queue.qsize() == 1
-    _kind, payload = session.queue.get_nowait()
+    _kind, payload, _turn = session.queue.get_nowait()
     spoken_ms = len(payload) / (16000 * 2) * 1000
     assert spoken_ms >= 1700, f"only {spoken_ms:.0f} ms captured"
     assert session.hypothesis == "Actually, tell me about the enterprise plan instead."

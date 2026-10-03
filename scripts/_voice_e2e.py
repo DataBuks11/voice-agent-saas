@@ -86,6 +86,7 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
         print(f"[audio] utterance {len(pcm)} bytes (~{len(pcm)/2/16000:.1f}s)")
     t0 = time.time()
     first_audio: list[float] = []
+    traces: list[tuple] = []
     got = {"user": None, "assistant": None, "audio": 0, "ready": None, "errors": [],
            "backchannel": None, "backchannel_bytes": 0, "user_at": None}
     async with websockets.connect(url, max_size=2**24, open_timeout=30) as ws:
@@ -114,6 +115,9 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
                 got["ready"] = data
             elif kind == "backchannel":
                 got["backchannel"] = data.get("text")
+            elif kind == "trace":
+                tr = data.get("type")
+                traces.append((round(time.time() - t0, 2), tr, data.get("turnId"), (data.get("data") or {}).get("reason")))
             elif kind == "user":
                 got["user"] = data.get("text")
                 got["user_at"] = time.time()
@@ -133,6 +137,11 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
             elif kind == "error":
                 got["errors"].append(data)
                 print(f"[error] {data}")
+
+    if traces:
+        print("[trace] first 14 stage events:")
+        for ts, kind, turn_id, reason in traces[:14]:
+            print(f"   {ts:5.2f}s {kind:<26} turn={turn_id} {reason or ''}")
 
     ok = True
     if not got["ready"]:
