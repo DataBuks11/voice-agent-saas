@@ -6,6 +6,7 @@
  * The fake mic only produces a tone, so turns are sent as text; everything else
  * (queue, playback, interruption handling) is the production code path.
  */
+import { existsSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 
 const BASE = process.env.WEB_BASE_URL ?? "https://voice-agent-saas-web.vercel.app";
@@ -59,16 +60,23 @@ const main = async () => {
     }),
   });
 
-  const browser = await puppeteer.launch({
-    executablePath: CHROME,
-    headless: "new",
-    args: [
-      "--no-sandbox",
-      "--autoplay-policy=no-user-gesture-required",
-      "--use-fake-ui-for-media-stream",
-      "--use-fake-device-for-media-stream",
-    ],
-  });
+  // A real sentence instead of Chrome's pure tone: the tone is (correctly)
+  // treated as noise, so it cannot prove the speech path works.
+  const MIC_WAV = process.env.TEST_MIC_WAV ?? "";
+  const SPEECH_PHRASE = process.env.TEST_MIC_TEXT ?? "How much does the growth plan cost?";
+  const micArgs = [
+    "--no-sandbox",
+    "--autoplay-policy=no-user-gesture-required",
+    "--use-fake-ui-for-media-stream",
+    "--use-fake-device-for-media-stream",
+  ];
+  if (MIC_WAV && existsSync(MIC_WAV)) {
+    micArgs.push(`--use-file-for-fake-audio-capture=${MIC_WAV}`);
+    console.log(`      mic: ${MIC_WAV} (${SPEECH_PHRASE})`);
+  } else {
+    console.log("      mic: chrome tone (set TEST_MIC_WAV for real speech)");
+  }
+  const browser = await puppeteer.launch({ executablePath: CHROME, headless: "new", args: micArgs });
   try {
     const page = await browser.newPage();
     await page.evaluateOnNewDocument(() => {
@@ -167,6 +175,39 @@ const main = async () => {
       }
       return last;
     };
+
+    // ---- real speech in: the phrase in the WAV must come back as the transcript
+    if (MIC_WAV && existsSync(MIC_WAV)) {
+      const spokenAt = Date.now();
+      let heard = null;
+      while (Date.now() - spokenAt < 60000 && !heard) {
+        const now = await page.evaluate(() => ({
+          answers: window.__voice.answers,
+          byTurn: JSON.parse(JSON.stringify(window.__voice.byTurn)),
+        }));
+        heard = Object.values(now.byTurn).find((t) => t.user) ?? null;
+        if (!heard) await new Promise((r) => setTimeout(r, 700));
+      }
+      const said = heard?.user ?? "";
+      const words = SPEECH_PHRASE.toLowerCase().split(/\s+/);
+      const matched = words.filter((w) => said.toLowerCase().includes(w)).length;
+      check(
+        "spoken sentence was transcribed",
+        matched / words.length >= 0.6,
+        `${JSON.stringify(said)} matched ${matched}/${words.length} words`,
+      );
+      // and the agent must answer it with audio
+      let answered = false;
+      const answerEnd = Date.now() + 45000;
+      while (Date.now() < answerEnd && !answered) {
+        answered = await page.evaluate(
+          () => window.__voice.answers.length > 0 && window.__voice.audio > 10000,
+        );
+        if (!answered) await new Promise((r) => setTimeout(r, 700));
+      }
+      const texts = await page.evaluate(() => window.__voice.answers.map((a) => a.text));
+      check("spoken sentence was answered with audio", answered, JSON.stringify(texts).slice(0, 120));
+    }
 
     for (const [i, turn] of TURNS.entries()) {
       await waitForSilence();

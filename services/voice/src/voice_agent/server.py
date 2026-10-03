@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 
 import httpx
@@ -1281,8 +1282,37 @@ async def handler(ws) -> None:
 
 async def serve_forever() -> None:
     await shared_models()
-    async with serve(handler, "0.0.0.0", PORT, ping_interval=20, ping_timeout=20):
-        log.info("voice runtime listening on 0.0.0.0:%s (api=%s)", PORT, API_BASE)
+    ready = {"ok": False, "since": time.time()}
+
+    async def health(ws, request):
+        """Tiny HTTP endpoint so the platform can keep the container warm.
+
+        Without a health check the runtime scales to zero and the next caller
+        waits 6-10 s for the container to boot and the models to load.
+        """
+        path = (request.path if hasattr(request, "path") else "").split("?")[0]
+        if path in ("/health", "/healthz", "/"):
+            ready["ok"] = True
+            body = json.dumps(
+                {
+                    "ok": True,
+                    "uptime_s": round(time.time() - ready["since"], 1),
+                    "stt": _stt.name if _stt else None,
+                    "tts": _tts.name if _tts else None,
+                }
+            )
+            return ws.respond(200, "application/json", body)
+        return ws.respond(404, "text/plain", "not found")
+
+    async with serve(
+        handler,
+        "0.0.0.0",
+        PORT,
+        ping_interval=20,
+        ping_timeout=20,
+        process_request=health,
+    ):
+        log.info("voice runtime listening on 0.0.0.0:%s (api=%s) health=/health", PORT, API_BASE)
         await asyncio.Future()
 
 
