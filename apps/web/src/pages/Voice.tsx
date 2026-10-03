@@ -26,6 +26,9 @@ export function VoicePage() {
   const [agentId, setAgentId] = React.useState<string>("");
   const [elapsed, setElapsed] = React.useState(0);
   const [interim, setInterim] = React.useState("");
+  // Live answer text, painted phrase by phrase while the voice speaks.
+  const answerLiveRef = React.useRef("");
+  const [answerLive, setAnswerLive] = React.useState("");
   const [trace, setTrace] = React.useState<
     { seq: number; type: string; turn: string; detail: string }[]
   >([]);
@@ -448,7 +451,13 @@ export function VoicePage() {
           pushLine("user", msg.text as string);
           setVoiceState("thinking");
           if (rateRef.current != null) stopPlayback();
+        } else if (type === "answer_delta") {
+          // The reply is painted while it is being spoken.
+          answerLiveRef.current += String(msg.text ?? "");
+          setAnswerLive(answerLiveRef.current);
         } else if (type === "assistant") {
+          answerLiveRef.current = "";
+          setAnswerLive("");
           pushLine("assistant", msg.text as string);
 } else if (type === "speak_start") {
           // Informational only: "our voice starts here". It arrives AFTER

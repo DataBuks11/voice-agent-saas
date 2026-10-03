@@ -823,7 +823,14 @@ class Session:
         self._phrase_started = False
         self._phrase_bytes = 0
         self._streamed_audio = True
-        answer = await orch.speak_stream(turn, lambda phrase: self._speak_phrase(phrase, turn))
+        async def on_delta(phrase: str) -> None:
+            await self.send_json(
+                {"type": "answer_delta", "text": phrase, "turnId": turn.turn_id}
+            )
+
+        answer = await orch.speak_stream(
+            turn, lambda phrase: self._speak_phrase(phrase, turn), on_delta
+        )
         if not self._phrase_started:
             self._streamed_audio = False
         if answer:
@@ -874,7 +881,14 @@ class Session:
         self._phrase_started = False
         self._phrase_bytes = 0
         self._streamed_audio = True
-        answer = await orch.speak_stream(turn, lambda phrase: self._speak_phrase(phrase, turn))
+        async def on_delta(phrase: str) -> None:
+            await self.send_json(
+                {"type": "answer_delta", "text": phrase, "turnId": turn.turn_id}
+            )
+
+        answer = await orch.speak_stream(
+            turn, lambda phrase: self._speak_phrase(phrase, turn), on_delta
+        )
         if not self._phrase_started:
             self._streamed_audio = False
         if answer:

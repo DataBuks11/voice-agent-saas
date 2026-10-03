@@ -776,7 +776,12 @@ class VoiceOrchestrator:
             self.turns.restore(pending)
             log.info("new speech rejected (%s); keeping the pending answer", new_turn.reject_reason)
 
-    async def speak_stream(self, turn: Turn, speak: Callable[[str], Awaitable[None]]) -> str:
+    async def speak_stream(
+        self,
+        turn: Turn,
+        speak: Callable[[str], Awaitable[None]],
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
         """Stream the answer and speak each completed phrase immediately.
 
         Returns the full text. Cancelling the turn stops both the model and the
@@ -795,7 +800,7 @@ class VoiceOrchestrator:
                     return ""
                 parts.append(delta)
                 for phrase in buffer.push(delta):
-                    await self._speak_phrase(turn, phrase, speak, parts)
+                    await self._speak_phrase(turn, phrase, speak, parts, on_delta)
         except asyncio.CancelledError:  # pragma: no cover - barge-in
             self.stats["cancelled_tasks"] += 1
             raise
@@ -812,7 +817,7 @@ class VoiceOrchestrator:
             self.stats["cancelled_tasks"] += 1
             return ""
         for phrase in buffer.flush():
-            await self._speak_phrase(turn, phrase, speak, parts)
+            await self._speak_phrase(turn, phrase, speak, parts, on_delta)
         text = "".join(parts).strip()
         turn.answer = text
         turn.mark("llm_done")
@@ -824,10 +829,14 @@ class VoiceOrchestrator:
         phrase: str,
         speak: Callable[[str], Awaitable[None]],
         parts: list[str],
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         if not phrase or not self.turns.is_live(turn):
             return
         self.bus.emit(EventType.TTS_STARTED, turn.turn_id, chars=len(phrase))
+        # The reply text must appear while it is being spoken, not afterwards.
+        if on_delta is not None:
+            await on_delta(phrase)
         t0 = time.time()
         await speak(phrase)
         if not turn.metrics.get("tts_first_audio"):

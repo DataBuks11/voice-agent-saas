@@ -716,3 +716,5 @@ input, textarea, select { font: inherit; }
 .vt-type { min-width: 190px; color: #7fd1b9; }
 .vt-turn { min-width: 110px; opacity: 0.6; }
 .vt-detail { opacity: 0.75; }
+
+.said.answering { color: #b9d8ff; opacity: 0.95; }
