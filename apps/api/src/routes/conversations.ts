@@ -16,7 +16,7 @@ import { parseSlotIso } from "../lib/captureFlow.js";
 import { getSupabase } from "../lib/supabase.js";
 import { requireTenant } from "../lib/tenant.js";
 import { embedAll } from "../lib/embeddings.js";
-import { cacheGet, cachePut, complete, completeStream } from "../lib/llm.js";
+import { cacheGet, cachePut, complete, completeStream, webSearch } from "../lib/llm.js";
 import {
   applyAnswer,
   currentSlot,
@@ -1039,6 +1039,18 @@ if (retrieved.length === 0 && docCount > 0) {
               verdict = { ok: true, confidence: 0.5, issues: ["conversational reply, not knowledge-grounded"], safeText: answerText };
             }
             answerSource = llmResult.source;
+
+            // The documents cannot answer this. Rather than dead-ending on "I
+            // don't have verified information", look it up and say where it came from.
+            if (!verdict.ok && looksFactual(body.content)) {
+              const found = await webSearch(body.content);
+              if (found.text) {
+                answerText = found.text;
+                verdict = { ok: true, confidence: 0.6, issues: ["answered from the web, not from the documents"], safeText: answerText };
+                answerSource = "websearch";
+                console.log(`web search answered: sources=${found.sources.length}`);
+              }
+            }
           }
         }
       }

@@ -211,7 +211,15 @@ class DeepgramSTT(STTProvider):
         self._base = (os.getenv("DEEPGRAM_BASE_URL") or "https://api.deepgram.com/v1").rstrip("/")
         self._timeout = float(os.getenv("DEEPGRAM_TIMEOUT_S", "20"))
         self._client = httpx.AsyncClient(timeout=self._timeout)
-        log.info("STT ready: deepgram %s lang=%s", self._model, self._language)
+        # The caller we settled on: background voices and side conversations must
+        # never become the transcript we answer.
+        self._speaker: str | None = None
+        log.info("STT ready: deepgram %s lang=%s diarize=%s", self._model, self._language,
+                 self._diarize)
+
+    @property
+    def _diarize(self) -> bool:
+        return (os.getenv("STT_DIARIZE") or "1").strip().lower() not in ("0", "false", "no")
 
     def _params(self) -> dict[str, str]:
         params = {
@@ -222,12 +230,41 @@ class DeepgramSTT(STTProvider):
         }
         if self._language and self._language != "auto":
             params["language"] = self._language
+        if self._diarize:
+            # Tells us who spoke, so one voice answers and the rest is noise.
+            params["diarize"] = "true"
+            params["utterances"] = "true"
         # Deepgram biases towards these terms, the hosted equivalent of the
         # local whisper prompt (agent names, known customers).
         terms = [t for t in stt_dictionary()[:80] if t]
         for term in terms:
             params["keyterm"] = term
         return params
+
+    def _caller_text(self, utterances: list[dict]) -> str:
+        """Join one speaker's speech only.
+
+        On the first turn the caller is whoever talks most; afterwards we keep
+        answering that same voice, so a loud TV or a passer-by cannot take the
+        call over mid-conversation.
+        """
+        spoken: dict[str, float] = {}
+        for u in utterances:
+            if u.get("transcript"):
+                spoken[str(u.get("speaker"))] = spoken.get(str(u.get("speaker")), 0.0) + float(
+                    u.get("end", 0) - u.get("start", 0))
+        if not spoken:
+            return ""
+        if self._speaker not in spoken:
+            self._speaker = max(spoken, key=lambda k: spoken[k])
+            log.info("caller voice: speaker %s (%.1fs)", self._speaker, spoken[self._speaker])
+        keep = " ".join(str(u.get("transcript") or "").strip()
+                        for u in utterances if str(u.get("speaker")) == self._speaker)
+        dropped = sorted((k for k in spoken if k != self._speaker), key=lambda k: -spoken[k])
+        if dropped:
+            log.info("ignored %d other voice(s) totalling %.1fs",
+                     len(dropped), sum(spoken[k] for k in dropped))
+        return keep.strip()
 
     async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> Transcript:
         if len(pcm16) < 320:
@@ -266,9 +303,14 @@ class DeepgramSTT(STTProvider):
             log.error("deepgram failed: %s %s", last_status, r.text[:200])
             return Transcript(text="", confidence=0.0)
         payload = r.json() or {}
-        channels = payload.get("results", {}).get("channels") or []
+        results = payload.get("results") or {}
+        channels = results.get("channels") or []
         alternatives = (channels[0].get("alternatives") or [{}])[0] if channels else {}
-        text = str(alternatives.get("transcript") or "").strip()
+        utterances = results.get("utterances") or []
+        if self._diarize and utterances:
+            text = self._caller_text(utterances)
+        else:
+            text = str(alternatives.get("transcript") or "").strip()
         confidence = float(alternatives.get("confidence") or 0.0)
         detected = str(channels[0].get("detected_language") or self._language) if channels else self._language
         return Transcript(text=text, confidence=confidence, language=detected)

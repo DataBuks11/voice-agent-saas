@@ -253,6 +253,50 @@ export async function completeStream(opts: LlmOptions, onDelta: (chunk: string) 
 }
 
 /** Extract the knowledge block out of the built context and return the most relevant slice. */
+export function webSearchEnabled(): boolean {
+  return (process.env.WEB_SEARCH ?? "on").toLowerCase() !== "off" && Boolean(process.env.LLM_API_KEY);
+}
+
+/**
+ * Search the web when the documents cannot answer, so the caller gets a real
+ * answer with sources instead of "I don't have verified information".
+ *
+ * Google's search grounding is a native Gemini tool, so this uses the
+ * generateContent endpoint rather than the OpenAI-compatible one.
+ */
+export async function webSearch(question: string, timeoutMs = 9000): Promise<{ text: string; sources: string[] }> {
+  const apiKey = process.env.LLM_API_KEY ?? "";
+  if (!apiKey || !webSearchEnabled()) return { text: "", sources: [] };
+  const configured = (process.env.LLM_BASE_URL || "").replace(/\/$/, "");
+  const nativeBase = configured.includes("generativelanguage")
+    ? configured.replace(/\/openai$/, "")
+    : "https://generativelanguage.googleapis.com/v1beta";
+  const model = process.env.LLM_WEB_SEARCH_MODEL || process.env.LLM_MODEL || "gemini-2.5-flash";
+  try {
+    const res = await fetch(`${nativeBase}/models/${model}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: question }] }],
+        tools: [{ google_search: {} }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return { text: "", sources: [] };
+    const data = (await res.json()) as any;
+    const parts = data?.candidates?.[0]?.content?.parts ?? [];
+    const text = parts.map((p: any) => p?.text ?? "").join("").trim();
+    const chunks = data?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+    const sources: string[] = chunks
+      .map((c: any) => c?.web?.uri)
+      .filter((u: unknown): u is string => typeof u === "string" && u.startsWith("http"));
+    return { text, sources: [...new Set(sources)].slice(0, 3) };
+  } catch {
+    return { text: "", sources: [] };
+  }
+}
+
 function groundedAnswer(opts: LlmOptions): string {
   const blocks = [...opts.context.matchAll(/# Knowledge \[([^\]]+) score=([0-9.]+)\]\n([\s\S]*?)(?=\n# Knowledge \[|\n# Conversation|$)/g)];
   if (!blocks.length) return opts.fallback;

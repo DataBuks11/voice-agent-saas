@@ -174,3 +174,25 @@ def test_an_explicitly_configured_language_always_wins(monkeypatch):
     stt = FasterWhisperSTT("base.en")
     stt.set_language("hi")  # the agent asks for Hindi...
     assert stt._language == "ta"  # ...but the operator pinned Tamil
+
+
+def test_only_the_caller_voice_becomes_the_transcript():
+    """Regression: background speech answered as if it were the caller."""
+    from voice_agent.real import DeepgramSTT
+
+    stt = DeepgramSTT.__new__(DeepgramSTT)
+    stt._speaker = None
+    turns = [
+        {"speaker": 0, "start": 0.0, "end": 1.4, "transcript": "I want to book a cleaning"},
+        {"speaker": 1, "start": 1.4, "end": 3.2, "transcript": "turn it down a bit"},
+        {"speaker": 0, "start": 3.2, "end": 4.0, "transcript": "for tomorrow morning"},
+    ]
+    assert stt._caller_text(turns) == "I want to book a cleaning for tomorrow morning"
+
+    # Once the caller is known, a louder second voice cannot take the call over.
+    louder_noise = [
+        {"speaker": 0, "start": 0.0, "end": 0.3, "transcript": "yes"},
+        {"speaker": 1, "start": 0.3, "end": 6.0, "transcript": "the match last night"},
+    ]
+    assert stt._caller_text(louder_noise) == "yes"
+    assert DeepgramSTT._caller_text(stt, []) == ""
