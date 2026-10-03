@@ -71,6 +71,16 @@ def tts_uses_http() -> bool:
     return bool(os.getenv("TTS_API_KEY")) and (provider == "" or provider in _HTTP_OK)
 
 
+def stt_uses_deepgram() -> bool:
+    """Deepgram when asked for explicitly, or when only its key is configured."""
+    provider = (os.getenv("STT_PROVIDER") or "").strip().lower()
+    if provider in _LOCAL:
+        return False
+    if provider == "deepgram":
+        return True
+    return provider == "" and bool(os.getenv("DEEPGRAM_API_KEY"))
+
+
 def wav_bytes(pcm16: bytes, sample_rate: int) -> bytes:
     """PCM16 mono -> WAV container (OpenAI-compatible /audio/transcriptions input)."""
     buf = io.BytesIO()
@@ -184,7 +194,89 @@ class HttpTTS(TTSProvider):
         return AudioChunk(pcm16=r.content, sample_rate=self._sample_rate)
 
 
+class DeepgramSTT(STTProvider):
+    """Deepgram pre-recorded /v1/listen (nova-3).
+
+    Cloud STT is roughly 0.2-0.4 s per turn and, unlike local whisper on a small
+    CPU, does not turn speaker bleed into confident nonsense -- which is what
+    caused phantom barge-ins and invented answers.
+    """
+
+    name = "deepgram"
+
+    def __init__(self) -> None:
+        self._key = os.environ["DEEPGRAM_API_KEY"]
+        self._model = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
+        self._language = (os.getenv("STT_LANGUAGE") or "en").strip()
+        self._base = (os.getenv("DEEPGRAM_BASE_URL") or "https://api.deepgram.com/v1").rstrip("/")
+        self._timeout = float(os.getenv("DEEPGRAM_TIMEOUT_S", "20"))
+        self._client = httpx.AsyncClient(timeout=self._timeout)
+        log.info("STT ready: deepgram %s lang=%s", self._model, self._language)
+
+    def _params(self) -> dict[str, str]:
+        params = {
+            "model": self._model,
+            "smart_format": "true",
+            "punctuate": "true",
+            "filler_words": "false",
+        }
+        if self._language and self._language != "auto":
+            params["language"] = self._language
+        # Deepgram biases towards these terms, the hosted equivalent of the
+        # local whisper prompt (agent names, known customers).
+        terms = [t for t in stt_dictionary()[:80] if t]
+        for term in terms:
+            params["keyterm"] = term
+        return params
+
+    async def transcribe(self, pcm16: bytes, sample_rate: int = 16000) -> Transcript:
+        if len(pcm16) < 320:
+            return Transcript(text="", confidence=0.0)
+        if sample_rate != 16000:
+            audio = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32)
+            target = int(len(audio) * 16000 / sample_rate)
+            if target < 160:
+                return Transcript(text="", confidence=0.0)
+            audio = np.interp(np.linspace(0, len(audio) - 1, target), np.arange(len(audio)), audio)
+            pcm16 = audio.astype(np.int16).tobytes()
+        wav = wav_bytes(pcm16, 16000)
+        last_status = 0
+        payload: dict = {}
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(_retry_delay(attempt - 1))
+            try:
+                r = await self._client.post(
+                    f"{self._base}/listen",
+                    params=self._params(),
+                    content=wav,
+                    headers={
+                        "authorization": f"Token {self._key}",
+                        "content-type": "audio/wav",
+                    },
+                )
+            except httpx.HTTPError as exc:
+                log.error("deepgram error: %s", exc)
+                return Transcript(text="", confidence=0.0)
+            last_status = r.status_code
+            if r.status_code == 429 or r.status_code >= 500:
+                continue
+            break
+        if last_status >= 400:
+            log.error("deepgram failed: %s %s", last_status, r.text[:200])
+            return Transcript(text="", confidence=0.0)
+        payload = r.json() or {}
+        channels = payload.get("results", {}).get("channels") or []
+        alternatives = (channels[0].get("alternatives") or [{}])[0] if channels else {}
+        text = str(alternatives.get("transcript") or "").strip()
+        confidence = float(alternatives.get("confidence") or 0.0)
+        detected = str(channels[0].get("detected_language") or self._language) if channels else self._language
+        return Transcript(text=text, confidence=confidence, language=detected)
+
+
 def build_stt() -> STTProvider:
+    if stt_uses_deepgram():
+        return DeepgramSTT()
     if stt_uses_http():
         return HttpSTT()
     return FasterWhisperSTT()
