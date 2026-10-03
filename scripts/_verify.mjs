@@ -31,6 +31,7 @@ const steps = [
   { name: "latency", cmd: "node", args: ["scripts/_latency_probe.mjs"] },
   { name: "voice call (text + audio)", cmd: "python", args: ["scripts/_voice_e2e.py", "--timeout", "60"], env: { VOICE_WS_URL: VOICE_WS, PIPER_VOICE: PIPER } },
   { name: "voice barge-in", cmd: "python", args: ["scripts/_voice_bargein.py"], env: { VOICE_WS_URL: VOICE_WS, PIPER_VOICE: PIPER } },
+  { name: "voice in the browser", cmd: "node", args: ["scripts/_voice_browser.mjs"] },
   { name: "web app", cmd: "node", args: ["scripts/_web_e2e.mjs"] },
 ];
 // The path may contain spaces; hand it over as an env var so no shell quoting applies.
