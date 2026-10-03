@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -215,6 +216,16 @@ class Session:
 
     # --- session start ---
     async def start(self, msg: dict) -> None:
+        try:
+            await self._start(msg)
+        except asyncio.CancelledError:  # pragma: no cover
+            raise
+        except Exception as exc:  # noqa: BLE001 - a failed start must be visible
+            log.exception("session start failed")
+            with contextlib.suppress(Exception):
+                await self.send_json({"type": "error", "reason": "start_failed", "message": str(exc)})
+
+    async def _start(self, msg: dict) -> None:
         token = msg.get("token")
         workspace_id = msg.get("workspaceId")
         agent_id = msg.get("agentId")
@@ -271,7 +282,7 @@ class Session:
         )
         self.pipeline = VoicePipeline(stt, self.llm, tts, cfg)
         self.workspace_id = workspace_id
-        self._build_orchestrator()
+        self._build_orchestrator(cfg.allow_barge_in)
         self.started = True
         self.call_started = __import__("time").time()
         self.last_activity = self.call_started
@@ -298,7 +309,7 @@ class Session:
         if greeting and greeting.strip().lower() not in {"off", "none", "disabled", "false"}:
             self.greet_task = asyncio.create_task(self._auto_greet(greeting.strip()))
 
-    def _build_orchestrator(self) -> None:
+    def _build_orchestrator(self, allow_barge_in: bool = True) -> None:
         """Stages + turn ownership. Business logic stays in the pipeline."""
         assert self.pipeline is not None
         pipeline = self.pipeline
@@ -319,7 +330,7 @@ class Session:
             engine=ConversationEngine(complete, pipeline.state.history_text),
             on_audio=on_audio,
             normalizer=TranscriptNormalizer(),
-            allow_barge_in=cfg.allow_barge_in,
+            allow_barge_in=allow_barge_in,
         )
 
         async def forward(event) -> None:

@@ -449,3 +449,17 @@ def test_backchannel_kept_for_real_questions():
         "can you tell me about the enterprise plan",
     ]:
         assert srv._wants_backchannel(t) is True, t
+
+
+@pytest.mark.asyncio
+async def test_session_start_never_drops_the_socket_silently(monkeypatch):
+    """A failure during start() must reach the client, not close the socket."""
+    session, ws, _ = await _session([])
+    monkeypatch.setattr(
+        srv.ApiLLM, "__init__", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    await session.start({"token": "t", "workspaceId": "w"})
+    kinds = [e.get("type") for e in ws.events()]
+    assert "error" in kinds
+    err = next(e for e in ws.events() if e.get("type") == "error")
+    assert err.get("reason") == "start_failed"
