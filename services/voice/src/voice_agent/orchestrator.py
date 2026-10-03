@@ -607,6 +607,7 @@ class VoiceOrchestrator:
     def on_final(self, text: str, revision: int = 0, confidence: float | None = None) -> tuple[bool, str | None]:
         """Returns (accepted, reason). Only an accepted turn may reach the LLM."""
         turn = self.turns.current
+        log.info("validate %s text=%r", turn.turn_id if turn else "-", (text or "")[:40])
         if turn is None:
             return False, "no_turn"
         if turn.cancelled.is_set() or turn is not self.turns.current:

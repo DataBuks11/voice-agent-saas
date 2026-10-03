@@ -642,6 +642,7 @@ class Session:
                 assert self.pipeline is not None
                 if turn is not None:
                     self.interrupted = False
+                self._turn_task = asyncio.current_task()
 
                 async def on_transcript(text: str) -> None:
                     if turn is not None and orch is not None and not orch.turns.is_live(turn):
@@ -685,7 +686,13 @@ class Session:
                         self.turn_active = False
                         continue
                 if kind == "text":
+                    log.info("worker -> conversation for %s", turn.turn_id if turn else "-")
                     answer = await self._complete_turn_text(transcript, on_transcript, turn)
+                    log.info(
+                        "worker -> answer %s (%s)",
+                        turn.turn_id if turn else "-",
+                        (answer or "")[:48],
+                    )
                 else:
                     answer = await self._complete_turn_audio(
                         payload, on_transcript, turn, hypothesis=transcript
