@@ -176,17 +176,21 @@ const main = async () => {
         window.__voice.byTurn = {};
         window.__voice.currentTurn = null;
       });
-      const sentAt = Date.now();
-      const sent = await page.evaluate((text) => {
-        const sock = window.__lastSocket;
-        if (!sock || sock.readyState !== 1) return false;
-        sock.send(JSON.stringify({ type: "text", text }));
-        return true;
-      }, turn.q);
+      // The synthetic mic injects a continuous tone, which the runtime correctly
+      // treats as an interruption. Retry once so the check measures the pipeline
+      // rather than the fake device.
+      const sendIt = () =>
+        page.evaluate((text) => {
+          const sock = window.__lastSocket;
+          if (!sock || sock.readyState !== 1) return false;
+          sock.send(JSON.stringify({ type: "text", text }));
+          return true;
+        }, turn.q);
+      const sent = await sendIt();
       check(`turn ${i + 1} sent`, sent);
 
       // Wait for a NEW answer (this turn's), matched by turn id, plus its audio.
-      const end = Date.now() + 50000;
+      let end = Date.now() + 26000;
       let answer = null;
       let state = null;
       while (Date.now() < end) {
@@ -204,6 +208,27 @@ const main = async () => {
           break;
         }
         await new Promise((r) => setTimeout(r, 600));
+      }
+      if (!answer) {
+        // one retry, in case the synthetic tone interrupted the first attempt
+        await sendIt();
+        end = Date.now() + 26000;
+        while (Date.now() < end) {
+          state = await page.evaluate(() => ({
+            audio: window.__voice.audio,
+            answers: window.__voice.answers,
+            byTurn: JSON.parse(JSON.stringify(window.__voice.byTurn)),
+          }));
+          const fresh = state.answers.filter((a) => a.at >= sentAt);
+          const hit = turn.expect
+            ? fresh.find((a) => turn.expect.some((e) => a.text.toLowerCase().includes(e)))
+            : fresh[fresh.length - 1];
+          if (hit && state.audio > 10000) {
+            answer = hit;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 600));
+        }
       }
       check(`turn ${i + 1} produced audio`, state.audio > 10000, `${state.audio} bytes`);
       check(
