@@ -1301,8 +1301,9 @@ async def serve_forever() -> None:
                     "tts": _tts.name if _tts else None,
                 }
             )
-            return ws.respond(200, "application/json", body)
-        return ws.respond(404, "text/plain", "not found")
+            # websockets>=14 respond(status, text); the content type is text/plain
+            return ws.respond(200, body)
+        return ws.respond(404, "not found")
 
     async with serve(
         handler,
