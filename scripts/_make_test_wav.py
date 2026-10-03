@@ -16,7 +16,7 @@ DEFAULT_TEXT = "How much does the growth plan cost?"
 OUT = os.getenv("TEST_MIC_WAV", os.path.join(os.environ.get("TEMP", "."), "voice_test_mic.wav"))
 
 
-def synth_16k(text: str) -> bytes:
+def synth_16k(text: str):
     import io
 
     import numpy as np
@@ -36,15 +36,28 @@ def synth_16k(text: str) -> bytes:
     n_out = int(round(samples.size * 16000 / src))
     idx = np.linspace(0.0, samples.size - 1.0, n_out)
     out = np.interp(idx, np.arange(samples.size), samples)
-    # a little silence either side so the VAD sees clean boundaries
-    pad = np.zeros(int(0.35 * 16000), dtype=np.float32)
-    out = np.concatenate([pad, out, pad])
-    return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+    return out
+
+
+def build(text: str, repeats: int = 4) -> bytes:
+    """Repeat the sentence with gaps.
+
+    Chrome starts the fake capture at an arbitrary offset in the file, so a
+    single copy can be captured from the middle and decode to a fragment. With
+    repeats there is always at least one complete sentence in the stream, which
+    is also how a real caller behaves when they repeat themselves.
+    """
+    import numpy as np
+
+    speech = synth_16k(text)
+    gap = np.zeros(int(0.45 * 16000), dtype=np.float32)
+    joined = np.concatenate([np.concatenate([gap, speech]) for _ in range(repeats)])
+    return np.clip(joined, -32768, 32767).astype(np.int16).tobytes()
 
 
 def main() -> int:
     text = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TEXT
-    pcm = synth_16k(text)
+    pcm = build(text)
     with wave.open(OUT, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)

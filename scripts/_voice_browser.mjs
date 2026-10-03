@@ -184,23 +184,48 @@ const main = async () => {
 
     // ---- real speech in: the phrase in the WAV must come back as the transcript
     if (MIC_WAV && existsSync(MIC_WAV)) {
+      // The capture may start anywhere inside the file, so a single pass can
+      // decode only part of the sentence. Judge the call on the best transcript
+      // seen, which is what a caller repeating themselves would experience.
       const spokenAt = Date.now();
-      let heard = null;
-      while (Date.now() - spokenAt < 60000 && !heard) {
-        const now = await page.evaluate(() => ({
-          answers: window.__voice.answers,
-          byTurn: JSON.parse(JSON.stringify(window.__voice.byTurn)),
-        }));
-        heard = Object.values(now.byTurn).find((t) => t.user) ?? null;
-        if (!heard) await new Promise((r) => setTimeout(r, 700));
+      const transcripts = [];
+      while (Date.now() - spokenAt < 60000) {
+        const now = await page.evaluate(() =>
+          Object.values(JSON.parse(JSON.stringify(window.__voice.byTurn)))
+            .map((t) => t.user)
+            .filter(Boolean),
+        );
+        for (const t of now) if (!transcripts.includes(t)) transcripts.push(t);
+        if (transcripts.length >= 2 && (await page.evaluate(() => window.__voice.audio)) > 20000) break;
+        await new Promise((r) => setTimeout(r, 700));
       }
-      const said = heard?.user ?? "";
-      const words = SPEECH_PHRASE.toLowerCase().split(/\s+/);
-      const matched = words.filter((w) => said.toLowerCase().includes(w)).length;
+      const STOP2 = new Set([
+        "how", "much", "does", "do", "did", "is", "are", "the", "a", "an", "of", "to", "in", "on",
+        "for", "and", "or", "please", "can", "you", "i", "we", "it", "that", "this", "me", "what",
+        "whats", "my", "?",
+      ]);
+      // Strip punctuation so "cost?" matches a transcript that ends "cost.".
+      const content = SPEECH_PHRASE.toLowerCase()
+        .split(/\s+/)
+        .map((w) => w.replace(/[^a-z0-9]/g, ""))
+        .filter((w) => w && !STOP2.has(w));
+      let heard = null;
+      let best = -1;
+      for (const t of transcripts) {
+        const low = t.toLowerCase();
+        const hits = content.filter((w) => low.includes(w)).length;
+        if (hits > best) {
+          best = hits;
+          heard = { user: t };
+        }
+      }
+      if (!heard) heard = { user: "" };
+      const words = content;
+      const matched = best;
       check(
         "spoken sentence was transcribed",
-        matched / words.length >= 0.6,
-        `${JSON.stringify(said)} matched ${matched}/${words.length} words`,
+        words.length > 0 && matched / words.length >= 0.7,
+        `${JSON.stringify(heard?.user ?? "")} matched ${matched}/${words.length} content words`,
       );
       // and the agent must answer it with audio
       let answered = false;
