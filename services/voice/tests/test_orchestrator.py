@@ -684,3 +684,39 @@ def test_typed_input_is_never_swallowed_by_the_noise_cooldown():
     assert orch.ensure_speech_turn() is None  # audio path respects the cooldown
     typed = orch.ensure_speech_turn(force=True)
     assert typed is not None and typed is not noise
+
+
+def test_asking_the_same_question_twice_is_allowed(monkeypatch):
+    """Regression: the duplicate guard refused a legitimate repeat.
+
+    A caller asking the same thing again is normal; only a duplicate STT event
+    inside the duplicate window is suppressed.
+    """
+    import voice_agent.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "DUPLICATE_WINDOW_S", 0.0)
+    orch, calls, _audio = make_orchestrator()
+    first = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("what are your hours")[0] is True
+    second = orch.begin_speech()
+    orch.end_speech()
+    accepted, reason = orch.on_final("what are your hours")
+    assert accepted is True, reason
+    assert second.turn_id != first.turn_id
+
+
+def test_the_same_event_firing_twice_is_still_rejected():
+    """A duplicate final within the window is one utterance, not two."""
+    import time as _t
+
+    orch, calls, _audio = make_orchestrator()
+    orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("book me for tomorrow")[0] is True
+    _t.sleep(0.05)
+    orch.begin_speech()
+    orch.end_speech()
+    accepted, reason = orch.on_final("book me for tomorrow")
+    assert accepted is False
+    assert reason and reason.startswith("duplicate_of")

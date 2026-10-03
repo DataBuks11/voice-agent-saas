@@ -289,6 +289,8 @@ class TurnRegistry:
 # Ignore new speech for this long after a turn was rejected as noise.
 REJECT_COOLDOWN_S = float(__import__("os").getenv("REJECT_COOLDOWN_S", "0.6"))
 
+# Two identical transcripts this close together are the same event, twice.
+DUPLICATE_WINDOW_S = float(__import__("os").getenv("DUPLICATE_WINDOW_S", "2.5"))
 # A decode below this confidence is far more likely to be a hallucination on
 # noise than a real word.
 MIN_STT_CONFIDENCE = float(__import__("os").getenv("MIN_STT_CONFIDENCE", "0.35"))
@@ -582,7 +584,7 @@ class VoiceOrchestrator:
         # After rejecting a turn, ignore new speech briefly. A steady noise source
         # (fan, music, a beep) otherwise opens a turn every couple of seconds.
         self.reject_cooldown_until = 0.0
-        self._accepted_transcripts: dict[str, str] = {}
+        self._accepted_transcripts: dict[str, tuple[str, float]] = {}
         self.stats = {
             "turns": 0,
             "rejected": 0,
@@ -709,11 +711,19 @@ class VoiceOrchestrator:
             self.stats["stale_discarded"] += 1
             self.bus.emit(EventType.STAGE_REJECTED, turn.turn_id, reason="cancelled_final", stage="stt")
             return False, "cancelled_final"
+        # Duplicate detection exists to catch the SAME final event firing twice,
+        # not a caller repeating a question. Only a very recent identical turn
+        # counts, otherwise "what are your hours?" twice in a row is refused.
         duplicate_of = None
         norm = self.validator.normalizer.normalize(text)
-        for other_id, other in self._accepted_transcripts.items():
-            if other_id != turn.turn_id and other and norm and other == norm:
-                duplicate_of = other_id
+        if norm:
+            for other_id, (other, at) in reversed(list(self._accepted_transcripts.items())):
+                if other_id == turn.turn_id:
+                    continue
+                if other != norm:
+                    continue
+                if (time.time() - at) <= DUPLICATE_WINDOW_S:
+                    duplicate_of = other_id
                 break
         accepted, reason, clean = self.validator.validate(
             text=text,
@@ -736,7 +746,7 @@ class VoiceOrchestrator:
         turn.transcript = clean
         turn.accepted = True
         turn.mark("accepted")
-        self._accepted_transcripts[turn.turn_id] = clean
+        self._accepted_transcripts[turn.turn_id] = (clean, time.time())
         self.bus.emit(EventType.USER_TURN_ACCEPTED, turn.turn_id, text=clean)
         self._settle_pending(turn, confirmed=True)
         # The accepted turn owns the session again; a noise turn must not keep it.
