@@ -379,3 +379,32 @@ async def test_noise_between_llm_and_audio_does_not_delete_the_answer():
     assert first.cancelled.is_set() is False
     assert orch.turns.is_live(first) is True
     assert orch.turns.is_live(noise) is True
+
+
+@pytest.mark.asyncio
+async def test_queued_noise_never_silences_a_live_answer():
+    """Regression: enqueue() used to set a global flag that emptied _speak."""
+    orch, calls, audio = make_orchestrator(answer="Growth is $199")
+    turn = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("how much does the growth plan cost")
+    assert await orch.run_conversation(turn) == "Growth is $199"
+    # a noise turn arrives while the answer is being spoken
+    noise = orch.ensure_speech_turn()
+    orch.note_queued_utterance(noise)
+    assert turn.cancelled.is_set() is False
+    orch.speaking_started(turn)
+    orch.speaking_finished(turn)
+    assert orch.state is TurnState.LISTENING
+
+
+@pytest.mark.asyncio
+async def test_queued_utterance_during_playback_is_an_interruption():
+    orch, _calls, _audio = make_orchestrator()
+    turn = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("tell me about the enterprise plan")
+    orch.speaking_started(turn)  # audio is playing
+    other = orch.ensure_speech_turn()
+    orch.note_queued_utterance(other)
+    assert orch.stats["interruptions"] >= 1

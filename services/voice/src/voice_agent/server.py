@@ -398,8 +398,17 @@ class Session:
         total_bytes = 0
         out_rate = SAMPLE_RATE
         orch = self.orch
+        # With a turn owner, cancellation is per turn. The legacy global flag is
+        # only consulted for turn-less playback (greeting), otherwise a queued
+        # utterance would silence an answer that is still perfectly valid.
+        def cancelled() -> bool:
+            if turn is not None:
+                return orch is not None and not orch.turns.is_live(turn)
+            return self.interrupted
+
         for phrase in split_for_tts(text):
-            if self.interrupted:
+            if cancelled():
+                log.info("speak cancelled before %r", phrase[:32])
                 break
             if turn is not None and orch is not None and not orch.turns.is_live(turn):
                 log.info("dropping cancelled TTS for %s", turn.turn_id)
@@ -440,9 +449,7 @@ class Session:
             data = chunk.pcm16
             total_bytes += len(data)
             for i in range(0, len(data), 16384):
-                if self.interrupted or (is_greeting and self.turn_active):
-                    break
-                if turn is not None and orch is not None and not orch.turns.is_live(turn):
+                if cancelled() or (is_greeting and self.turn_active):
                     break
                 await self._send_audio_chunk(data[i : i + 16384], out_rate, turn)
             if orch is not None:
@@ -453,7 +460,7 @@ class Session:
             await self.send_json({"type": "audio_end", "turnId": turn.turn_id if turn else None})
             # The client buffers audio, so we are still speaking after the last byte.
             playback_s = total_bytes / float(out_rate * 2)
-            if t_first is not None and not self.interrupted:
+            if t_first is not None and not cancelled():
                 remaining = (t_first + playback_s) - _time.time()
                 if 0 < remaining < 30:
                     await asyncio.sleep(remaining)
@@ -804,11 +811,16 @@ class Session:
             await self.send_bytes(data[i : i + 16384])
 
     async def enqueue(self, kind: str, payload, turn: Turn | None = None) -> None:
-        """Queue one utterance for the worker, newest wins, owner travels with it."""
+        """Queue one utterance for the worker, newest wins, owner travels with it.
+
+        The legacy `interrupted` flag is only set for turn-less playback; a real
+        turn is cancelled by the orchestrator once its speech is confirmed.
+        """
         if self.turn_active or not self.queue.empty():
-            self.interrupted = True
+            if turn is None:
+                self.interrupted = True
             if self.orch is not None:
-                self.orch.interrupt("superseded_by_new_utterance")
+                self.orch.note_queued_utterance(turn)
             if self.queue.full():
                 try:
                     self.queue.get_nowait()

@@ -640,6 +640,20 @@ class VoiceOrchestrator:
         self.bus.emit(EventType.ASSISTANT_TURN_COMPLETED, turn.turn_id)
         self._require(TurnState.LISTENING, "assistant_done")
 
+    def note_queued_utterance(self, turn: Turn | None) -> None:
+        """A new utterance was queued. Interrupt only if it is already confirmed.
+
+        Opening a turn is not proof of speech: the transcript decides. Cancelling
+        here is what used to delete valid answers whenever a noise turn appeared.
+        """
+        if turn is None:
+            return
+        if turn.cancelled.is_set():
+            return
+        if self.audio_playback_active or self.state is TurnState.SPEAKING:
+            # Audio is already playing: that is an unambiguous interruption.
+            self.interrupt("interrupted_playback")
+
     def interrupt(self, reason: str = "caller_speech") -> None:
         """Cancel the current turn and drop everything it was producing."""
         turn = self.turns.current
