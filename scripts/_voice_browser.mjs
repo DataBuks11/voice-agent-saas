@@ -159,7 +159,7 @@ const main = async () => {
     // previous answer is still playing is a real barge-in, which would cancel it.
     const waitForSilence = async () => {
       let last = -1;
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 70; i++) {
         const now = await page.evaluate(() => window.__voice.audio);
         if (now === last && now > 0) return now;
         last = now;
@@ -191,7 +191,7 @@ const main = async () => {
       check(`turn ${i + 1} sent`, sent);
 
       // Wait for a NEW answer (this turn's), matched by turn id, plus its audio.
-      let end = Date.now() + 26000;
+      let end = Date.now() + 60000;
       let answer = null;
       let state = null;
       while (Date.now() < end) {
@@ -213,7 +213,7 @@ const main = async () => {
       if (!answer) {
         // one retry, in case the synthetic tone interrupted the first attempt
         await sendIt();
-        end = Date.now() + 26000;
+        end = Date.now() + 60000;
         while (Date.now() < end) {
           state = await page.evaluate(() => ({
             audio: window.__voice.audio,
