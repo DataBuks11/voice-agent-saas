@@ -493,6 +493,46 @@ class ApiLLM(LLMProvider):
         text = answer.get("content") if isinstance(answer, dict) else answer
         return str(text or data.get("reply") or "")
 
+    async def stream(self, system: str, context: str, user: str):
+        """Yield answer text as the API produces it.
+
+        The caller synthesises each sentence the moment it is complete, so the
+        first audio leaves while the model is still writing the rest.
+        """
+        import json as _json
+
+        payload: dict = {"workspaceId": self._ws, "content": user, "stream": True}
+        if self._agent_id:
+            payload["agentId"] = self._agent_id
+        headers = await self._headers()
+        try:
+            async with self._client.stream(
+                "POST", f"/v1/conversations/{self._cid}/messages", json=payload, headers=headers
+            ) as response:
+                if response.status_code >= 400:
+                    log.error("stream turn failed: %s", response.status_code)
+                    yield await self.complete(system, context, user)
+                    return
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    try:
+                        event = _json.loads(line[5:].strip())
+                    except Exception:  # noqa: BLE001 - keep-alive noise
+                        continue
+                    kind = event.get("type")
+                    if kind == "delta" and event.get("text"):
+                        yield str(event["text"])
+                    elif kind == "error":
+                        log.error("stream error: %s", event.get("message"))
+        except asyncio.CancelledError:  # pragma: no cover - barge-in
+            raise
+        except Exception as exc:  # noqa: BLE001 - fall back to one shot
+            log.warning("stream unavailable (%s); using single-shot completion", exc)
+            text = await self.complete(system, context, user)
+            if text:
+                yield text
+
     async def aclose(self) -> None:
         await self._client.aclose()
 

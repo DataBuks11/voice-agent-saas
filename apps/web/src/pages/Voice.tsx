@@ -26,6 +26,9 @@ export function VoicePage() {
   const [agentId, setAgentId] = React.useState<string>("");
   const [elapsed, setElapsed] = React.useState(0);
   const [interim, setInterim] = React.useState("");
+  const [trace, setTrace] = React.useState<
+    { seq: number; type: string; turn: string; detail: string }[]
+  >([]);
   // Ordered, turn-aware assistant audio queue (see lib/playbackQueue).
   const playbackQueueRef = React.useRef(new PlaybackQueue());
   const audioSeqRef = React.useRef(0);
@@ -585,6 +588,21 @@ export function VoicePage() {
                   ))}
                 </select>
               ) : null}
+              {trace.length > 0 && (
+                <details className="voice-trace">
+                  <summary>voice trace ({trace.length})</summary>
+                  <div className="voice-trace-rows">
+                    {trace.map((r) => (
+                      <div key={`${r.seq}-${r.type}`} className="voice-trace-row">
+                        <code>{String(r.seq).padStart(3, "0")}</code>
+                        <span className="vt-type">{r.type}</span>
+                        <span className="vt-turn">{r.turn}</span>
+                        {r.detail && <span className="vt-detail">{r.detail}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               <button className="btn btn-primary" onClick={toggle}>
                 {active ? "End call" : "Start call"}
               </button>

@@ -561,3 +561,116 @@ def test_cancelled_turn_cannot_be_validated():
     assert accepted is False
     assert reason == "cancelled_final"
     assert calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8: stream the model, speak whole phrases only
+# --------------------------------------------------------------------------- #
+def test_phrase_buffer_only_releases_complete_phrases():
+    from voice_agent.orchestrator import PhraseBuffer
+
+    buf = PhraseBuffer()
+    assert buf.push("Your appointment is confirmed") == []
+    assert buf.push(". Your booking is for Saturday at 9 AM") == [
+        "Your appointment is confirmed."
+    ]
+    assert buf.flush() == ["Your booking is for Saturday at 9 AM"]
+
+
+def test_phrase_buffer_never_splits_a_word():
+    from voice_agent.orchestrator import PhraseBuffer
+
+    buf = PhraseBuffer(max_chars=40)
+    out = []
+    for ch in "one two three four five six seven eight nine ten eleven twelve":
+        out += buf.push(ch)
+    out += buf.flush()
+    joined = " ".join(out)
+    assert joined.split() == "one two three four five six seven eight nine ten eleven twelve".split()
+
+
+@pytest.mark.asyncio
+async def test_first_phrase_is_spoken_before_the_model_finishes():
+    """Regression: audio used to start only after the whole answer existed."""
+    from voice_agent.orchestrator import ConversationEngine
+
+    spoken: list[tuple[str, float]] = []
+
+    async def complete(user: str, ctx: str) -> str:  # pragma: no cover - unused
+        return "unused"
+
+    async def stream(user: str, ctx: str):
+        for piece in ["Your appointment is confirmed. ", "Your booking is ", "Saturday at 9 AM."]:
+            yield piece
+            await asyncio.sleep(0.01)
+
+    async def speak(phrase: str) -> None:
+        spoken.append((phrase, asyncio.get_event_loop().time()))
+
+    engine = ConversationEngine(complete, lambda: "", stream=stream)
+    orch = VoiceOrchestrator("s1", engine=engine, on_audio=lambda *a: asyncio.sleep(0))
+    turn = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("book me for saturday")[0] is True
+    answer = await orch.speak_stream(turn, speak)
+    assert answer == "Your appointment is confirmed. Your booking is Saturday at 9 AM."
+    phrases = [p for p, _ in spoken]
+    assert phrases == ["Your appointment is confirmed.", "Your booking is Saturday at 9 AM."]
+    # the first audio started while the model was still producing text
+    assert "llm_first_token" in turn.metrics
+    assert "tts_first_audio" in turn.metrics
+
+
+@pytest.mark.asyncio
+async def test_interrupting_a_stream_stops_the_audio_immediately():
+    from voice_agent.orchestrator import ConversationEngine
+
+    spoken: list[str] = []
+
+    async def complete(user: str, ctx: str) -> str:  # pragma: no cover
+        return "unused"
+
+    async def stream(user: str, ctx: str):
+        yield "First sentence is here. "
+        await asyncio.sleep(0.05)
+        yield "Second sentence should never be spoken."
+
+    async def speak(phrase: str) -> None:
+        spoken.append(phrase)
+        if phrase.startswith("First"):
+            orch.interrupt("caller_speech")
+
+    engine = ConversationEngine(complete, lambda: "", stream=stream)
+    orch = VoiceOrchestrator("s1", engine=engine, on_audio=lambda *a: asyncio.sleep(0))
+    turn = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("book me")[0] is True
+    await orch.speak_stream(turn, speak)
+    assert spoken == ["First sentence is here."]
+    assert orch.stats["cancelled_tasks"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_gives_a_controlled_fallback():
+    from voice_agent.orchestrator import ConversationEngine
+
+    spoken: list[str] = []
+
+    async def complete(user: str, ctx: str) -> str:  # pragma: no cover
+        return "unused"
+
+    async def stream(user: str, ctx: str):
+        raise RuntimeError("model exploded")
+        yield ""  # pragma: no cover
+
+    async def speak(phrase: str) -> None:
+        spoken.append(phrase)
+
+    engine = ConversationEngine(complete, lambda: "", stream=stream)
+    orch = VoiceOrchestrator("s1", engine=engine, on_audio=lambda *a: asyncio.sleep(0))
+    turn = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("hello there")
+    answer = await orch.speak_stream(turn, speak)
+    assert "temporary problem" in answer
+    assert spoken and "temporary problem" in spoken[0]

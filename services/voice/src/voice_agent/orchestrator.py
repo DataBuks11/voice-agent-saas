@@ -29,7 +29,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Iterable
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterable
 
 log = logging.getLogger("voice.orchestrator")
 
@@ -432,13 +432,50 @@ class ConversationEngine:
     """Wraps the existing business pipeline (RAG/capture/booking/LLM).
 
     Only accepted turns reach this object, and it refuses to run twice for the
-    same turn id.
+    same turn id. `stream` yields answer text as the model produces it so the
+    first sentence can be spoken while the rest is still being written.
     """
 
-    def __init__(self, complete: Callable[[str, str], Awaitable[str]], history: Callable[[], str]) -> None:
+    def __init__(
+        self,
+        complete: Callable[[str, str], Awaitable[str]],
+        history: Callable[[], str],
+        stream: Callable[[str, str], Any] | None = None,
+    ) -> None:
         self._complete = complete
+        self._stream = stream
         self._history = history
         self.handled: set[str] = set()
+
+    async def run_stream(
+        self, turn: Turn, transcript: str, registry: TurnRegistry, bus: EventBus
+    ) -> AsyncIterator[str]:
+        """Yield answer text incrementally. The first audio must not wait for the end."""
+        if turn.turn_id in self.handled:
+            bus.emit(EventType.STAGE_REJECTED, turn.turn_id, reason="duplicate_turn", stage="conversation")
+            return
+        self.handled.add(turn.turn_id)
+        bus.emit(EventType.CONTEXT_STARTED, turn.turn_id)
+        bus.emit(EventType.CONTEXT_READY, turn.turn_id)
+        bus.emit(EventType.LLM_STARTED, turn.turn_id)
+        t0 = time.time()
+        if self._stream is None:
+            text = await self._complete(transcript, self._history())
+            bus.emit(EventType.LLM_COMPLETED, turn.turn_id, ms=round((time.time() - t0) * 1000))
+            yield text
+            return
+        first = True
+        async for delta in self._stream(transcript, self._history()):
+            if not registry.is_live(turn):
+                # A confirmed interruption: stop consuming the model immediately.
+                bus.emit(EventType.STAGE_REJECTED, turn.turn_id, reason="stale_stream", stage="llm")
+                return
+            if first:
+                turn.mark("llm_first_token")
+                bus.emit(EventType.LLM_TOKEN, turn.turn_id, chars=len(delta))
+                first = False
+            yield delta
+        bus.emit(EventType.LLM_COMPLETED, turn.turn_id, ms=round((time.time() - t0) * 1000))
 
     async def run(self, turn: Turn, transcript: str, registry: TurnRegistry, bus: EventBus) -> StageResult:
         if turn.turn_id in self.handled:
@@ -457,6 +494,41 @@ class ConversationEngine:
             return StageResult("", {"stale": True})
         bus.emit(EventType.LLM_COMPLETED, turn.turn_id, ms=round((time.time() - t0) * 1000))
         return StageResult(answer, {"llm_ms": round((time.time() - t0) * 1000)})
+
+
+class PhraseBuffer:
+    """Accumulates answer text and releases only complete, speakable phrases."""
+
+    def __init__(self, max_chars: int = 240) -> None:
+        self._buffer = ""
+        self._max = max_chars
+
+    def push(self, text: str) -> list[str]:
+        self._buffer += text
+        out: list[str] = []
+        while True:
+            match = re.search(r"[.!?](\s|$)", self._buffer)
+            if match:
+                phrase = self._buffer[: match.end()].strip()
+                self._buffer = self._buffer[match.end() :].strip()
+                if phrase:
+                    out.append(phrase)
+                continue
+            # a long clause with no punctuation: release at a safe word boundary
+            if len(self._buffer) >= self._max:
+                cut = self._buffer.rfind(" ", 0, self._max)
+                cut = cut if cut > 40 else self._max
+                phrase = self._buffer[:cut].strip()
+                self._buffer = self._buffer[cut:].lstrip()
+                if phrase:
+                    out.append(phrase)
+            break
+        return out
+
+    def flush(self) -> list[str]:
+        rest = self._buffer.strip()
+        self._buffer = ""
+        return [rest] if rest else []
 
 
 def split_for_tts(text: str, max_chars: int = 220) -> list[str]:
@@ -517,6 +589,10 @@ class VoiceOrchestrator:
             "stale_discarded": 0,
             "interruptions": 0,
             "errors": 0,
+            "duplicate_events": 0,
+            "cancelled_tasks": 0,
+            "audio_frames": 0,
+            "dropped_frames": 0,
         }
         self.state_history: list[tuple[float, TurnState, TurnState]] = []
         self.transitions(self.state, TurnState.LISTENING, "session_start")
@@ -599,6 +675,12 @@ class VoiceOrchestrator:
     def on_partial(self, text: str, revision: int) -> None:
         turn = self.turns.current
         if turn is None or turn.cancelled.is_set():
+            return
+        if revision and revision <= turn.revision:
+            self.stats["duplicate_events"] += 1
+            self.bus.emit(
+                EventType.STAGE_REJECTED, turn.turn_id, reason="duplicate_partial", stage="stt"
+            )
             return
         turn.revision = revision
         turn.transcript = self.validator.normalizer.normalize(text)
@@ -693,6 +775,67 @@ class VoiceOrchestrator:
             # Noise: the prepared answer continues and owns the session again.
             self.turns.restore(pending)
             log.info("new speech rejected (%s); keeping the pending answer", new_turn.reject_reason)
+
+    async def speak_stream(self, turn: Turn, speak: Callable[[str], Awaitable[None]]) -> str:
+        """Stream the answer and speak each completed phrase immediately.
+
+        Returns the full text. Cancelling the turn stops both the model and the
+        synthesiser, so a stale answer can never reach the speaker.
+        """
+        if not turn.accepted or not self.turns.is_live(turn):
+            return ""
+        if self.state is not TurnState.THINKING:
+            self.state = TurnState.THINKING
+        buffer = PhraseBuffer()
+        parts: list[str] = []
+        try:
+            async for delta in self.engine.run_stream(turn, turn.transcript, self.turns, self.bus):
+                if not self.turns.is_live(turn):
+                    self.stats["cancelled_tasks"] += 1
+                    return ""
+                parts.append(delta)
+                for phrase in buffer.push(delta):
+                    await self._speak_phrase(turn, phrase, speak, parts)
+        except asyncio.CancelledError:  # pragma: no cover - barge-in
+            self.stats["cancelled_tasks"] += 1
+            raise
+        except Exception as exc:  # noqa: BLE001 - controlled fallback (Phase 17)
+            log.exception("streamed turn failed")
+            self.error("llm_stream_failed", message=str(exc))
+            if self.turns.is_live(turn):
+                text = "Sorry, I hit a temporary problem answering that. Please try again."
+                await speak(text)
+                return text
+        if not self.turns.is_live(turn):
+            # The stream ended because the turn was cancelled: nothing said so far
+            # may be completed and no answer may be reported.
+            self.stats["cancelled_tasks"] += 1
+            return ""
+        for phrase in buffer.flush():
+            await self._speak_phrase(turn, phrase, speak, parts)
+        text = "".join(parts).strip()
+        turn.answer = text
+        turn.mark("llm_done")
+        return text
+
+    async def _speak_phrase(
+        self,
+        turn: Turn,
+        phrase: str,
+        speak: Callable[[str], Awaitable[None]],
+        parts: list[str],
+    ) -> None:
+        if not phrase or not self.turns.is_live(turn):
+            return
+        self.bus.emit(EventType.TTS_STARTED, turn.turn_id, chars=len(phrase))
+        t0 = time.time()
+        await speak(phrase)
+        if not turn.metrics.get("tts_first_audio"):
+            turn.mark("tts_first_audio", t0)
+        turn.mark("tts_total", time.time())
+        self.bus.emit(
+            EventType.TTS_COMPLETED, turn.turn_id, phrase=True, ms=round((time.time() - t0) * 1000)
+        )
 
     async def run_conversation(self, turn: Turn) -> str:
         """THINKING -> SPEAKING. Cancelled work never speaks."""

@@ -54,6 +54,8 @@ STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.12"))
 # Expressed in 20 ms frames so the guard follows audio time, not wall-clock.
 ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
+# A stalled synthesiser must not hold a turn open.
+TTS_TIMEOUT_S = float(os.getenv("TTS_TIMEOUT_S", "12"))
 # A stalled socket must not block the session for longer than this.
 SEND_TIMEOUT_S = float(os.getenv("SEND_TIMEOUT_S", "5"))
 # Below this an "utterance" cannot contain a word (~150 ms at 16 kHz mono s16).
@@ -214,6 +216,11 @@ class Session:
         self.orch: VoiceOrchestrator | None = None
         self._last_stt_confidence: float | None = None
         self.dropped_frames = 0
+        self._phrase_started = False
+        self._phrase_bytes = 0
+        self.tts_timeouts = 0
+        self.tts_failures = 0
+        self._streamed_audio = False
         self.trace_to_client = os.getenv("VOICE_TRACE", "").lower() in ("1", "true", "on")
         self._audio_seq = 0
 
@@ -365,12 +372,25 @@ class Session:
                 user=transcript,
             )
 
+        async def stream(transcript: str, history: str):
+            # Token stream: the first sentence is spoken while the model writes the rest.
+            streamer = getattr(pipeline.llm, "stream", None)
+            if streamer is None:
+                yield await complete(transcript, history)
+                return
+            async for delta in streamer(
+                system="You are a helpful voice assistant.", context=history, user=transcript
+            ):
+                yield delta
+
         async def on_audio(pcm: bytes, rate: int, turn: Turn) -> None:
             await self._send_audio_chunk(pcm, rate, turn)
 
         orch = VoiceOrchestrator(
             self.session_id,
-            engine=ConversationEngine(complete, pipeline.state.history_text),
+            engine=ConversationEngine(
+                complete, pipeline.state.history_text, stream=stream
+            ),
             on_audio=on_audio,
             normalizer=TranscriptNormalizer(),
             allow_barge_in=allow_barge_in,
@@ -393,8 +413,12 @@ class Session:
         self._audio_seq += 1
         await self.send_bytes(pcm)
         if self.orch is not None:
+            self.orch.stats["audio_frames"] += 1
             self.orch.bus.emit(
                 EventType.AUDIO_QUEUE_ADD, turn.turn_id if turn else None, seq=self._audio_seq, bytes=len(pcm)
+            )
+            self.orch.bus.emit(
+                EventType.TTS_AUDIO, turn.turn_id if turn else None, seq=self._audio_seq, bytes=len(pcm)
             )
 
     async def _load_dictionary(self, headers: dict, workspace_id: str | None) -> None:
@@ -427,6 +451,57 @@ class Session:
             return items[0]["id"] if items else None
 
     # --- turn loop ---
+    async def _speak_phrase(self, phrase: str, turn: Turn) -> None:
+        """Synthesise and ship ONE phrase while the model is still generating.
+
+        A stalled synthesiser must not hold the turn: give up on that phrase,
+        keep the transcript, and let the next phrase try again (Phase 17).
+        """
+        assert self.pipeline is not None
+        orch = self.orch
+        try:
+            chunk = await asyncio.wait_for(
+                self.pipeline.synthesize(phrase), timeout=TTS_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            log.warning("tts timed out after %.1fs for %r", TTS_TIMEOUT_S, phrase[:32])
+            self.tts_timeouts += 1
+            return
+        except Exception:  # noqa: BLE001 - show the text even when audio fails
+            log.exception("tts failed")
+            self.tts_failures += 1
+            return
+        if not chunk or not chunk.pcm16:
+            return
+        started = getattr(self, "_phrase_started", False)
+        if not started:
+            self._phrase_started = True
+            await self.send_json(
+                {
+                    "type": "audio_start",
+                    "sampleRate": chunk.sample_rate,
+                    "encoding": "pcm16le",
+                    "turnId": turn.turn_id if turn else None,
+                }
+            )
+            self.speaking = True
+            self._echo_candidate = False
+            self._echo_guard_frames = ECHO_GUARD_FRAMES
+            self._interrupt_buf.clear()
+            self.vad.reset()
+            await self.send_json({"type": "speak_start", "turnId": turn.turn_id if turn else None})
+            if orch is not None:
+                if turn is not None:
+                    orch.speaking_started(turn)
+                else:
+                    orch.assistant_audio_started()
+        data = chunk.pcm16
+        for i in range(0, len(data), 16384):
+            if turn is not None and orch is not None and not orch.turns.is_live(turn):
+                break
+            await self._send_audio_chunk(data[i : i + 16384], chunk.sample_rate, turn)
+        self._phrase_bytes += len(data)
+
     async def _speak(self, text: str, *, is_greeting: bool = False, turn: Turn | None = None) -> None:
         """Stream TTS sentence by sentence, owned by one turn.
 
@@ -543,15 +618,22 @@ class Session:
                 return 0.0
             return round(b - a, 2)
 
+        stats = self.orch.stats if self.orch else {}
         return (
-            f"speech={gap('speech_start', 'speech_end')}s "
-            f"stt+llm={gap('accepted', 'llm_done')}s "
-            f"tts={gap('assistant_text', 'speak_total')}s "
-            f"turn={gap('speech_start', 'turn_complete')}s "
-            f"turns={self.orch.stats['turns'] if self.orch else 0} "
-            f"rejected={self.orch.stats['rejected'] if self.orch else 0} "
-            f"stale={self.orch.stats['stale_discarded'] if self.orch else 0} "
-            f"transcript={turn.transcript[:44]!r}"
+            f"stt={gap('speech_end', 'accepted')}s "
+            f"llm_ttft={gap('accepted', 'llm_first_token')}s "
+            f"llm_total={gap('llm_first_token', 'llm_done')}s "
+            f"tts_ttfa={gap('llm_first_token', 'tts_first_audio')}s "
+            f"tts_total={gap('tts_first_audio', 'speak_total')}s "
+            f"first_audio={gap('speech_end', 'tts_first_audio')}s "
+            f"turn_total={gap('speech_start', 'turn_complete')}s "
+            f"frames={self._phrase_bytes // 2} "
+            f"turns={stats.get('turns', 0)} rejected={stats.get('rejected', 0)} "
+            f"stale={stats.get('stale_discarded', 0)} dup={stats.get('duplicate_events', 0)} "
+            f"cancelled={stats.get('cancelled_tasks', 0)} "
+            f"interruptions={stats.get('interruptions', 0)} "
+            f"dropped={self.dropped_frames} tts_timeout={self.tts_timeouts} "
+            f"transcript={turn.transcript[:40]!r}"
         )
 
     async def _auto_greet(self, text: str) -> None:
@@ -690,17 +772,17 @@ class Session:
                         log.info("turn %s rejected: %s", turn.turn_id, reason)
                         self.turn_active = False
                         continue
+                # Both paths stream: the first sentence is spoken while the model
+                # writes the rest, so audio and transcript share one turn id.
                 if kind == "text":
-                    log.info("worker -> conversation for %s", turn.turn_id if turn else "-")
-                    answer = await self._complete_turn_text(transcript, on_transcript, turn)
-                    log.info(
-                        "worker -> answer %s (%s)",
-                        turn.turn_id if turn else "-",
-                        (answer or "")[:48],
+                    answer = await self._stream_turn_text(transcript, on_transcript, turn)
+                elif transcript:
+                    answer = await self._stream_turn_audio(
+                        transcript, on_transcript, turn
                     )
                 else:
                     answer = await self._complete_turn_audio(
-                        payload, on_transcript, turn, hypothesis=transcript
+                        payload, on_transcript, turn, hypothesis=""
                     )
                 if not answer:
                     self.turn_active = False
@@ -713,7 +795,10 @@ class Session:
                 )
                 if turn is not None:
                     turn.mark("assistant_text")
-                await self._speak(answer, turn=turn)
+                if not self._streamed_audio:
+                    # Only the non-streaming fallback still needs a single speak.
+                    await self._speak(answer, turn=turn)
+                self._streamed_audio = False
                 if turn is not None:
                     turn.mark("turn_complete")
                     log.info("TURN %s %s", turn.turn_id, self._turn_trace_line(turn))
@@ -727,31 +812,80 @@ class Session:
             finally:
                 self.turn_active = False
 
-    async def _complete_turn_text(self, text: str, on_transcript, turn: Turn | None) -> str:
+    async def _stream_turn_text(self, text: str, on_transcript, turn: Turn | None) -> str:
+        """Speak each sentence as the model finishes it (Phase 8)."""
         orch = self.orch
         assert self.pipeline is not None
-        if orch is not None and turn is not None:
-            await on_transcript(text)
-            self.pipeline.state.add("user", text)
-            answer = await orch.run_conversation(turn)
+        if orch is None or turn is None:
+            return await self.pipeline.handle_text(text, on_transcript=on_transcript)
+        await on_transcript(text)
+        self.pipeline.state.add("user", text)
+        self._phrase_started = False
+        self._phrase_bytes = 0
+        self._streamed_audio = True
+        answer = await orch.speak_stream(turn, lambda phrase: self._speak_phrase(phrase, turn))
+        if not self._phrase_started:
+            self._streamed_audio = False
+        if answer:
             self.pipeline.state.add("assistant", answer)
-            return answer
-        return await self.pipeline.handle_text(text, on_transcript=on_transcript)
+        await self._finish_playback(turn)
+        return answer
+
+    async def _finish_playback(self, turn: Turn | None) -> None:
+        """audio_end + the playback window, shared by the streaming and one-shot paths."""
+        if not self._phrase_started:
+            return
+        self._phrase_started = False
+        await self.send_json({"type": "audio_end", "turnId": turn.turn_id if turn else None})
+        import time as _time
+
+        playback_s = self._phrase_bytes / float((SAMPLE_RATE * 3) or 1)
+        if playback_s > 0:
+            remaining = min(playback_s, 30.0)
+            try:
+                await asyncio.sleep(remaining)
+            except asyncio.CancelledError:  # pragma: no cover
+                raise
+        self.speaking = False
+        self._echo_candidate = False
+        await self.send_json({"type": "speak_end", "turnId": turn.turn_id if turn else None})
+        if self._barge_taken and self.vad.in_speech:
+            pass
+        elif self._barge_taken:
+            await self._flush_interruption()
+        else:
+            self.vad.reset()
+        self._barge_taken = False
+        orch = self.orch
+        if orch is not None:
+            if turn is not None and orch.turns.is_live(turn):
+                orch.speaking_finished(turn)
+            else:
+                orch.assistant_audio_stopped()
+        turn and turn.mark("speak_total", _time.time())
+
+    async def _stream_turn_audio(self, transcript: str, on_transcript, turn: Turn | None) -> str:
+        orch = self.orch
+        assert self.pipeline is not None
+        if orch is None or turn is None:
+            return await self.pipeline.handle_audio(b"", on_transcript=on_transcript)
+        await on_transcript(transcript)
+        self.pipeline.state.add("user", transcript)
+        self._phrase_started = False
+        self._phrase_bytes = 0
+        self._streamed_audio = True
+        answer = await orch.speak_stream(turn, lambda phrase: self._speak_phrase(phrase, turn))
+        if not self._phrase_started:
+            self._streamed_audio = False
+        if answer:
+            self.pipeline.state.add("assistant", answer)
+        await self._finish_playback(turn)
+        return answer
 
     async def _complete_turn_audio(
         self, pcm: bytes, on_transcript, turn: Turn | None, hypothesis: str = ""
     ) -> str:
-        orch = self.orch
         assert self.pipeline is not None
-        # The validated transcript is authoritative; audio is only a fallback for
-        # clients that do not send text.
-        if hypothesis:
-            await on_transcript(hypothesis)
-            self.pipeline.state.add("user", hypothesis)
-            if orch is not None and turn is not None:
-                answer = await orch.run_conversation(turn)
-                self.pipeline.state.add("assistant", answer)
-                return answer
         return await self.pipeline.handle_audio(pcm, on_transcript=on_transcript, hypothesis=hypothesis)
 
     async def _stt_final(self, buffered: bytes) -> str:

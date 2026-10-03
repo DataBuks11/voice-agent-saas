@@ -694,3 +694,25 @@ input, textarea, select { font: inherit; }
   margin-top: 3px;
   word-break: break-word;
 }
+
+/* Developer voice trace: the pipeline stages of the last few turns. */
+.voice-trace {
+  width: 100%;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #9fb0c8;
+}
+.voice-trace summary { cursor: pointer; opacity: 0.8; }
+.voice-trace-rows {
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.voice-trace-row { display: flex; gap: 8px; padding: 1px 0; }
+.voice-trace-row code { opacity: 0.5; min-width: 26px; }
+.vt-type { min-width: 190px; color: #7fd1b9; }
+.vt-turn { min-width: 110px; opacity: 0.6; }
+.vt-detail { opacity: 0.75; }
