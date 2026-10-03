@@ -87,7 +87,7 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
     t0 = time.time()
     first_audio: list[float] = []
     traces: list[tuple] = []
-    got = {"user": None, "assistant": None, "audio": 0, "ready": None, "errors": [],
+    got = {"user": None, "assistant": None, "audio": 0, "ready": None, "errors": [], "ackReason": None,
            "backchannel": None, "backchannel_bytes": 0, "user_at": None}
     async with websockets.connect(url, max_size=2**24, open_timeout=30) as ws:
         await ws.send(json.dumps({"type": "start", "token": token, "workspaceId": ws_id}))
@@ -114,6 +114,7 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
             if kind == "ready":
                 got["ready"] = data
             elif kind == "backchannel":
+                got["ackReason"] = data.get("reason")
                 got["backchannel"] = data.get("text")
             elif kind == "trace":
                 tr = data.get("type")
@@ -164,10 +165,14 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
         print(f"FAIL: reply not grounded in knowledge: {got['assistant'][:200]!r}"); ok = False
     if got["audio"] <= 0:
         print("FAIL: no TTS audio"); ok = False
-    if not got["backchannel"]:
-        print("FAIL: no instant backchannel"); ok = False
-    elif got["backchannel_bytes"] <= 0:
-        print("FAIL: backchannel had no audio"); ok = False
+    # Filler audio is opt-in (BACKCHANNEL=on). By default none may be sent, and if
+    # one is sent it must carry a reason so it is never an unexplained voice.
+    backchannel_on = os.getenv("BACKCHANNEL", "off").lower() in ("1", "on", "true", "yes")
+    if backchannel_on:
+        if not got["ackReason"]:
+            print("FAIL: BACKCHANNEL=on but the filler carried no reason"); ok = False
+    elif got["backchannel"]:
+        print(f"FAIL: unsolicited filler {got['backchannel']!r} while BACKCHANNEL is off"); ok = False
     else:
         print(f"[ack] {got['backchannel']!r} ({got['backchannel_bytes']} bytes)  <-- fills the dead air")
     if got["errors"]:
