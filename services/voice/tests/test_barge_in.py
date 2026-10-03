@@ -612,3 +612,15 @@ async def test_empty_decode_is_rejected_without_queueing(monkeypatch):
     await session.run()
     assert session.queue.qsize() == 0
     assert session.orch.stats["rejected"] >= 1
+
+
+def test_only_health_paths_are_answered_over_http():
+    """Regression: answering every path broke every WebSocket handshake."""
+    from voice_agent.server import is_health_path
+
+    assert is_health_path("/health") is True
+    assert is_health_path("/healthz") is True
+    assert is_health_path("/health?probe=1") is True
+    # the socket upgrade path must never be answered here
+    for path in ("/", "", "/ws", "/v1", "/healthcheck/other"):
+        assert is_health_path(path) is False, path

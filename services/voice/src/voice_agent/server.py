@@ -169,6 +169,16 @@ def metric_or_zero(value: float | None) -> float:
     return float(value or 0.0)
 
 
+def is_health_path(path: str) -> bool:
+    """Only the health endpoints are answered over plain HTTP.
+
+    Everything else MUST return None so the websockets library continues with
+    the upgrade handshake. Answering "/" replies 200 and every socket is
+    rejected; answering 404 rejects it too.
+    """
+    return (path or "").split("?")[0] in ("/health", "/healthz")
+
+
 def workspace_id_hint(session: "Session") -> str:
     return str(getattr(session, "workspace_id", "") or "")
 
@@ -1290,10 +1300,9 @@ async def serve_forever() -> None:
         Without a health check the runtime scales to zero and the next caller
         waits 6-10 s for the container to boot and the models to load.
         """
-        path = (request.path if hasattr(request, "path") else "").split("?")[0]
         # ONLY the health paths: returning None lets the WebSocket handshake
         # continue. Answering "/" would reject every socket upgrade with HTTP 200.
-        if path in ("/health", "/healthz"):
+        if is_health_path(getattr(request, "path", "")):
             ready["ok"] = True
             body = json.dumps(
                 {
