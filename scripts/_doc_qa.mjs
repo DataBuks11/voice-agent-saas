@@ -33,7 +33,19 @@ const QUESTIONS = [
 const REFUSALS = [
   "i don't have verified information",
   "i do not have verified information",
+  // The model words the same decline differently between runs; accept any
+  // explicit "I have no information" phrasing, not one fixed sentence.
+  "don't have information",
+  "do not have information",
+  "don't have any information",
+  "no information about",
+  "don't see any information",
+  "not in my knowledge base",
   "not in my notes",
+  "not in the document",
+  "not in these documents",
+  "not able to find",
+  "cannot find",
   "i'm not sure",
   "i am not sure",
   "could you rephrase",

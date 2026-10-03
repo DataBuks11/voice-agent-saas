@@ -225,7 +225,7 @@ async def main() -> int:
         last = s.replies[-1][1].lower()
         if not any(k in last for k in ("1200", "enterprise", "custom", "sso")):
             print(f"WARN: reply after the interruption looks off: {s.replies[-1][1]!r}")
-        ok = False
+            ok = False
     print("VOICE BARGE-IN E2E " + ("PASS" if ok else "FAIL"))
     rc = 0 if ok else 1
     return rc

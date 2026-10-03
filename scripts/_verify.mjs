@@ -75,14 +75,14 @@ const run = (step) =>
     child.on("close", (code) => resolve({ code, out, ms: Date.now() - started }));
   });
 
-const tail = (out, n = 3) =>
+const tail = (out, n = 8) =>
   out
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean)
     .slice(-n)
     .join(" | ")
-    .slice(0, 200);
+    .slice(0, 4000);
 
 const main = async () => {
   const results = [];
