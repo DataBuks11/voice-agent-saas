@@ -436,3 +436,30 @@ def test_playback_start_and_finish_are_recorded_even_after_a_state_change():
     orch.speaking_finished(turn)
     assert orch.audio_playback_active is False
     assert orch.state is TurnState.LISTENING
+
+
+@pytest.mark.asyncio
+async def test_accepted_turn_survives_a_state_race_with_noise():
+    """Room noise keeps moving the shared state; real turns must still answer."""
+    orch, calls, _audio = make_orchestrator(answer="Enterprise starts at $1200")
+    real = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("what about the enterprise plan")[0] is True
+    # a noise turn takes the state right before the worker starts
+    orch.state = TurnState.USER_SPEAKING
+    assert await orch.run_conversation(real) == "Enterprise starts at $1200"
+    assert calls == ["what about the enterprise plan"]
+
+
+@pytest.mark.asyncio
+async def test_reject_cooldown_stops_a_noise_source_from_spamming_turns():
+    import time as _t
+
+    orch, calls, _audio = make_orchestrator()
+    first = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("uh huh")[0] is False
+    assert orch.ensure_speech_turn() is None  # inside the cooldown window
+    orch.reject_cooldown_until = _t.time() - 1
+    noise = orch.ensure_speech_turn()
+    assert noise is not None and noise is not first

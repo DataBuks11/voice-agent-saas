@@ -285,6 +285,9 @@ class TurnRegistry:
 # --------------------------------------------------------------------------- #
 # Stage 4/5: transcript normalisation and turn validation
 # --------------------------------------------------------------------------- #
+# Ignore new speech for this long after a turn was rejected as noise.
+REJECT_COOLDOWN_S = float(__import__("os").getenv("REJECT_COOLDOWN_S", "0.6"))
+
 _WS = " \t\r\n\u200b"
 # Turned away from: these must never reach the model.
 _REJECT_EXACT = {
@@ -447,6 +450,9 @@ class VoiceOrchestrator:
         self.audio_playback_active = False
         # An accepted turn whose answer is still being prepared.
         self.pending_answer_turn: Turn | None = None
+        # After rejecting a turn, ignore new speech briefly. A steady noise source
+        # (fan, music, a beep) otherwise opens a turn every couple of seconds.
+        self.reject_cooldown_until = 0.0
         self._accepted_transcripts: dict[str, str] = {}
         self.stats = {
             "turns": 0,
@@ -495,6 +501,11 @@ class VoiceOrchestrator:
         """
         if self.state is TurnState.USER_SPEAKING and self.turns.current is not None:
             return self.turns.current
+        if __import__("time").time() < self.reject_cooldown_until:
+            self.bus.emit(
+                EventType.STAGE_REJECTED, None, reason="reject_cooldown", stage="turn_detector"
+            )
+            return None
         return self.begin_speech()
 
     def begin_speech(self) -> Turn:
@@ -563,6 +574,7 @@ class VoiceOrchestrator:
             self.stats["rejected"] += 1
             self.bus.emit(EventType.USER_TURN_REJECTED, turn.turn_id, reason=reason, text=clean)
             turn.reject_reason = reason
+            self.reject_cooldown_until = __import__("time").time() + REJECT_COOLDOWN_S
             self._settle_pending(turn, confirmed=False)
             # Back to listening; the model is never called.
             self._require(TurnState.LISTENING, f"rejected:{reason}")
@@ -611,7 +623,17 @@ class VoiceOrchestrator:
     async def run_conversation(self, turn: Turn) -> str:
         """THINKING -> SPEAKING. Cancelled work never speaks."""
         if not self._require(TurnState.THINKING, "accepted_turn"):
-            return ""
+            # Room noise can move the shared state between validation and here.
+            # An accepted, uncancelled turn is proof of a real user turn, so it may
+            # re-establish THINKING. Without this, a noisy room silently starves
+            # the caller of answers.
+            if not (turn.accepted and self.turns.is_live(turn)):
+                return ""
+            log.info("re-entering THINKING for %s from %s", turn.turn_id, self.state.value)
+            self.bus.emit(
+                EventType.STAGE_REJECTED, turn.turn_id, reason="state_race_recovered", stage="state_machine"
+            )
+            self.state = TurnState.THINKING
         result = await self.engine.run(turn, turn.transcript, self.turns, self.bus)
         if result.meta.get("stale"):
             self.stats["stale_discarded"] += 1
