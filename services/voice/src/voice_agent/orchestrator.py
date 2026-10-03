@@ -272,6 +272,15 @@ class TurnRegistry:
         """True when the caller may still affect the conversation."""
         return self.is_current(turn)
 
+    def is_live(self, turn: Turn | None) -> bool:
+        """True while a turn may still produce output.
+
+        A newer turn existing is not enough to discard this one: an interruption
+        is only real once the new utterance is confirmed as speech. Otherwise a
+        noise burst silently deletes an answer that was already on its way.
+        """
+        return turn is not None and not turn.cancelled.is_set()
+
 
 # --------------------------------------------------------------------------- #
 # Stage 4/5: transcript normalisation and turn validation
@@ -381,8 +390,8 @@ class ConversationEngine:
         bus.emit(EventType.LLM_STARTED, turn.turn_id)
         t0 = time.time()
         answer = await self._complete(transcript, self._history())
-        if not registry.owner(turn):
-            # A newer turn exists: this answer is stale and must never be spoken.
+        if not registry.is_live(turn):
+            # The turn was cancelled by a confirmed interruption.
             bus.emit(EventType.STAGE_REJECTED, turn.turn_id, reason="stale_after_llm", stage="conversation")
             log.info("discarding stale answer for %s", turn.turn_id)
             return StageResult("", {"stale": True})
@@ -605,7 +614,7 @@ class VoiceOrchestrator:
         if result.meta.get("stale"):
             self.stats["stale_discarded"] += 1
             return ""
-        if not self.turns.owner(turn):
+        if not self.turns.is_live(turn):
             self.stats["stale_discarded"] += 1
             return ""
         turn.answer = result.text
@@ -616,7 +625,7 @@ class VoiceOrchestrator:
         return result.text
 
     def speaking_started(self, turn: Turn | None) -> None:
-        if turn is None or not self.turns.owner(turn):
+        if not self.turns.is_live(turn):
             return
         self.audio_playback_active = True
         self.bus.emit(EventType.ASSISTANT_TURN_STARTED, turn.turn_id)
@@ -624,7 +633,7 @@ class VoiceOrchestrator:
         self.bus.emit(EventType.AUDIO_PLAYBACK_STARTED, turn.turn_id)
 
     def speaking_finished(self, turn: Turn | None) -> None:
-        if turn is None or not self.turns.owner(turn):
+        if not self.turns.is_live(turn):
             return
         self.audio_playback_active = False
         self.bus.emit(EventType.AUDIO_PLAYBACK_STOPPED, turn.turn_id)

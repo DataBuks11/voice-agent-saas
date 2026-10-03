@@ -358,3 +358,24 @@ async def test_confirmed_interruption_cancels_the_pending_answer():
     assert await task == ""
     assert first.cancelled.is_set() is True
     assert orch.stats["interruptions"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_noise_between_llm_and_audio_does_not_delete_the_answer():
+    """The exact production failure: a noise turn opened while the LLM ran."""
+    orch, calls, _audio = make_orchestrator(answer="Growth is $199", delay=0.03)
+    first = orch.begin_speech()
+    orch.end_speech()
+    orch.on_final("how much does the growth plan cost")
+    task = asyncio.create_task(orch.run_conversation(first))
+    await asyncio.sleep(0.005)
+    # noise opens a turn mid-flight
+    noise = orch.ensure_speech_turn()
+    orch.end_speech()
+    assert await task == "Growth is $199"
+    # the noise is then judged and rejected; the answer was already delivered
+    accepted, reason = orch.on_final("uh huh")
+    assert accepted is False
+    assert first.cancelled.is_set() is False
+    assert orch.turns.is_live(first) is True
+    assert orch.turns.is_live(noise) is True

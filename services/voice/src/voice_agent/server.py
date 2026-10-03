@@ -345,8 +345,8 @@ class Session:
 
     async def _send_audio_chunk(self, pcm: bytes, rate: int, turn: Turn | None) -> None:
         """One ordered, sequence-numbered audio frame on the wire."""
-        if self.orch is not None and turn is not None and not self.orch.turns.owner(turn):
-            return  # stale turn: the audio must never reach the speaker
+        if self.orch is not None and turn is not None and not self.orch.turns.is_live(turn):
+            return  # cancelled turn: the audio must never reach the speaker
         self._audio_seq += 1
         await self.send_bytes(pcm)
         if self.orch is not None:
@@ -401,8 +401,8 @@ class Session:
         for phrase in split_for_tts(text):
             if self.interrupted:
                 break
-            if turn is not None and orch is not None and not orch.turns.owner(turn):
-                log.info("dropping stale TTS for %s", turn.turn_id)
+            if turn is not None and orch is not None and not orch.turns.is_live(turn):
+                log.info("dropping cancelled TTS for %s", turn.turn_id)
                 break
             # A queued user utterance cancels the greeting so answers never overlap.
             if is_greeting and self.turn_active:
@@ -442,7 +442,7 @@ class Session:
             for i in range(0, len(data), 16384):
                 if self.interrupted or (is_greeting and self.turn_active):
                     break
-                if turn is not None and orch is not None and not orch.turns.owner(turn):
+                if turn is not None and orch is not None and not orch.turns.is_live(turn):
                     break
                 await self._send_audio_chunk(data[i : i + 16384], out_rate, turn)
             if orch is not None:
@@ -470,7 +470,7 @@ class Session:
                 self.vad.reset()
             self._barge_taken = False
             if orch is not None:
-                if turn is not None and orch.turns.owner(turn):
+                if turn is not None and orch.turns.is_live(turn):
                     orch.speaking_finished(turn)
                 else:
                     orch.assistant_audio_stopped()
@@ -573,8 +573,8 @@ class Session:
             self.turn_active = True
             self.last_activity = __import__("time").time()
             orch = self.orch
-            if turn is not None and orch is not None and not orch.turns.owner(turn):
-                # A newer turn superseded this one before we got to it.
+            if turn is not None and orch is not None and not orch.turns.is_live(turn):
+                # A confirmed interruption cancelled this one before we got to it.
                 self.turn_active = False
                 continue
             # Interruption resets the flag only for the turn that owns it.
@@ -585,7 +585,7 @@ class Session:
                     self.interrupted = False
 
                 async def on_transcript(text: str) -> None:
-                    if turn is not None and orch is not None and not orch.turns.owner(turn):
+                    if turn is not None and orch is not None and not orch.turns.is_live(turn):
                         return
                     await self.send_json(
                         {"type": "user", "text": text, "turnId": turn.turn_id if turn else None}
@@ -630,7 +630,7 @@ class Session:
                 if not answer:
                     self.turn_active = False
                     continue
-                if turn is not None and orch is not None and not orch.turns.owner(turn):
+                if turn is not None and orch is not None and not orch.turns.is_live(turn):
                     self.turn_active = False
                     continue
                 await self.send_json(
@@ -777,7 +777,7 @@ class Session:
         tts = _tts
         if tts is None or self.interrupted or not _wants_backchannel(text):
             return
-        if turn is not None and self.orch is not None and not self.orch.turns.owner(turn):
+        if turn is not None and self.orch is not None and not self.orch.turns.is_live(turn):
             return
         phrase = BACKCHANNELS[_first_backchannel % len(BACKCHANNELS)]
         _first_backchannel += 1
