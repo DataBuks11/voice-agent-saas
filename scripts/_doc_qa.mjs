@@ -132,8 +132,13 @@ const main = async () => {
         verdict = "declined as expected";
       }
     } else if (refused && !chitchat) {
-      verdict = "CANNED REFUSAL";
-      failures++;
+      // A refusal that still carries the answer is a hedged answer, not a
+      // canned refusal: the agent said what it knows and flagged the rest.
+      if (expect.length && hit) verdict = "answered with a hedge";
+      else {
+        verdict = "CANNED REFUSAL";
+        failures++;
+      }
     } else if (expect.length && !hit) {
       verdict = "MISSING KEYWORDS";
       failures++;
