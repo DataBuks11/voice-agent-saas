@@ -164,10 +164,8 @@ async def test_barge_in_utterance_is_queued_once_when_audio_stops(monkeypatch):
     session, ws, pipeline = await _session([])
     session.speaking = True
     session._echo_guard_frames = 0
-    session.vad.feed(frame(700, 0.3))
-    session._echo_candidate = True
-    # the barge-in is detected on the next frame and latched
-    ws.script = [frame(100, 0.3)]
+    # the caller talks over us, entirely through the receive loop
+    ws.script = [frame(700, 0.3)]
     await session.run()
     assert pipeline.barge_ins == 1
     session.speaking = False  # our audio finished
@@ -437,3 +435,17 @@ async def test_caller_who_keeps_talking_is_captured_whole(monkeypatch):
     spoken_ms = len(payload) / (16000 * 2) * 1000
     assert spoken_ms >= 1700, f"only {spoken_ms:.0f} ms captured"
     assert session.hypothesis == "Actually, tell me about the enterprise plan instead."
+
+
+def test_backchannel_suppressed_for_greetings():
+    for t in ["hello", "Hello.", "hi there", "yes", "okay", "thanks", "thank you", "no", ""]:
+        assert srv._wants_backchannel(t) is False, t
+
+
+def test_backchannel_kept_for_real_questions():
+    for t in [
+        "how much does the growth plan cost",
+        "I want to book an appointment tomorrow",
+        "can you tell me about the enterprise plan",
+    ]:
+        assert srv._wants_backchannel(t) is True, t

@@ -60,7 +60,7 @@ class VadConfig:
     # Energy gate on top of the neural score, as dograh does with min_volume.
     min_volume: float = 0.006
     # Speech must last this long before it counts as an interruption.
-    barge_in_ms: int = 280
+    barge_in_ms: int = 240
 
 
 class Vad:
@@ -74,6 +74,7 @@ class Vad:
         self.speech_ms = 0.0
         self.silence_ms = 0.0
         self._speech_run_ms = 0.0
+        self.run_peak = 0.0
         self._neural_state = None
         self.noise_rms = 0.004
 
@@ -137,6 +138,7 @@ class Vad:
                 self.speech_ms = frame_ms
                 self.silence_ms = 0.0
                 self._speech_run_ms = frame_ms
+                self.run_peak = rms
                 return "speech_start"
             return None
         self.buf.extend(frame)
@@ -144,6 +146,8 @@ class Vad:
             self.silence_ms = 0.0
             self.speech_ms += frame_ms
             self._speech_run_ms += frame_ms
+            if rms > self.run_peak:
+                self.run_peak = rms
         else:
             self.silence_ms += frame_ms
             self._speech_run_ms = 0.0
@@ -168,6 +172,7 @@ class Vad:
         self.speech_ms = 0.0
         self.silence_ms = 0.0
         self._speech_run_ms = 0.0
+        self.run_peak = 0.0
         if self._neural_state is not None:
             try:  # pragma: no cover - optional dependency
                 self._neural_state = _silero().reset_states()  # type: ignore[union-attr]

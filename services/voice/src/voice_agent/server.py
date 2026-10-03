@@ -40,9 +40,11 @@ _models_warmed = False
 STT_CHUNK_BYTES = max(6000, int(float(os.getenv("STT_CHUNK_MS", "900")) * 32))
 
 # Speaker bleed reaches the mic a moment after our audio starts; ignore that window.
-ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.18"))
+ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.12"))
 # Expressed in 20 ms frames so the guard follows audio time, not wall-clock.
 ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
+# How much post-guard audio to keep while we speak (~3 s of 16 kHz PCM16).
+INTERRUPT_KEEP_BYTES = 16000 * 2 * 3
 # How long the endpoint waits for the in-flight model warm-up before answering anyway.
 # Race the draft: if it lands within this window the answer comes from cache,
 # otherwise answer immediately rather than making the caller wait for it.
@@ -62,6 +64,27 @@ BACKCHANNELS = ["Got it.", "Sure, one moment.", "Okay.", "Thank you.", "You're w
 _tts_cache: dict[str, object] = {}
 _TTS_CACHE_MAX = 240
 _first_backchannel = 0
+
+# "hello", "yes", "okay", "thanks" and the like: the real reply is fast, so a
+# filler would be the only thing the caller hears.
+_TOO_SHORT_FOR_BACKCHANNEL = {
+    "hi", "hello", "hey", "yo", "yes", "yeah", "yep", "no", "nope", "ok", "okay", "k",
+    "sure", "thanks", "thank you", "bye", "goodbye", "cool", "nice", "great", "fine",
+    "right", "correct", "exactly", "hmm", "ha", "haha", "wow", "oh", "please", "there",
+    "hello there", "good morning", "good afternoon", "good evening",
+}
+
+
+def _wants_backchannel(transcript: str) -> bool:
+    text = (transcript or "").lower().strip(" .!?,")
+    if not text:
+        return False
+    if text in _TOO_SHORT_FOR_BACKCHANNEL:  # "thank you", "good morning"
+        return False
+    words = [w for w in re.split(r"[^a-z']+", text) if w]
+    if len(words) <= 2 and all(w in _TOO_SHORT_FOR_BACKCHANNEL for w in words):
+        return False
+    return True
 
 
 def _cache_key(text: str) -> str:
@@ -148,6 +171,9 @@ class Session:
         # Speaker bleed needs a moment to reach the mic; ignore that onset window.
         self._echo_guard_frames = 0
         self._barge_taken = False
+        # Audio captured after the echo guard while we speak, kept in case the
+        # caller really is interrupting.
+        self._interrupt_buf = bytearray()
         self.last_activity = __import__("time").time()
         self.call_started = self.last_activity
         self.idle_nudges = 0
@@ -170,6 +196,10 @@ class Session:
         workspace_id = msg.get("workspaceId")
         agent_id = msg.get("agentId")
         auth: VoiceAuth | None = None
+        # Load the speech models while the conversation is being created: on a
+        # freshly booted container this is seconds of work that used to happen
+        # after the API round trip, and the greeting waited for all of it.
+        models_task = asyncio.create_task(shared_models())
 
         if token and workspace_id:
             headers = {"Authorization": f"Bearer {token}", "x-workspace-id": workspace_id}
@@ -202,7 +232,7 @@ class Session:
             conversation_payload = r.json() or {}
             conversation_id = str(conversation_payload.get("id") or "")
 
-        stt, tts = await shared_models()
+        stt, tts = await models_task
         self.llm = ApiLLM(API_BASE, workspace_id, conversation_id, agent_id=agent_id, auth=auth, token=token)
         # Match the caller's language end to end: STT decoder + neural voice.
         language = str((conversation_payload or {}).get("language") or "en")
@@ -297,6 +327,7 @@ class Session:
                 self.speaking = True
                 self._echo_candidate = False
                 self._echo_guard_frames = ECHO_GUARD_FRAMES
+                self._interrupt_buf.clear()
                 self.vad.reset()
                 await self.send_json({"type": "speak_start"})
                 started = True
@@ -412,7 +443,7 @@ class Session:
 
                 async def on_transcript(text: str) -> None:
                     await self.send_json({"type": "user", "text": text})
-                    await self._send_backchannel()
+                    await self._send_backchannel(text)
 
                 if kind == "text":
                     answer = await self.pipeline.handle_text(payload, on_transcript=on_transcript)
@@ -517,15 +548,17 @@ class Session:
         if self._draft_api_task is None or self._draft_api_task.done():
             self._draft_api_task = asyncio.create_task(self.draft_text(text))
 
-    async def _send_backchannel(self) -> None:
+    async def _send_backchannel(self, text: str = "") -> None:
         """Pre-cached acknowledgement so the caller never hears dead air.
 
         The client holds it for ~300ms and drops it if the real answer arrives
         first, so fast turns stay clean and slow turns get instant feedback.
+        Never used for a greeting or a one-word acknowledgement: answering
+        "hello" with "Got it." sounds broken, and those turns answer fast anyway.
         """
         global _first_backchannel
         tts = _tts
-        if tts is None or self.interrupted:
+        if tts is None or self.interrupted or not _wants_backchannel(text):
             return
         phrase = BACKCHANNELS[_first_backchannel % len(BACKCHANNELS)]
         _first_backchannel += 1
@@ -582,32 +615,48 @@ class Session:
                 while len(self.partial) >= FRAME_BYTES:
                     frame = bytes(self.partial[:FRAME_BYTES])
                     del self.partial[:FRAME_BYTES]
-                    event = self.vad.feed(frame)
                     if self.speaking:
-                        # Our own voice is in the room. Ignore the echo onset, then
-                        # require sustained speech before treating it as an interruption.
+                        # Our own voice is in the room. Ignore the echo onset, keep
+                        # the rest, and only interrupt once the caller is loud and
+                        # sustained. The kept audio is replayed into the VAD when we
+                        # do interrupt, so no words are lost.
                         if self._barge_taken:
-                            # Already handling an interruption: keep buffering the
-                            # caller's sentence so it is transcribed once, whole.
+                            # Already interrupting: keep feeding the utterance so the
+                            # rest of their sentence is captured once, whole.
+                            self.vad.feed(frame)
                             continue
                         if self._echo_guard_frames > 0:
-                            # Counted in audio time, not wall-clock, so buffered or
-                            # bursty caller audio is never swallowed by the guard.
+                            # Counted in audio time, not wall-clock, so bursty caller
+                            # audio is never swallowed by the guard.
                             self._echo_guard_frames -= 1
                             self.vad.reset()
                             continue
+                        self._interrupt_buf += frame
+                        if len(self._interrupt_buf) > INTERRUPT_KEEP_BYTES:
+                            del self._interrupt_buf[: len(self._interrupt_buf) - INTERRUPT_KEEP_BYTES]
+                        event = self.vad.feed(frame)
                         if event == "speech_start":
                             self._echo_candidate = True
+                        elif event == "endpoint":
+                            # Speech that stopped on its own was bleed, not a caller.
+                            self._echo_candidate = False
+                            self._interrupt_buf.clear()
+                            self.vad.reset()
                         elif self._echo_candidate and self.vad.sustained():
-                            # Interrupt exactly once. The utterance stays in the VAD
-                            # so the rest of the sentence is not thrown away.
                             self._echo_candidate = False
                             self._barge_taken = True
                             self.interrupted = True
+                            # Replay the kept audio so the opening words survive.
+                            self.vad.reset()
+                            kept = bytes(self._interrupt_buf)
+                            self._interrupt_buf.clear()
+                            for i in range(0, len(kept), FRAME_BYTES):
+                                self.vad.feed(kept[i : i + FRAME_BYTES])
                             if self.pipeline is not None:
                                 self.pipeline.handle_barge_in()
                             await self.send_json({"type": "interrupted"})
                         continue
+                    event = self.vad.feed(frame)
                     if event == "speech_start":
                         # Immediate UI feedback: the orb reacts while the caller is
                         # still speaking, not only after transcription finishes.

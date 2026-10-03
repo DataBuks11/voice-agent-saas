@@ -458,13 +458,15 @@ export function VoicePage() {
           if (rateRef.current != null) stopPlayback();
         } else if (type === "assistant") {
           pushLine("assistant", msg.text as string);
-        } else if (type === "speak_start") {
-      stopPlayback(); // never let two replies overlap
-    } else if (type === "interrupted") {
-      stopPlayback();
-      setVoiceState("listening");
-      pushLine("system", "barge-in: caller interrupted");
-    } else if (type === "audio_start") {
+} else if (type === "speak_start") {
+          // Informational only: "our voice starts here". It arrives AFTER
+          // audio_start, so stopping playback here would discard the reply that
+          // is already buffered (transcript visible, no sound).
+        } else if (type === "interrupted") {
+          stopPlayback();
+          setVoiceState("listening");
+          pushLine("system", "barge-in: caller interrupted");
+        } else if (type === "audio_start") {
           replyStartedRef.current = true;
           if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
           backchannelTimerRef.current = null;
