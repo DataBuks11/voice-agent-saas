@@ -85,6 +85,7 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
         silence = b"\x00" * (16000 * 2)  # 1s endpoint silence
         print(f"[audio] utterance {len(pcm)} bytes (~{len(pcm)/2/16000:.1f}s)")
     t0 = time.time()
+    first_audio: list[float] = []
     got = {"user": None, "assistant": None, "audio": 0, "ready": None, "errors": [],
            "backchannel": None, "backchannel_bytes": 0, "user_at": None}
     async with websockets.connect(url, max_size=2**24, open_timeout=30) as ws:
@@ -121,6 +122,8 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
                 got["assistant"] = data.get("text")
                 print(f"[llm] {got['assistant']!r}  (+{time.time()-t0:.1f}s)")
             elif kind == "audio_start":
+                if not first_audio:
+                    first_audio.append(time.time() - t0)
                 if got["assistant"]:
                     print(f"[tts] start sr={data.get('sampleRate')}")
             elif kind == "audio_end":
@@ -134,6 +137,14 @@ async def run_session(url: str, api: str, token: str, ws_id: str, timeout: float
     ok = True
     if not got["ready"]:
         print("FAIL: no ready"); ok = False
+    ready_at = got["ready"] if isinstance(got["ready"], float) else None
+    if ready_at is not None:
+        print(f"[timing] session ready at {ready_at:.1f}s")
+    print(
+        f"[timing] first audio at {first_audio[0]:.1f}s"
+        if first_audio
+        else "[timing] NO AUDIO RECEIVED"
+    )
     if not got["user"]:
         print("FAIL: no transcript"); ok = False
     elif "growth" not in got["user"].lower():
