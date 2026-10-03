@@ -284,7 +284,7 @@ async def test_words_spoken_during_our_audio_are_not_lost(monkeypatch):
     monkeypatch.setattr(srv, "_tts", StubTTS())
     session, ws, pipeline = await _session([])
     # trailing silence so the endpoint closes the utterance after our audio stops
-    ws.script = [frame(1500, 0.3) + frame(700, 0.0)]
+    ws.script = [frame(1500, 0.3) + frame(900, 0.0)]
     ws.gate = asyncio.Event()  # hold the caller's words until we are speaking
     runner = asyncio.create_task(session.run())
     # a multi-sentence greeting so "speaking" lasts long enough to interrupt
@@ -406,7 +406,7 @@ async def test_final_transcript_covers_the_whole_utterance(monkeypatch):
     only the last partial and got cut mid-sentence."""
     stt = RecordingSTT()
     monkeypatch.setattr(srv, "_stt", stt)
-    session, ws, pipeline = await _session([frame(1500, 0.3), frame(600, 0.0)])
+    session, ws, pipeline = await _session([frame(1500, 0.3), frame(900, 0.0)])
     await session.run()
     assert session.queue.qsize() == 1
     kind, _pcm, _turn = session.queue.get_nowait()
@@ -422,7 +422,9 @@ async def test_interruption_transcript_covers_the_whole_utterance(monkeypatch):
     monkeypatch.setattr(srv, "_stt", stt)
     monkeypatch.setattr(srv, "_tts", StubTTS())
     session, ws, pipeline = await _session([])
-    ws.script = [frame(1500, 0.3) + frame(700, 0.0)]
+    session._build_orchestrator()
+    session.started = True
+    ws.script = [frame(1500, 0.3) + frame(900, 0.0)]
     ws.gate = asyncio.Event()
     runner = asyncio.create_task(session.run())
     greeting = asyncio.create_task(
@@ -506,7 +508,7 @@ async def test_barge_in_opens_a_turn_for_the_interrupting_speech(monkeypatch):
     session, ws, pipeline = await _session([])
     session._build_orchestrator()
     session.started = True
-    ws.script = [frame(1500, 0.3) + frame(700, 0.0)]
+    ws.script = [frame(1500, 0.3) + frame(900, 0.0)]
     ws.gate = asyncio.Event()
     runner = asyncio.create_task(session.run())
     greeting = asyncio.create_task(

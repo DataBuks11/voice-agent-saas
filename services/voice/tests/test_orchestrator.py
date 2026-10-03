@@ -646,7 +646,7 @@ async def test_interrupting_a_stream_stops_the_audio_immediately():
     orch = VoiceOrchestrator("s1", engine=engine, on_audio=lambda *a: asyncio.sleep(0))
     turn = orch.begin_speech()
     orch.end_speech()
-    assert orch.on_final("book me")[0] is True
+    assert orch.on_final("please book me for friday")[0] is True
     await orch.speak_stream(turn, speak)
     assert spoken == ["First sentence is here."]
     assert orch.stats["cancelled_tasks"] >= 1
@@ -672,7 +672,7 @@ async def test_stream_failure_gives_a_controlled_fallback():
     orch = VoiceOrchestrator("s1", engine=engine, on_audio=lambda *a: asyncio.sleep(0))
     turn = orch.begin_speech()
     orch.end_speech()
-    orch.on_final("hello there")
+    orch.on_final("hello there, can you help me with this")
     answer = await orch.speak_stream(turn, speak)
     assert "temporary problem" in answer
     assert spoken and "temporary problem" in spoken[0]
@@ -722,3 +722,26 @@ def test_the_same_event_firing_twice_is_still_rejected():
     accepted, reason = orch.on_final("book me for tomorrow")
     assert accepted is False
     assert reason and reason.startswith("duplicate_of")
+
+
+def test_two_word_fragments_are_rejected():
+    """Regression: 'phone call' produced a confident hallucinated answer."""
+    orch, calls, _audio = make_orchestrator()
+    for text in ("Engine", "Phone call", "DataBuks", "Thank you."):
+        orch.begin_speech()
+        orch.end_speech()
+        accepted, reason = orch.on_final(text)
+        assert accepted is False, f"{text!r} was accepted"
+        assert reason == "fragment_too_short"
+    assert calls == []
+
+
+def test_real_short_answers_are_still_accepted():
+    """'yes', '9 am', 'monday' are one or two words and must be answered."""
+    orch, calls, _audio = make_orchestrator()
+    for text in ("Yes.", "No", "9 AM", "monday", "tomorrow morning"):
+        turn = orch.begin_speech()
+        orch.end_speech()
+        accepted, reason = orch.on_final(text)
+        assert accepted is True, f"{text!r} rejected: {reason}"
+        orch.interrupt("test")

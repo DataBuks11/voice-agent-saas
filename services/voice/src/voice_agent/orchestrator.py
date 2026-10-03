@@ -393,6 +393,34 @@ class TranscriptNormalizer:
         return True, None
 
 
+# Answers that are legitimately one or two words. Anything else that short is a
+# fragment of a longer sentence and must not reach the model.
+SHORT_ANSWERS = {
+    "yes", "no", "yep", "nope", "yeah", "nahi", "haan", "ok", "okay", "sure", "right",
+    "correct", "wrong", "fine", "good", "great", "thanks", "thank you", "bye", "goodbye",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "morning", "afternoon", "evening", "today", "tomorrow", "tonight", "yesterday",
+    "now", "later", "maybe", "never", "always", "same", "different", "anything", "nothing",
+    "yes please", "no thanks", "not now", "next", "done", "stop", "wait", "hello", "hi",
+}
+
+
+def is_short_answer(text: str) -> bool:
+    """True for 'yes', '9 am', 'monday', 'data buks' - things a caller really says."""
+    import re as _re
+
+    t = _re.sub(r"[^a-z0-9:\s]", " ", (text or "").lower()).strip()
+    t = " ".join(t.split())
+    if not t:
+        return False
+    if any(ch.isdigit() for ch in t):
+        return True
+    words = [w for w in t.split() if w]
+    # Only known short answers qualify. A single unknown word ("engine",
+    # "data buks") is a fragment of a longer sentence, not a question.
+    return len(words) <= 3 and all(w in SHORT_ANSWERS for w in words)
+
+
 class TurnValidator:
     """The single gate between 'we heard something' and 'the model may answer'."""
 
@@ -401,10 +429,12 @@ class TurnValidator:
         normalizer: TranscriptNormalizer,
         require_final: bool = True,
         min_confidence: float = MIN_STT_CONFIDENCE,
+        min_words: int = 3,
     ) -> None:
         self.normalizer = normalizer
         self.require_final = require_final
         self.min_confidence = min_confidence
+        self.min_words = min_words
 
     def validate(
         self,
@@ -428,6 +458,12 @@ class TurnValidator:
         ok, reason = self.normalizer.is_meaningful(clean)
         if not ok:
             return False, reason, clean
+        # A two-word fragment ("phone call", "engine") is half a sentence. Answering
+        # it produced confident nonsense, so it is rejected unless it is a real
+        # short answer such as "yes", "9 am" or the business name.
+        words = clean.split()
+        if len(words) < self.min_words and not is_short_answer(clean):
+            return False, "fragment_too_short", clean
         return True, None, clean
 
 

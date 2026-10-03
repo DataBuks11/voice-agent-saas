@@ -218,6 +218,9 @@ class Session:
         # Speaker bleed needs a moment to reach the mic; ignore that onset window.
         self._echo_guard_frames = 0
         self._barge_taken = False
+        # True once real caller speech was confirmed over our playback: a later
+        # endpoint is the caller finishing, not speaker bleed.
+        self._interrupted_speech = False
         # Audio captured after the echo guard while we speak, kept in case the
         # caller really is interrupting.
         self._interrupt_buf = bytearray()
@@ -569,6 +572,7 @@ class Session:
                 self._echo_candidate = False
                 self._echo_guard_frames = ECHO_GUARD_FRAMES
                 self._interrupt_buf.clear()
+                self._interrupted_speech = False
                 self.vad.reset()
                 await self.send_json({"type": "speak_start", "turnId": turn.turn_id if turn else None})
                 if orch is not None:
@@ -1182,13 +1186,21 @@ class Session:
                         if event == "speech_start":
                             self._echo_candidate = True
                         elif event == "endpoint":
-                            # Speech that stopped on its own was bleed, not a caller.
-                            self._echo_candidate = False
-                            self._interrupt_buf.clear()
-                            self.vad.reset()
+                            if self._echo_candidate or self._interrupted_speech:
+                                # The caller finished talking over us: keep it.
+                                self._echo_candidate = False
+                                self._barge_taken = True
+                                self._interrupted_speech = False
+                                await self._flush_interruption()
+                                self._barge_taken = False
+                            else:
+                                # Speech that stopped on its own was bleed.
+                                self._interrupt_buf.clear()
+                                self.vad.reset()
                         elif self._echo_candidate and self.vad.sustained():
                             self._echo_candidate = False
                             self._barge_taken = True
+                            self._interrupted_speech = True
                             self.interrupted = True
                             if self.orch is not None:
                                 # The caller now owns a turn: open it here so the
