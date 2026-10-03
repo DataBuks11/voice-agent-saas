@@ -674,3 +674,13 @@ async def test_stream_failure_gives_a_controlled_fallback():
     answer = await orch.speak_stream(turn, speak)
     assert "temporary problem" in answer
     assert spoken and "temporary problem" in spoken[0]
+
+
+def test_typed_input_is_never_swallowed_by_the_noise_cooldown():
+    orch, _calls, _audio = make_orchestrator()
+    noise = orch.begin_speech()
+    orch.end_speech()
+    assert orch.on_final("uh huh", turn=noise)[0] is False
+    assert orch.ensure_speech_turn() is None  # audio path respects the cooldown
+    typed = orch.ensure_speech_turn(force=True)
+    assert typed is not None and typed is not noise

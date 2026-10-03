@@ -625,7 +625,7 @@ class VoiceOrchestrator:
         self.audio_playback_active = False
         self.bus.emit(EventType.AUDIO_PLAYBACK_STOPPED, turn_id)
 
-    def ensure_speech_turn(self) -> Turn | None:
+    def ensure_speech_turn(self, force: bool = False) -> Turn | None:
         """Reuse the open turn when the caller is already mid-utterance.
 
         The receive loop and the barge-in path can both see the same speech. Two
@@ -634,11 +634,13 @@ class VoiceOrchestrator:
         """
         if self.state is TurnState.USER_SPEAKING and self.turns.current is not None:
             return self.turns.current
-        if __import__("time").time() < self.reject_cooldown_until:
+        if not force and __import__("time").time() < self.reject_cooldown_until:
             self.bus.emit(
                 EventType.STAGE_REJECTED, None, reason="reject_cooldown", stage="turn_detector"
             )
             return None
+        # force=True is for explicit caller input (typed text): it is proof of a
+        # real utterance, so it must never be swallowed by the noise cooldown.
         return self.begin_speech()
 
     def begin_speech(self) -> Turn:
