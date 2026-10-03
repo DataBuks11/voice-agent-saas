@@ -102,3 +102,75 @@ def test_vad_does_not_split_a_sentence_on_a_natural_pause():
             if ev:
                 events.append(ev)
     assert events == ["speech_start"]
+
+# --------------------------------------------------------------------------- #
+# Phase 15: the agent language must reach the recogniser
+# --------------------------------------------------------------------------- #
+class _FakeWhisper:
+    instances: list["_FakeWhisper"] = []
+
+    def __init__(self, name, device=None, compute_type=None, cpu_threads=None):
+        self.name = name
+        self.compute_type = compute_type
+        _FakeWhisper.instances.append(self)
+
+
+def test_english_agent_keeps_the_english_model(monkeypatch):
+    import sys
+    import types
+
+    from voice_agent.real import FasterWhisperSTT
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FakeWhisper))
+    monkeypatch.delenv("STT_MODEL", raising=False)
+    stt = FasterWhisperSTT("base.en")
+    stt.set_language("en")
+    assert stt._model_name == "base.en"
+    assert [m.name for m in _FakeWhisper.instances] == ["base.en"]
+
+
+def test_hindi_agent_switches_to_the_multilingual_model(monkeypatch):
+    """base.en cannot decode Hindi: the multilingual model must load instead."""
+    import sys
+    import types
+
+    from voice_agent.real import FasterWhisperSTT
+
+    _FakeWhisper.instances.clear()
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FakeWhisper))
+    monkeypatch.setenv("STT_MODEL_MULTILINGUAL", "small")
+    stt = FasterWhisperSTT("base.en")
+    assert stt._model_is_english_only is True
+    stt.set_language("hi")
+    assert stt._model_name == "small"
+    assert stt._model_is_english_only is False
+    assert stt._language == "hi"
+    assert stt.describe()["language"] == "hi"
+    assert [m.name for m in _FakeWhisper.instances] == ["base.en", "small"]
+
+
+def test_marathi_agent_is_not_forced_to_english(monkeypatch):
+    import sys
+    import types
+
+    from voice_agent.real import FasterWhisperSTT
+
+    _FakeWhisper.instances.clear()
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FakeWhisper))
+    stt = FasterWhisperSTT("base.en")
+    stt.set_language("mr")
+    assert stt._language == "mr"
+
+
+def test_an_explicitly_configured_language_always_wins(monkeypatch):
+    import sys
+    import types
+
+    from voice_agent.real import FasterWhisperSTT
+
+    _FakeWhisper.instances.clear()
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_FakeWhisper))
+    monkeypatch.setenv("STT_LANGUAGE", "ta")
+    stt = FasterWhisperSTT("base.en")
+    stt.set_language("hi")  # the agent asks for Hindi...
+    assert stt._language == "ta"  # ...but the operator pinned Tamil
