@@ -375,6 +375,9 @@ class DeepgramAgentSession:
                                 continue
                             text = str(msg.get("text") or "").strip()
                             if text:
+                                if self._is_echo(text):
+                                    log.info("Ignored self-echo text turn: %r", text)
+                                    continue
                                 await self.dg_ws.send(
                                     json.dumps({"type": "InjectUserMessage", "content": text})
                                 )
@@ -526,7 +529,20 @@ class DeepgramAgentSession:
         a = "".join(ch for ch in self._last_assistant_text.lower() if ch.isalnum())
         if len(u) < 4:
             return False
-        return u in a or a in u or (len(u) >= 8 and (a.endswith(u[:10]) or a.startswith(u[:10])))
+        # Direct substring match in either direction
+        if u in a or a in u:
+            return True
+        # Prefix or suffix overlap (e.g. agent said 'DataBuks provides', user echo hears 'DataBuks provides')
+        if len(u) >= 6 and (a.endswith(u[:8]) or a.startswith(u[:8]) or u.endswith(a[-8:]) or u.startswith(a[:8])):
+            return True
+        # Keyword set overlap: if >35% of meaningful words match the assistant's speech
+        u_words = [w.lower() for w in user_text.split() if len(w) > 3]
+        a_words = set(w.lower() for w in self._last_assistant_text.split() if len(w) > 3)
+        if u_words and a_words:
+            matched = sum(1 for w in u_words if w in a_words)
+            if matched / len(u_words) >= 0.35:
+                return True
+        return False
 
     async def close(self) -> None:
         self.closed = True

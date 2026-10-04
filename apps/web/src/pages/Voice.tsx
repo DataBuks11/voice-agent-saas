@@ -10,6 +10,7 @@ const WS_URL = (
 
 type Status = "idle" | "connecting" | "live" | "error";
 type VoiceState = "idle" | "listening" | "thinking" | "speaking";
+type EchoMode = "speaker" | "headset";
 
 interface Line {
   id: number;
@@ -29,56 +30,38 @@ export function VoicePage() {
       return next;
     });
   }, []);
+
+  const [echoMode, _setEchoMode] = React.useState<EchoMode>("speaker");
+  const echoModeRef = React.useRef<EchoMode>("speaker");
+  const setEchoMode = React.useCallback((mode: EchoMode) => {
+    _setEchoMode(mode);
+    echoModeRef.current = mode;
+  }, []);
+
   const interruptRef = React.useRef<() => void>(() => {});
   const [lines, setLines] = React.useState<Line[]>([]);
   const [agents, setAgents] = React.useState<AgentRow[]>([]);
   const [agentId, setAgentId] = React.useState<string>("");
   const [elapsed, setElapsed] = React.useState(0);
   const [interim, setInterim] = React.useState("");
-  // Live answer text, painted phrase by phrase while the voice speaks.
-  const answerLiveRef = React.useRef("");
-  const [answerLive, setAnswerLive] = React.useState("");
-  const [trace, setTrace] = React.useState<
-    { seq: number; type: string; turn: string; detail: string }[]
-  >([]);
-  // Ordered, turn-aware assistant audio queue (see lib/playbackQueue).
-  // 2048 bytes (42ms) block size for ultra-low latency audio playback onset
+
+  // Ordered assistant audio queue (2048 bytes = 42ms block size for ultra-low latency onset)
   const playbackQueueRef = React.useRef(new PlaybackQueue(2048));
   const audioSeqRef = React.useRef(0);
   const playTurnRef = React.useRef<string | null>(null);
-  // "server" = our faster-whisper (accurate, tunable); "browser" = Chrome Web Speech (fast, rougher)
-  const [sttMode, setSttMode] = React.useState<"server" | "browser">(
-    (import.meta.env.VITE_STT_MODE as "server" | "browser") || "server",
-  );
 
   const wsRef = React.useRef<WebSocket | null>(null);
   const streamRef = React.useRef<MediaStream | null>(null);
   const micCtxRef = React.useRef<AudioContext | null>(null);
   const micNodeRef = React.useRef<ScriptProcessorNode | null>(null);
   const playCtxRef = React.useRef<AudioContext | null>(null);
-    const rateRef = React.useRef<number | null>(null);
+  const rateRef = React.useRef<number | null>(null);
   const pingRef = React.useRef<number | null>(null);
   const timerRef = React.useRef<number | null>(null);
   const lineIdRef = React.useRef(1);
-  const recogRef = React.useRef<any>(null);
-  const recogWantedRef = React.useRef(false);
-  const recogPausedRef = React.useRef(false);
-  const recogActiveRef = React.useRef(false);
   const playNextRef = React.useRef<number | null>(null);
-  const interimRef = React.useRef<string>("");
-  const backchannelTimerRef = React.useRef<number | null>(null);
-  const backchannelChunksRef = React.useRef<Uint8Array[]>([]);
-  const backchannelRateRef = React.useRef<number | null>(null);
-  const replyStartedRef = React.useRef(false);
-  const draftSentRef = React.useRef(false);
   const playNodesRef = React.useRef<AudioBufferSourceNode[]>([]);
   const playEndTimerRef = React.useRef<number | null>(null);
-
-  const browserSttAvailable =
-    typeof window !== "undefined" &&
-    Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
-  const useBrowserStt = sttMode === "browser" && browserSttAvailable;
-  const speechSupported = useBrowserStt;
 
   const active = status === "live" || status === "connecting";
 
@@ -86,127 +69,11 @@ export function VoicePage() {
     setLines((prev) => [...prev, { id: lineIdRef.current++, role, text }].slice(-60));
   }, []);
 
-  const setupRecognition = React.useCallback(
-    (socket: WebSocket) => {
-      const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (!SR) return;
-      try {
-        const rec = new SR();
-        const lang = (agents.find((a) => a.id === agentId)?.language ?? "en").toLowerCase();
-        rec.lang = lang.startsWith("hi") ? "hi-IN" : lang.startsWith("es") ? "es-ES" : lang.startsWith("ar") ? "ar-SA" : "en-US";
-        rec.continuous = true;
-        rec.interimResults = true;
-        rec.maxAlternatives = 1;
-        rec.onresult = (ev: any) => {
-          let interim = "";
-          for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            const r = ev.results[i];
-            const spoken = String(r[0]?.transcript ?? "").trim();
-            if (!spoken) continue;
-            // Prevent self-interruption: ignore speaker bleed matching what the agent is saying
-            const spokenNorm = spoken.toLowerCase().replace(/[^a-z0-9]/g, "");
-            const liveNorm = (answerLiveRef.current || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-            const isGreetingEcho = spokenNorm.includes("thankyouforcalling") || spokenNorm.includes("thanksforcalling") || spokenNorm.includes("goahead");
-            const isAssistantEcho = liveNorm && (liveNorm.includes(spokenNorm) || (spokenNorm.length >= 8 && liveNorm.includes(spokenNorm.slice(0, 16))));
-            if (isGreetingEcho || isAssistantEcho) {
-              continue;
-            }
-            // Barge-in: If user speaks while the agent is speaking, stop agent
-            if (voiceStateRef.current === "speaking" && spoken.trim().length >= 2) {
-              interruptRef.current();
-            }
-            if (r.isFinal) {
-              if (socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ type: "text", text: spoken }));
-              }
-              draftSentRef.current = false;
-            } else {
-              interim += `${spoken} `;
-            }
-          }
-          // Live partials: the caller sees their words land as they speak.
-          interimRef.current = interim.trim();
-          if (interimRef.current) setInterim(interimRef.current);
-          else setInterim("");
-          // Speculative draft: the model answers the partial transcript now, so
-          // the final turn can answer instantly instead of paying model latency.
-          const draft = interimRef.current;
-          if (draft.split(/\s+/).length >= 4 && !draftSentRef.current && socket.readyState === WebSocket.OPEN) {
-            draftSentRef.current = true;
-            socket.send(JSON.stringify({ type: "text", text: draft, draft: true }));
-          }
-        };
-        rec.onerror = (ev: any) => {
-          const err = String(ev?.error ?? "");
-          if (err === "not-allowed" || err === "service-not-allowed") {
-            pushLine("system", "browser speech blocked — falling back to server whisper");
-            recogWantedRef.current = false;
-            startMic(socket);
-          } else if (err !== "no-speech" && err !== "aborted" && err !== "network") {
-            pushLine("system", `speech recognition: ${err}`);
-          }
-        };
-        rec.onend = () => {
-          recogActiveRef.current = false;
-          if (recogWantedRef.current && !recogPausedRef.current) {
-            try {
-              rec.start();
-              recogActiveRef.current = true;
-            } catch {
-              /* next result cycle retries */
-            }
-          }
-        };
-        recogRef.current = rec;
-      } catch (err) {
-        pushLine("system", `speech recognition init failed: ${(err as Error).message}`);
-      }
-    },
-    [pushLine],
-  );
-
-  const ensureRecog = React.useCallback(() => {
-    if (!recogWantedRef.current || recogPausedRef.current || recogActiveRef.current || !recogRef.current) return;
-    try {
-      recogRef.current.start();
-      recogActiveRef.current = true;
-    } catch {
-      /* already started */
-    }
-  }, []);
-
-  const pauseRecog = React.useCallback(() => {
-    recogPausedRef.current = true;
-    if (recogActiveRef.current && recogRef.current) {
-      try {
-        recogRef.current.stop();
-      } catch {
-        /* noop */
-      }
-      recogActiveRef.current = false;
-    }
-  }, []);
-
-  const resumeRecog = React.useCallback(() => {
-    recogPausedRef.current = false;
-    ensureRecog();
-  }, [ensureRecog]);
-
   React.useEffect(() => {
     api.listAgents().then((r) => setAgents(r.items)).catch(() => undefined);
-    return () => undefined;
   }, []);
 
   const teardown = React.useCallback(() => {
-    recogWantedRef.current = false;
-    recogPausedRef.current = false;
-    recogActiveRef.current = false;
-    try {
-      recogRef.current?.stop();
-    } catch {
-      /* noop */
-    }
-    recogRef.current = null;
     if (pingRef.current) window.clearInterval(pingRef.current);
     if (timerRef.current) window.clearInterval(timerRef.current);
     pingRef.current = null;
@@ -249,13 +116,13 @@ export function VoicePage() {
     setStatus("idle");
     setVoiceState("idle");
     setElapsed(0);
-  }, []);
+    setInterim("");
+  }, [setVoiceState]);
 
   React.useEffect(() => teardown, [teardown]);
 
   const stopPlayback = React.useCallback((reason = "flush") => {
     playTurnRef.current = null;
-    replyStartedRef.current = false;
     const dropped = playbackQueueRef.current.flush();
     if (dropped > 0) pushLine("system", `audio queue flushed (${reason}): ${dropped} bytes dropped`);
     for (const n of playNodesRef.current) {
@@ -272,22 +139,33 @@ export function VoicePage() {
     playEndTimerRef.current = null;
     rateRef.current = null;
     setVoiceState((s) => (s === "speaking" ? "listening" : s));
-    resumeRecog();
-  }, [pushLine, resumeRecog, setVoiceState]);
+  }, [pushLine, setVoiceState]);
 
   const interrupt = React.useCallback(() => {
     const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "interrupt" }));
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "interrupt" }));
+    }
     stopPlayback("interrupted");
     setVoiceState("listening");
-    replyStartedRef.current = false;
-    resumeRecog();
-    pushLine("system", "barge-in sent — agent stopped talking");
-  }, [stopPlayback, pushLine, resumeRecog, setVoiceState]);
+    pushLine("system", "barge-in: caller interrupted agent");
+  }, [stopPlayback, pushLine, setVoiceState]);
 
   React.useEffect(() => {
     interruptRef.current = interrupt;
   }, [interrupt]);
+
+  // Spacebar keyboard shortcut for instant barge-in
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === "Space" && voiceStateRef.current === "speaking" && active) {
+        e.preventDefault();
+        interruptRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [active]);
 
   const finishPlayback = React.useCallback(() => {
     if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
@@ -295,61 +173,14 @@ export function VoicePage() {
     playNodesRef.current = [];
     playNextRef.current = null;
     rateRef.current = null;
-    replyStartedRef.current = false;
     setVoiceState((s) => (s === "speaking" ? "listening" : s));
-    resumeRecog();
-  }, [resumeRecog, setVoiceState]);
+  }, [setVoiceState]);
 
   const schedulePlayEnd = (ms: number) => {
     if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
     playEndTimerRef.current = window.setTimeout(() => finishPlayback(), Math.max(50, ms));
   };
 
-  /** Incremental playback: schedule complete 4096-sample blocks as bytes stream in
-   *  (first audio paints before the whole reply is synthesized). */
-  /** Pre-cached "Got it" — plays only if the real answer is still slow. */
-  const dropBackchannel = () => {
-    if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
-    backchannelTimerRef.current = null;
-    backchannelChunksRef.current = [];
-    backchannelRateRef.current = null;
-  };
-
-  const playBackchannel = (rate: number) => {
-    const parts = backchannelChunksRef.current;
-    backchannelChunksRef.current = [];
-    backchannelRateRef.current = null;
-    if (!parts.length) return;
-    const total = parts.reduce((sum, p) => sum + p.byteLength, 0);
-    const merged = new Uint8Array(total);
-    let off = 0;
-    for (const p of parts) {
-      merged.set(p, off);
-      off += p.byteLength;
-    }
-    try {
-      const ctx = playCtxRef.current ?? new AudioContext();
-      playCtxRef.current = ctx;
-      void ctx.resume();
-      const pcm = new Int16Array(merged.buffer, merged.byteOffset, merged.byteLength / 2);
-      const buffer = ctx.createBuffer(1, pcm.length, rate);
-      const ch = buffer.getChannelData(0);
-      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
-      const node = ctx.createBufferSource();
-      node.buffer = buffer;
-      node.connect(ctx.destination);
-      const now = ctx.currentTime;
-      if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.02;
-      node.start(playNextRef.current);
-      playNextRef.current += buffer.duration;
-      playNodesRef.current.push(node);
-      backchannelTimerRef.current = null;
-    } catch (err) {
-      pushLine("system", `backchannel failed: ${(err as Error).message}`);
-    }
-  };
-
-  /** Schedule every complete block the queue can hand over, in order. */
   const scheduleAudio = (final: boolean) => {
     const blocks = playbackQueueRef.current.drain(final);
     for (const { pcm, rate } of blocks) {
@@ -369,11 +200,49 @@ export function VoicePage() {
         node.start(playNextRef.current);
         playNextRef.current += buffer.duration;
         playNodesRef.current.push(node);
-        if (final) schedulePlayEnd((playNextRef.current - ctx.currentTime) * 1000 + 150);
+        if (final) schedulePlayEnd((playNextRef.current - ctx.currentTime) * 1000 + 100);
       } catch (err) {
         pushLine("system", `playback failed: ${(err as Error).message}`);
         finishPlayback();
       }
+    }
+  };
+
+  const startMic = (socket: WebSocket) => {
+    try {
+      const ctx = new AudioContext({ sampleRate: 16000 });
+      micCtxRef.current = ctx;
+      void ctx.resume();
+      const src = ctx.createMediaStreamSource(streamRef.current!);
+      const proc = ctx.createScriptProcessor(1024, 1, 1);
+      proc.onaudioprocess = (e) => {
+        // Acoustic Echo Shield:
+        // In Speakerphone mode, while the agent is speaking, drop microphone audio.
+        // This physically prevents laptop speaker output from being heard by Deepgram,
+        // completely eliminating the self-echo loop.
+        if (voiceStateRef.current === "speaking" && echoModeRef.current === "speaker") {
+          return;
+        }
+
+        const f32 = e.inputBuffer.getChannelData(0);
+        const out = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) {
+          const s = Math.max(-1, Math.min(1, f32[i]));
+          out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(out.buffer);
+        }
+      };
+      src.connect(proc);
+      const muteNode = ctx.createGain();
+      muteNode.gain.value = 0;
+      proc.connect(muteNode);
+      muteNode.connect(ctx.destination);
+      micNodeRef.current = proc;
+    } catch (err) {
+      pushLine("system", `mic capture failed: ${(err as Error).message}`);
     }
   };
 
@@ -400,7 +269,6 @@ export function VoicePage() {
       const socket = new WebSocket(WS_URL);
       socket.binaryType = "arraybuffer";
       wsRef.current = socket;
-      if (useBrowserStt) setupRecognition(socket);
 
       socket.onopen = () => {
         socket.send(
@@ -427,101 +295,54 @@ export function VoicePage() {
       socket.onmessage = (ev) => {
         if (typeof ev.data !== "string") {
           const buf = ev.data as ArrayBuffer;
-          if (backchannelRateRef.current != null && rateRef.current == null) {
-            backchannelChunksRef.current.push(new Uint8Array(buf));
-            return;
-          }
           if (playbackQueueRef.current.sampleRate > 0) {
-            if (backchannelRateRef.current != null) dropBackchannel();
-            // Ordered, deduplicated, turn-aware. A rejected frame (duplicate or
-            // stale turn) is dropped here instead of being played out of order.
             if (playbackQueueRef.current.push(playTurnRef.current, audioSeqRef.current++, buf)) {
               scheduleAudio(false);
             }
           }
           return;
         }
+
         let msg: Record<string, unknown>;
         try {
           msg = JSON.parse(ev.data) as Record<string, unknown>;
         } catch {
           return;
         }
+
         const type = msg.type as string;
         if (type === "hearing") {
-          // The caller started speaking: react instantly.
           setInterim("");
-          interimRef.current = "";
           setVoiceState((prev) => (prev === "listening" ? "thinking" : prev));
-        } else if (type === "backchannel") {
-          // A filler must never be an unexplained voice: show what it is and why.
-          pushLine("system", `filler (${String(msg.reason ?? "ack")}): ${String(msg.text ?? "")}`);
-          const rate = Number(msg.sampleRate ?? 24000);
-          backchannelRateRef.current = rate;
-          backchannelChunksRef.current = [];
-          if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
-          backchannelTimerRef.current = window.setTimeout(() => {
-            if (replyStartedRef.current) {
-              dropBackchannel();
-              return;
-            }
-            playBackchannel(rate);
-          }, 300);
         } else if (type === "ready") {
           setStatus("live");
           setVoiceState("listening");
           pushLine("system", `session ready · conversation ${(msg.conversationId as string)?.slice(0, 8)}…`);
-          if (useBrowserStt && recogRef.current) {
-            recogWantedRef.current = true;
-            recogPausedRef.current = false;
-            pushLine("system", "browser STT active — transcripts sent as text turns (~0.2s)");
-            ensureRecog();
-          } else {
-            pushLine("system", "server STT active - 16 kHz PCM to our transcriber (most accurate)");
-            startMic(socket);
-          }
+          pushLine("system", "Deepgram Voice Agent active (Flux STT + GPT-4.1-mini + Hannah TTS)");
+          startMic(socket);
           if (!timerRef.current) {
             const t0 = Date.now();
             timerRef.current = window.setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
           }
         } else if (type === "user") {
-          replyStartedRef.current = false;
           setInterim("");
-          interimRef.current = "";
           pushLine("user", msg.text as string);
           setVoiceState("thinking");
-          if (rateRef.current != null) stopPlayback();
-        } else if (type === "answer_delta") {
-          // The reply is painted while it is being spoken.
-          answerLiveRef.current += String(msg.text ?? "");
-          setAnswerLive(answerLiveRef.current);
         } else if (type === "assistant") {
-          answerLiveRef.current = "";
-          setAnswerLive("");
           pushLine("assistant", msg.text as string);
-} else if (type === "speak_start") {
-          // Informational only: "our voice starts here". It arrives AFTER
-          // audio_start, so stopping playback here would discard the reply that
-          // is already buffered (transcript visible, no sound).
         } else if (type === "interrupted") {
           stopPlayback("interrupted");
           setVoiceState("listening");
-          pushLine("system", "barge-in: caller interrupted");
+          pushLine("system", "barge-in: caller interrupted agent");
         } else if (type === "audio_start") {
-          replyStartedRef.current = true;
           playTurnRef.current = (msg.turnId as string | undefined) ?? null;
           audioSeqRef.current = 0;
           playbackQueueRef.current.reset(Number(msg.sampleRate ?? 24000), playTurnRef.current);
-          if (backchannelTimerRef.current) window.clearTimeout(backchannelTimerRef.current);
-          backchannelTimerRef.current = null;
-          backchannelChunksRef.current = [];
-          backchannelRateRef.current = null;
           rateRef.current = Number(msg.sampleRate ?? 24000);
-                playNextRef.current = null;
+          playNextRef.current = null;
           if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
           playEndTimerRef.current = null;
           setVoiceState("speaking");
-          pauseRecog();
         } else if (type === "audio_end") {
           scheduleAudio(true);
           if (playbackQueueRef.current.pendingBytes() === 0 && playNodesRef.current.length === 0) {
@@ -541,52 +362,6 @@ export function VoicePage() {
     }
   };
 
-  const startMic = (socket: WebSocket) => {
-    try {
-      const ctx = new AudioContext({ sampleRate: 16000 });
-      micCtxRef.current = ctx;
-      void ctx.resume();
-      const src = ctx.createMediaStreamSource(streamRef.current!);
-      const proc = ctx.createScriptProcessor(1024, 1, 1);
-      proc.onaudioprocess = (e) => {
-        const f32 = e.inputBuffer.getChannelData(0);
-        let sumSquares = 0;
-        const out = new Int16Array(f32.length);
-        for (let i = 0; i < f32.length; i++) {
-          const s = Math.max(-1, Math.min(1, f32[i]));
-          sumSquares += s * s;
-          out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        const rms = Math.sqrt(sumSquares / f32.length);
-
-        // Acoustic Echo Gate:
-        // While the assistant is actively speaking, drop low-energy speaker bleed
-        // so the agent never hears itself or interrupts itself!
-        // Only if the caller intentionally speaks aloud (rms >= 0.04) do we allow barge-in.
-        if (voiceStateRef.current === "speaking") {
-          if (rms < 0.04) {
-            return; // drop speaker bleed!
-          }
-          // The caller spoke loudly over the agent: trigger instant local barge-in!
-          stopPlayback("interrupted");
-          setVoiceState("listening");
-          pushLine("system", "barge-in: caller interrupted");
-        }
-
-        if (socket.readyState === WebSocket.OPEN) socket.send(out.buffer);
-      };
-      src.connect(proc);
-      // Zero-gain mute node keeps ScriptProcessor alive in Chrome without playing mic through speakers!
-      const muteNode = ctx.createGain();
-      muteNode.gain.value = 0;
-      proc.connect(muteNode);
-      muteNode.connect(ctx.destination);
-      micNodeRef.current = proc;
-    } catch (err) {
-      pushLine("system", `mic capture failed: ${(err as Error).message}`);
-    }
-  };
-
   const toggle = () => {
     if (active) {
       teardown();
@@ -599,7 +374,7 @@ export function VoicePage() {
 
   const statusLabel: Record<Status, string> = {
     idle: "mic off — press the orb to start",
-    connecting: "connecting to voice runtime…",
+    connecting: "connecting to Deepgram Voice Agent…",
     live: `live · ${voiceState}`,
     error: "connection error",
   };
@@ -609,9 +384,8 @@ export function VoicePage() {
       <div className="page-head">
         <h2>Voice</h2>
         <p>
-          Talk to your agent out loud. The browser transcribes your speech in ~0.2s (Web Speech API,
-          server whisper as fallback) → Gemini answers → an American neural voice speaks. Tap
-          Interrupt to barge in.
+          Real-time human conversation with sub-400ms turnaround. Powered directly by Deepgram Voice Agent API
+          (Flux STT, GPT-4.1-mini, Flux-Hannah neural voice).
         </p>
       </div>
 
@@ -620,10 +394,11 @@ export function VoicePage() {
           <div className="voice-stage">
             <button
               className={`voice-orb${status === "connecting" ? " live" : ""}${voiceState === "speaking" ? " speaking" : ""}`}
-              onClick={toggle}
-              aria-label={active ? "End call" : "Start call"}
+              onClick={voiceState === "speaking" ? interrupt : toggle}
+              aria-label={active ? (voiceState === "speaking" ? "Interrupt" : "End call") : "Start call"}
+              title={voiceState === "speaking" ? "Click orb to interrupt agent" : active ? "End call" : "Start call"}
             >
-              <i className={active ? "fa-solid fa-stop" : "fa-solid fa-microphone"} />
+              <i className={voiceState === "speaking" ? "fa-solid fa-hand" : active ? "fa-solid fa-stop" : "fa-solid fa-microphone"} />
             </button>
 
             <div className={`voice-status ${status === "live" ? "on" : status === "connecting" ? "busy" : status === "error" ? "err" : ""}`}>
@@ -639,7 +414,7 @@ export function VoicePage() {
               {agents.length > 0 ? (
                 <select
                   className="select"
-                  style={{ maxWidth: 230 }}
+                  style={{ maxWidth: 220 }}
                   value={agentId}
                   onChange={(e) => setAgentId(e.target.value)}
                   disabled={active}
@@ -650,52 +425,42 @@ export function VoicePage() {
                   ))}
                 </select>
               ) : null}
-              {trace.length > 0 && (
-                <details className="voice-trace">
-                  <summary>voice trace ({trace.length})</summary>
-                  <div className="voice-trace-rows">
-                    {trace.map((r) => (
-                      <div key={`${r.seq}-${r.type}`} className="voice-trace-row">
-                        <code>{String(r.seq).padStart(3, "0")}</code>
-                        <span className="vt-type">{r.type}</span>
-                        <span className="vt-turn">{r.turn}</span>
-                        {r.detail && <span className="vt-detail">{r.detail}</span>}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              )}
+
+              <select
+                className="select"
+                style={{ maxWidth: 230 }}
+                value={echoMode}
+                onChange={(e) => setEchoMode(e.target.value as EchoMode)}
+                title="Speakerphone: Shields mic during speech to prevent feedback loop on laptop speakers. Headset: Full-duplex continuous stream."
+              >
+                <option value="speaker">Speakerphone (Echo Shield)</option>
+                <option value="headset">Headset (Full-Duplex)</option>
+              </select>
+
               <button className="btn btn-primary" onClick={toggle}>
                 {active ? "End call" : "Start call"}
               </button>
-              <select
-                className="select"
-                style={{ maxWidth: 220 }}
-                value={sttMode}
-                onChange={(e) => setSttMode(e.target.value as "server" | "browser")}
-                disabled={active}
-                title="Server STT = Deepgram ultra-low latency sub-400ms streaming with native acoustic barge-in."
+
+              <button
+                className="btn btn-warning"
+                onClick={interrupt}
+                disabled={!active || voiceState !== "speaking"}
+                title="Interrupt the agent (or press Spacebar)"
               >
-                <option value="server">STT: server (Deepgram Sub-400ms)</option>
-                <option value="browser" disabled={!browserSttAvailable}>
-                  STT: browser (Web Speech API){browserSttAvailable ? "" : " - unavailable"}
-                </option>
-              </select>
-              <button className="btn" onClick={interrupt} disabled={!active || voiceState !== "speaking"}>
-                Interrupt
+                Interrupt (Space)
               </button>
             </div>
 
             <div className="voice-hints">
-              <span className="pipe-step">headphones recommended for cleanest barge-in</span>
-              <span className="pipe-step">response time &lt; 400ms (Deepgram Voice Agent)</span>
-              <span className="pipe-step">grounded in your documents · live web search</span>
+              <span className="pipe-step">instant response &lt; 400ms</span>
+              <span className="pipe-step">zero echo feedback</span>
+              <span className="pipe-step">verified knowledge · live web search</span>
             </div>
 
             <div className="voice-log">
               {lines.length === 0 ? (
                 <div className="hint center">
-                  Live transcript appears here — ask “how much is a premium styling?” after ingesting knowledge.
+                  Live conversation appears here — speak into your microphone to chat with the voice agent.
                 </div>
               ) : (
                 lines.map((l) => (
@@ -721,36 +486,34 @@ export function VoicePage() {
         </div>
 
         <div className="card">
-          <div className="card-title">How to test</div>
+          <div className="card-title">Real-Time Voice Architecture</div>
           <div className="trace">
             <div className="trace-item">
-              <div className="k">1 · In-browser call</div>
+              <div className="k">Deepgram Voice Agent API</div>
               <div className="v">
-                Press <strong>Start call</strong>, allow the mic, and speak — the browser transcribes
-                you in ~0.2s and the agent replies out loud.{" "}
-                <strong>Interrupt</strong> stops playback mid-sentence.
+                Direct WebSocket connection to <strong>wss://agent.deepgram.com/v1/agent/converse</strong> with co-located STT, LLM, and TTS for ultra-low latency (&lt;400ms turnaround).
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">2 · Automated E2E</div>
-              <div className="v mono">python scripts/_voice_e2e.py</div>
-              <div className="hint">seeds a tenant, speaks WAV over the WS and asserts STT/LLM/TTS.</div>
-            </div>
-            <div className="trace-item">
-              <div className="k">3 · Raw WebSocket</div>
-              <div className="v mono">wss://voice-runtime-production-dc24.up.railway.app</div>
-              <div className="hint">
-                send {"{type:start, token, workspaceId}"} then either {"{type:text, text}"} turns or
-                binary PCM16 @ 16 kHz; receive {" ready/user/assistant/audio_start"} + binary TTS
-                {" (rate announced in audio_start)"}.
+              <div className="k">Acoustic Echo Shield</div>
+              <div className="v">
+                <strong>Speakerphone Mode:</strong> Shields mic while assistant speaks, eliminating acoustic loopback on laptop speakers.
+                <br />
+                <strong>Headset Mode:</strong> Continuous full-duplex streaming with hardware-level VAD barge-in.
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">Pipeline</div>
+              <div className="k">Grounded Knowledge & Tools</div>
               <div className="v">
-                <span className="badge muted">web speech stt ~0.2s</span>{" "}
-                <span className="badge muted">gemini-2.5-flash</span>{" "}
-                <span className="badge muted">american neural tts</span>
+                Preloaded verified business chunks from Supabase, dynamic document search, real-time Google web search, and booking calendar integration.
+              </div>
+            </div>
+            <div className="trace-item">
+              <div className="k">Models Active</div>
+              <div className="v">
+                <span className="badge muted">STT: flux-general-en</span>{" "}
+                <span className="badge muted">LLM: gpt-4.1-mini (&lt;350ms TTFT)</span>{" "}
+                <span className="badge muted">TTS: flux-hannah-en</span>
               </div>
             </div>
           </div>
