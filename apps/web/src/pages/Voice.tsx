@@ -103,6 +103,14 @@ export function VoicePage() {
             const r = ev.results[i];
             const spoken = String(r[0]?.transcript ?? "").trim();
             if (!spoken) continue;
+            // Prevent self-interruption: ignore speaker bleed matching what the agent is saying
+            const spokenNorm = spoken.toLowerCase().replace(/[^a-z0-9]/g, "");
+            const liveNorm = (answerLiveRef.current || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+            const isGreetingEcho = spokenNorm.includes("thankyouforcalling") || spokenNorm.includes("thanksforcalling") || spokenNorm.includes("goahead");
+            const isAssistantEcho = liveNorm && (liveNorm.includes(spokenNorm) || (spokenNorm.length >= 8 && liveNorm.includes(spokenNorm.slice(0, 16))));
+            if (isGreetingEcho || isAssistantEcho) {
+              continue;
+            }
             // Instant barge-in: If user speaks while the agent is speaking or replying, stop agent immediately!
             if (voiceStateRef.current === "speaking" || replyStartedRef.current) {
               interruptRef.current();
@@ -513,6 +521,7 @@ export function VoicePage() {
           if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
           playEndTimerRef.current = null;
           setVoiceState("speaking");
+          pauseRecog();
         } else if (type === "audio_end") {
           scheduleAudio(true);
           if (playbackQueueRef.current.pendingBytes() === 0 && playNodesRef.current.length === 0) {

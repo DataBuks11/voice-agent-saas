@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import enum
 import logging
+import os
 import re
 import time
 import uuid
@@ -395,6 +396,7 @@ SHORT_ANSWERS = {
     "now", "later", "maybe", "never", "always", "same", "different", "anything", "nothing",
     "yes please", "no thanks", "not now", "next", "done", "stop", "wait", "hello", "hi",
     "main", "office", "main office", "call", "book", "appointment", "services", "service",
+    "hit", "rate", "hit rate", "consult", "pricing", "help", "support", "talk", "speak", "human", "agent", "booking",
 }
 
 
@@ -422,7 +424,7 @@ class TurnValidator:
         normalizer: TranscriptNormalizer,
         require_final: bool = True,
         min_confidence: float = MIN_STT_CONFIDENCE,
-        min_words: int = 3,
+        min_words: int = int(os.getenv("MIN_WORDS_PER_TURN", "3")),
     ) -> None:
         self.normalizer = normalizer
         self.require_final = require_final
