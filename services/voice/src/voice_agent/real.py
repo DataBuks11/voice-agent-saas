@@ -238,10 +238,16 @@ class DeepgramSTT(STTProvider):
             "model": self._model,
             "smart_format": "true",
             "punctuate": "true",
+            # Verbatim: prices, times and phone numbers must come back as digits
+            # ("$90", "10:30"), not spelled out, or the caller is misquoted.
+            "numerals": "true",
             "filler_words": "false",
         }
         if self._language and self._language != "auto":
             params["language"] = self._language
+        else:
+            # Multilingual calls: let Deepgram decide instead of forcing English.
+            params["detect_language"] = "true"
         if self._diarize and self.final_pass:
             # Speaker attribution is only worth its extra ~0.6 s on the answer we
             # actually keep; interim drafts run without it.

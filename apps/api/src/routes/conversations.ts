@@ -968,20 +968,30 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       };
       contextInfo = { usedTokens: ctx.usedTokens, truncated: ctx.truncated, includedChunkIds: ctx.includedChunkIds };
 if (retrieved.length === 0 && docCount > 0) {
-        // Documents exist but nothing matched this question. Refusing outright is
-        // what made the agent sound broken ("I don't have verified information"
-        // to "what are you doing"), so the model answers conversationally and only
-        // says it lacks the detail when the caller asked for a specific fact.
-        const honest = await complete({
-          system: `${systemWithStyle(agent.systemPrompt, agent.language)}\n\n${NO_CONTEXT_NOTE}`,
-          context: ctx.contextText,
-          user: body.content,
-          fallback: agent.fallbackResponse,
-        });
-        answerText = honest.text;
-        verdict = { ok: true, confidence: 0.4, issues: ["no matching knowledge for this question"], safeText: answerText };
-        answerSource = honest.source === "llm" ? "llm-no-context" : "fallback";
-        writeDelta(answerText);
+        // Documents exist but nothing matched. If this is a real question, look
+        // it up before giving up: a dead-end "I don't have verified information"
+        // is what made the agent sound broken.
+        const found = looksFactual(body.content) ? await webSearch(body.content) : { text: "", sources: [] };
+        if (found.text) {
+          answerText = found.text;
+          verdict = { ok: true, confidence: 0.5, issues: ["answered from the web, not from the documents"], safeText: answerText };
+          answerSource = "websearch";
+          console.log(`web search answered a no-context question: sources=${found.sources.length}`);
+          writeDelta(answerText);
+        } else {
+          // Still nothing on the web, so answer conversationally and only admit
+          // lacking the detail when the caller asked for a specific fact.
+          const honest = await complete({
+            system: `${systemWithStyle(agent.systemPrompt, agent.language)}\n\n${NO_CONTEXT_NOTE}`,
+            context: ctx.contextText,
+            user: body.content,
+            fallback: agent.fallbackResponse,
+          });
+          answerText = honest.text;
+          verdict = { ok: true, confidence: 0.4, issues: ["no matching knowledge for this question"], safeText: answerText };
+          answerSource = honest.source === "llm" ? "llm-no-context" : "fallback";
+          writeDelta(answerText);
+        }
       } else {
         // Ungrounded (no docs yet): chat like a normal assistant, never invent facts.
         // Grounded (retrieved > 0): stream live, harness verdict replaces preview if needed.
