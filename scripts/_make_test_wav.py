@@ -13,7 +13,7 @@ import sys
 import wave
 
 DEFAULT_TEXT = "How much does the growth plan cost?"
-OUT = os.getenv("TEST_MIC_WAV", os.path.join(os.environ.get("TEMP", "."), "voice_test_mic.wav"))
+OUT = os.environ.get("TEST_MIC_OUT") or os.getenv("TEST_MIC_WAV", os.path.join(os.environ.get("TEMP", "."), "voice_test_mic.wav"))
 
 
 def synth_16k(text: str):

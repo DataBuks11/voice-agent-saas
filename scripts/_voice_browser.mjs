@@ -26,6 +26,24 @@ const TURNS = [
   { q: "That time doesn't work, can you offer another slot?", expect: null },
 ];
 
+/** Wait until the route answers over plain HTTP, so the browser never races a cold start. */
+const warmRoute = async (url) => {
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+      if (res.ok) {
+        if (attempt > 1) console.log(`      warmed ${url} on attempt ${attempt}`);
+        return;
+      }
+      console.log(`      warm ${url} -> ${res.status}`);
+    } catch (err) {
+      console.log(`      warm ${url} attempt ${attempt} failed: ${String(err).slice(0, 60)}`);
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  throw new Error(`could not warm ${url}`);
+};
+
 const main = async () => {
   const email = `browser-${Math.random().toString(36).slice(2, 10)}@voiceagent.dev`;
   const password = "Passw0rd!2026";
@@ -138,7 +156,11 @@ const main = async () => {
       Object.assign(window.WebSocket, Native);
     });
 
-    await page.goto(`${BASE}/app/login`, { waitUntil: "networkidle2", timeout: 60000 });
+    // Vercel cold starts can hold the first paint past any sane timeout, and a
+    // browser navigation that fails here tells us nothing about the product.
+    // Warm the route up over plain HTTP, then load with a patient budget.
+    await warmRoute(`${BASE}/app/login`);
+    await page.goto(`${BASE}/app/login`, { waitUntil: "networkidle2", timeout: 120000 });
     await page.evaluate(
       (t, id, name) => {
         localStorage.setItem("vas.token", t);
@@ -149,7 +171,7 @@ const main = async () => {
       wsId,
       "Browser Voice",
     );
-    await page.goto(`${BASE}/app/voice`, { waitUntil: "networkidle2", timeout: 60000 });
+    await page.goto(`${BASE}/app/voice`, { waitUntil: "networkidle2", timeout: 120000 });
     const started = await page.evaluate(() => {
       const btn = [...document.querySelectorAll("button")].find((b) => /start call/i.test(b.textContent ?? ""));
       if (!btn) return false;

@@ -13,6 +13,28 @@ const docArg = process.argv.includes("--doc") ? process.argv[process.argv.indexO
 const VOICE_WS = process.env.VOICE_WS_URL ?? "wss://voice-runtime-production-dc24.up.railway.app";
 const PIPER = process.env.PIPER_VOICE ?? `${process.env.LOCALAPPDATA ?? ""}\\piper\\en_US-lessac-medium.onnx`;
 
+/**
+ * The browser step must hear real speech.
+ *
+ * With the synthetic Chrome tone the microphone never says the second or third
+ * question, so those turns could never pass no matter how good the product is.
+ * The WAV is deterministic: one fixed sentence, generated on the spot.
+ */
+const realMicEnv = () => {
+  if (process.env.VOICE_TEST_REAL_MIC === "1") return {};
+  const wav = path.join(process.env.TEMP || os.tmpdir(), "voice_verify_mic.wav");
+  try {
+    execFileSync("python", ["scripts/_make_test_wav.py"], {
+      stdio: "ignore",
+      env: { ...process.env, TEST_MIC_OUT: wav },
+    });
+    if (!fs.existsSync(wav)) return {};
+    return { VOICE_TEST_REAL_MIC: "1", TEST_MIC_WAV: wav };
+  } catch {
+    return {};
+  }
+};
+
 const steps = [
   { name: "unit: voice runtime", cmd: "python", args: ["-m", "pytest", "services/voice/tests", "-q"], env: { PYTHONPATH: "services/voice/src" } },
   { name: "unit: engines", cmd: "pnpm", args: ["-r", "test"] },
@@ -31,7 +53,7 @@ const steps = [
   { name: "latency", cmd: "node", args: ["scripts/_latency_probe.mjs"] },
   { name: "voice call (text + audio)", cmd: "python", args: ["scripts/_voice_e2e.py", "--timeout", "60"], env: { VOICE_WS_URL: VOICE_WS, PIPER_VOICE: PIPER } },
   { name: "voice barge-in", cmd: "python", args: ["scripts/_voice_bargein.py"], env: { VOICE_WS_URL: VOICE_WS, PIPER_VOICE: PIPER } },
-  { name: "voice in the browser", cmd: "node", args: ["scripts/_voice_browser.mjs"] },
+  { name: "voice in the browser", cmd: "node", args: ["scripts/_voice_browser.mjs"], env: realMicEnv() },
   { name: "web app", cmd: "node", args: ["scripts/_web_e2e.mjs"] },
 ];
 // The path may contain spaces; hand it over as an env var so no shell quoting applies.
@@ -47,6 +69,10 @@ if (docArg) {
 // tsx ships in the api workspace; call its CLI entry directly (the .bin shims
 // are shell scripts and cannot be passed to node directly on Windows).
 import { existsSync } from "node:fs";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { execFileSync } from "node:child_process";
 const TSX = ["node_modules/tsx/dist/cli.mjs", "apps/api/node_modules/tsx/dist/cli.mjs"]
   .map((p) => p.replace(/\//g, process.platform === "win32" ? "\\" : "/"))
   .find((p) => existsSync(p));
