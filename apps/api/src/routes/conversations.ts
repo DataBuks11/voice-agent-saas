@@ -500,13 +500,21 @@ The knowledge base has documents, but none of them cover this question.
 - Anything about the business (prices, hours, policies, availability, services): say the detail isn't in your notes and offer to check with the team.
 - Never invent a specific fact, price, time or policy.`;
 
+const agentCache = new Map<string, { agent: Agent; expiresAt: number }>();
+const docCountCache = new Map<string, { count: number; expiresAt: number }>();
+
 async function loadAgent(workspaceId: string, agentId: string | undefined): Promise<Agent> {
+  const cacheKey = `${workspaceId}:${agentId ?? "default"}`;
+  const cached = agentCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.agent;
+  }
   const db = getSupabase();
   const query = db.from("agents").select().eq("workspace_id", workspaceId);
   const { data } = agentId ? await query.eq("id", agentId).maybeSingle() : await query.order("created_at", { ascending: true }).limit(1).maybeSingle();
   if (!data) return { ...DEFAULT_AGENT, workspaceId };
   const r = data as Record<string, unknown>;
-  return {
+  const agent: Agent = {
     id: String(r.id),
     workspaceId: String(r.workspace_id),
     name: String(r.name),
@@ -520,6 +528,23 @@ async function loadAgent(workspaceId: string, agentId: string | undefined): Prom
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
+  agentCache.set(cacheKey, { agent, expiresAt: Date.now() + 60_000 });
+  return agent;
+}
+
+async function getCachedDocCount(workspaceId: string): Promise<number> {
+  const cached = docCountCache.get(workspaceId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.count;
+  }
+  const db = getSupabase();
+  const res = await db
+    .from("documents")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId);
+  const count = res.count ?? 0;
+  docCountCache.set(workspaceId, { count, expiresAt: Date.now() + 60_000 });
+  return count;
 }
 
 /** Business hours + already-booked slots for the slot-offer engine. */
@@ -733,13 +758,10 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       });
 
     // Agent lookup, doc count, short-term history and any in-progress capture flow
-    // all race in parallel (DB-local).
-    const [agent, docCountRes, histRows, captureState] = await Promise.all([
+    // all race in parallel (DB-local with memory caching).
+    const [agent, docCount, histRows, captureState] = await Promise.all([
       loadAgent(body.workspaceId, body.agentId),
-      db
-        .from("documents")
-        .select("id", { count: "exact", head: true })
-        .eq("workspace_id", body.workspaceId),
+      getCachedDocCount(body.workspaceId),
       db
         .from("messages")
         .select("id, role, content, citations, created_at")
@@ -748,7 +770,6 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         .limit(Number(process.env.MEMORY_SHORT_TURNS ?? 20)),
       loadCaptureState(conversationId, body.workspaceId),
     ]);
-    const docCount = docCountRes.count ?? 0;
     const decision: Decision = ruleFallback(body.content, docCount > 0, PLATFORM_TOOLS.map((t) => t.name));
 
     const history: ConversationMessage[] = (histRows.data ?? [])

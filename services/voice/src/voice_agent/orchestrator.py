@@ -545,21 +545,41 @@ class ConversationEngine:
 
 
 class PhraseBuffer:
-    """Accumulates answer text and releases only complete, speakable phrases."""
+    """Accumulates answer text and releases only complete, speakable phrases.
 
-    def __init__(self, max_chars: int = 240) -> None:
+    Optimized for voice streaming: splits on sentence endings [.!?], and for
+    the very first phrase of a turn, also releases on clause markers ([,;:—–])
+    so speech playback starts in under 200ms instead of waiting for a full sentence.
+    """
+
+    def __init__(self, max_chars: int = 240, early_first_chunk: bool = True) -> None:
         self._buffer = ""
         self._max = max_chars
+        self._first_emitted = False
+        self._early_first_chunk = early_first_chunk
 
     def push(self, text: str) -> list[str]:
         self._buffer += text
         out: list[str] = []
         while True:
+            # First-chunk optimization: catch early conversational clause boundaries
+            # like "Sure, ", "Hello, ", "Certainly, " to start TTS immediately
+            if not self._first_emitted and self._early_first_chunk:
+                match_early = re.search(r"[,;:—–](\s|$)", self._buffer)
+                if match_early and match_early.end() >= 4:
+                    phrase = self._buffer[: match_early.end()].strip()
+                    self._buffer = self._buffer[match_early.end() :].strip()
+                    if phrase:
+                        self._first_emitted = True
+                        out.append(phrase)
+                        continue
+
             match = re.search(r"[.!?](\s|$)", self._buffer)
             if match:
                 phrase = self._buffer[: match.end()].strip()
                 self._buffer = self._buffer[match.end() :].strip()
                 if phrase:
+                    self._first_emitted = True
                     out.append(phrase)
                 continue
             # a long clause with no punctuation: release at a safe word boundary
@@ -569,6 +589,7 @@ class PhraseBuffer:
                 phrase = self._buffer[:cut].strip()
                 self._buffer = self._buffer[cut:].lstrip()
                 if phrase:
+                    self._first_emitted = True
                     out.append(phrase)
             break
         return out

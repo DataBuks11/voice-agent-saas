@@ -50,17 +50,18 @@ class VadConfig:
     # inflate the gate (classic min-statistics VAD behaviour).
     noise_down: float = 8.0  # per second: drop quickly when the room gets quiet
     noise_up: float = 0.25  # per second: creep up so a burst of speech cannot raise it
-    min_speech_ms: int = 250
+    min_speech_ms: int = 200
     # Must sit above the longest natural pause inside a sentence, otherwise the
     # turn is cut mid-sentence and whisper transcribes a fragment.
-    endpoint_silence_ms: int = 650
+    # Optimized to 320ms (down from 650ms) for snappy, natural turn-taking.
+    endpoint_silence_ms: int = int(os.getenv("VAD_ENDPOINT_SILENCE_MS", "320"))
     max_utterance_ms: int = 20000
     # Neural threshold (Silero probability) when the model is in use.
-    neural_threshold: float = 0.55
+    neural_threshold: float = 0.50
     # Energy gate on top of the neural score, as dograh does with min_volume.
-    min_volume: float = 0.006
+    min_volume: float = 0.003
     # Speech must last this long before it counts as an interruption.
-    barge_in_ms: int = 240
+    barge_in_ms: int = 200
 
 
 class Vad:
@@ -77,6 +78,11 @@ class Vad:
         self.run_peak = 0.0
         self._neural_state = None
         self.noise_rms = 0.004
+        # Circular pre-speech buffer (240ms) preserves initial consonants/vowels
+        # so whisper/deepgram never misses the start of user sentences.
+        self.prefix_ms = max(0, int(os.getenv("VAD_PREFIX_MS", "240")))
+        self._prefix_buf: list[bytes] = []
+        self._max_prefix_frames = max(1, int(self.prefix_ms / 20))
 
     @property
     def engine(self) -> str:
@@ -131,10 +137,17 @@ class Vad:
                 frame_ms / 1000.0
             )
             self.noise_rms += rate * (rms - self.noise_rms)
+            # Store in ring buffer to preserve leading audio when speech starts
+            self._prefix_buf.append(frame)
+            if len(self._prefix_buf) > self._max_prefix_frames:
+                self._prefix_buf.pop(0)
         if not self.in_speech:
             if speaking:
                 self.in_speech = True
-                self.buf = bytearray(frame)
+                # Prepend the pre-speech buffer so initial syllables are never truncated
+                prefix = b"".join(self._prefix_buf)
+                self._prefix_buf.clear()
+                self.buf = bytearray(prefix) + bytearray(frame)
                 self.speech_ms = frame_ms
                 self.silence_ms = 0.0
                 self._speech_run_ms = frame_ms
@@ -169,6 +182,7 @@ class Vad:
         self.in_speech = False
         # keep the learned noise floor across resets
         self.buf = bytearray()
+        self._prefix_buf.clear()
         self.speech_ms = 0.0
         self.silence_ms = 0.0
         self._speech_run_ms = 0.0

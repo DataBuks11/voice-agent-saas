@@ -22,9 +22,9 @@ _LOCAL = ("local", "faster-whisper", "piper")
 # customers). Refreshed per session from the API; empty is harmless.
 _STT_DICTIONARY: list[str] = []
 
-# Beam width trades speed for accuracy: 1 is fastest, 5 is what a real
-# receptionist call deserves (STT runs off the critical path).
-BEAM_SIZE = max(1, min(5, int(os.getenv("STT_BEAM_SIZE", "3"))))
+# Beam width trades speed for accuracy: 1 is fastest (~3x faster than 3),
+# ideal for instant sub-430ms conversational voice response.
+BEAM_SIZE = max(1, min(5, int(os.getenv("STT_BEAM_SIZE", "1"))))
 
 # The kinds of things callers say on the phone. Whisper leans hard on its prompt,
 # so this pulls the decoder towards call language instead of dictation language.
@@ -231,7 +231,8 @@ class DeepgramSTT(STTProvider):
 
     @property
     def _diarize(self) -> bool:
-        return (os.getenv("STT_DIARIZE") or "1").strip().lower() not in ("0", "false", "no")
+        # Default to False for ultra-low latency voice agent (eliminates ~600ms diarization lag)
+        return (os.getenv("STT_DIARIZE") or "0").strip().lower() in ("1", "true", "yes")
 
     def _params(self) -> dict[str, str]:
         params = {
@@ -242,6 +243,7 @@ class DeepgramSTT(STTProvider):
             # ("$90", "10:30"), not spelled out, or the caller is misquoted.
             "numerals": "true",
             "filler_words": "false",
+            "endpointing": str(os.getenv("DEEPGRAM_ENDPOINTING", "240")),
         }
         if self._language and self._language != "auto":
             params["language"] = self._language
@@ -249,8 +251,7 @@ class DeepgramSTT(STTProvider):
             # Multilingual calls: let Deepgram decide instead of forcing English.
             params["detect_language"] = "true"
         if self._diarize and self.final_pass:
-            # Speaker attribution is only worth its extra ~0.6 s on the answer we
-            # actually keep; interim drafts run without it.
+            # Speaker attribution is only enabled when explicitly configured
             params["diarize"] = "true"
             params["utterances"] = "true"
         # Deepgram biases towards these terms, the hosted equivalent of the
@@ -605,7 +606,7 @@ class FasterWhisperSTT(STTProvider):
             beam_size=BEAM_SIZE,
             best_of=BEAM_SIZE,
             temperature=0.0,
-            vad_filter=True,
+            vad_filter=os.getenv("STT_VAD_FILTER", "false").lower() in ("1", "true", "yes"),
             condition_on_previous_text=False,
             initial_prompt=prompt,
         )

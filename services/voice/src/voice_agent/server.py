@@ -73,9 +73,8 @@ MIN_UTTERANCE_BYTES = int(float(os.getenv("MIN_UTTERANCE_BYTES", "6000")))
 # How much post-guard audio to keep while we speaks (~3 s of 16 kHz PCM16).
 INTERRUPT_KEEP_BYTES = 16000 * 2 * 3
 # How long the endpoint waits for the in-flight model warm-up before answering anyway.
-# Race the draft: if it lands within this window the answer comes from cache,
-# otherwise answer immediately rather than making the caller wait for it.
-DRAFT_JOIN_TIMEOUT = float(os.getenv("DRAFT_JOIN_TIMEOUT_S", "0.8"))
+# Lowered to 0.2s (down from 0.8s) so turn processing is never held up on speculative drafts.
+DRAFT_JOIN_TIMEOUT = float(os.getenv("DRAFT_JOIN_TIMEOUT_S", "0.2"))
 
 # Don't speculate on short replies ("yes", "okay") - it only burns CPU.
 STT_DRAFT_MIN_BYTES = int(float(os.getenv("STT_DRAFT_MIN_MS", "1200")) * 32)

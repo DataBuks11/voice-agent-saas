@@ -33,7 +33,8 @@ export function VoicePage() {
     { seq: number; type: string; turn: string; detail: string }[]
   >([]);
   // Ordered, turn-aware assistant audio queue (see lib/playbackQueue).
-  const playbackQueueRef = React.useRef(new PlaybackQueue());
+  // 2048 bytes (42ms) block size for ultra-low latency audio playback onset
+  const playbackQueueRef = React.useRef(new PlaybackQueue(2048));
   const audioSeqRef = React.useRef(0);
   const playTurnRef = React.useRef<string | null>(null);
   // "server" = our faster-whisper (accurate, tunable); "browser" = Chrome Web Speech (fast, rougher)
@@ -325,7 +326,7 @@ export function VoicePage() {
         node.buffer = buffer;
         node.connect(ctx.destination);
         const now = ctx.currentTime;
-        if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.05;
+        if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.01;
         node.start(playNextRef.current);
         playNextRef.current += buffer.duration;
         playNodesRef.current.push(node);
@@ -507,7 +508,7 @@ export function VoicePage() {
       micCtxRef.current = ctx;
       void ctx.resume();
       const src = ctx.createMediaStreamSource(streamRef.current!);
-      const proc = ctx.createScriptProcessor(2048, 1, 1);
+      const proc = ctx.createScriptProcessor(1024, 1, 1);
       proc.onaudioprocess = (e) => {
         const f32 = e.inputBuffer.getChannelData(0);
         const out = new Int16Array(f32.length);
