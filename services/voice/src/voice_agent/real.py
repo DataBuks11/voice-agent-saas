@@ -248,11 +248,10 @@ class DeepgramSTT(STTProvider):
             "numerals": "true",
             "filler_words": "false",
         }
-        if self._language and self._language != "auto":
-            params["language"] = self._language
-        else:
-            # Multilingual calls: let Deepgram decide instead of forcing English.
-            params["detect_language"] = "true"
+        lang = (self._language or "en").strip().lower()
+        if not lang or lang == "auto":
+            lang = "en"
+        params["language"] = lang
         if self._diarize and self.final_pass:
             # Speaker attribution is only enabled when explicitly configured
             params["diarize"] = "true"

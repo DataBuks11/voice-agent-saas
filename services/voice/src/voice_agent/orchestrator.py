@@ -302,8 +302,7 @@ def self_repeat_min() -> int:
     return 3
 # Turned away from: these must never reach the model.
 _REJECT_EXACT = {
-    "uh huh", "mm hmm", "hmm", "uh", "um", "erm", "huh", "so", "yeah yeah",
-    "okay okay", "right right", "yes yes", "no no", "ha", "haha", "hehe",
+    "uh huh", "mm hmm", "hmm", "uh", "um", "erm", "huh", "so", "ha", "haha", "hehe",
 }
 
 
@@ -336,21 +335,14 @@ class TranscriptNormalizer:
 
     @staticmethod
     def looks_like_loop(text: str) -> bool:
-        """Decoder loops on non-speech: "call with a phone call with a phone".
-
-        Whisper repeats a short phrase when it is fed a tone or a clipped word.
-        Such a transcript must never reach the model. Content words are compared
-        (fillers dropped) so a repeated phrase is caught even when the second copy
-        is cut short.
-        """
+        """Decoder loops on non-speech: 'the the the the the the' or long repeats."""
         filler = {
             "a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "is", "are", "was",
             "were", "be", "been", "being", "with", "at", "it", "this", "that", "as", "by", "from",
             "do", "does", "did", "have", "has", "had", "will", "would", "can", "could", "should",
         }
         raw = re.findall(r"[a-z']+", (text or "").lower())
-        if len(raw) >= 6:
-            # "the the the the..." - filler spam still has to be caught
+        if len(raw) >= 5:
             raw_counts: dict[str, int] = {}
             for w in raw:
                 raw_counts[w] = raw_counts.get(w, 0) + 1
@@ -359,18 +351,18 @@ class TranscriptNormalizer:
         words = [w for w in raw if w not in filler]
         if len(words) < 6:
             return False
-        # the same two-word phrase twice in one utterance is a loop
-        seen: set[tuple[str, str]] = set()
+        # Check 3+ repetitions of any 2-word phrase
+        counts: dict[tuple[str, str], int] = {}
         for i in range(len(words) - 1):
             pair = (words[i], words[i + 1])
-            if pair in seen:
+            counts[pair] = counts.get(pair, 0) + 1
+            if counts[pair] >= 3:
                 return True
-            seen.add(pair)
-        # single-token spam ("no no no no no no")
-        counts: dict[str, int] = {}
-        for w in words:
-            counts[w] = counts.get(w, 0) + 1
-        return max(counts.values()) >= max(6, len(words) // 2)
+        # If a short utterance (<= 6 content words) starts and repeats the same 2 words
+        if len(words) <= 6:
+            if words[:2] == words[-2:] or words[:2] == words[-3:-1]:
+                return True
+        return False
 
     def is_meaningful(self, text: str) -> tuple[bool, str | None]:
         """Returns (usable, reason)."""
@@ -402,6 +394,7 @@ SHORT_ANSWERS = {
     "morning", "afternoon", "evening", "today", "tomorrow", "tonight", "yesterday",
     "now", "later", "maybe", "never", "always", "same", "different", "anything", "nothing",
     "yes please", "no thanks", "not now", "next", "done", "stop", "wait", "hello", "hi",
+    "main", "office", "main office", "call", "book", "appointment", "services", "service",
 }
 
 
@@ -458,9 +451,6 @@ class TurnValidator:
         ok, reason = self.normalizer.is_meaningful(clean)
         if not ok:
             return False, reason, clean
-        # A two-word fragment ("phone call", "engine") is half a sentence. Answering
-        # it produced confident nonsense, so it is rejected unless it is a real
-        # short answer such as "yes", "9 am" or the business name.
         words = clean.split()
         if len(words) < self.min_words and not is_short_answer(clean):
             return False, "fragment_too_short", clean

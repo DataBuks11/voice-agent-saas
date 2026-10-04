@@ -742,21 +742,6 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     const t0 = Date.now();
     let embedMs = 0;
     let llmMs = 0;
-    const tEmbed = Date.now();
-
-    // Query embedding starts racing immediately but is only AWAITED when the
-    // decision actually needs retrieval — greetings/fallback never wait on it.
-    const embedPromise = embedAll([body.content])
-      .then((vectors) => {
-        embedMs = Date.now() - tEmbed;
-        return vectors[0] ?? null;
-      })
-      .catch((err: Error) => {
-        console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
-        embedMs = Date.now() - tEmbed;
-        return null;
-      });
-
     // Agent lookup, doc count, short-term history and any in-progress capture flow
     // all race in parallel (DB-local with memory caching).
     const [agent, docCount, histRows, captureState] = await Promise.all([
@@ -777,7 +762,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       .map((m) => ({
         id: String(m.id),
         conversationId,
-      language: agent.language,
+        language: agent.language,
         role: m.role as ConversationMessage["role"],
         content: String(m.content),
         citations: (m.citations ?? []) as string[],
@@ -792,7 +777,17 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       toolForRoute === "book_appointment" ||
       (toolForRoute === "get_location" && !agent.location);
     if (needsRetrieval && docCount > 0) {
-      const queryVector = await embedPromise;
+      const tEmbed = Date.now();
+      const queryVector = await embedAll([body.content])
+        .then((vectors) => {
+          embedMs = Date.now() - tEmbed;
+          return vectors[0] ?? null;
+        })
+        .catch((err: Error) => {
+          console.error(`query embed failed, retrieval will be skipped: ${err.message}`);
+          embedMs = Date.now() - tEmbed;
+          return null;
+        });
       if (queryVector) {
         const { data: hits, error: searchErr } = await db.rpc("match_chunks", {
           p_workspace_id: body.workspaceId,

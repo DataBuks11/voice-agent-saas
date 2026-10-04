@@ -53,15 +53,15 @@ class VadConfig:
     min_speech_ms: int = 200
     # Must sit above the longest natural pause inside a sentence, otherwise the
     # turn is cut mid-sentence and whisper transcribes a fragment.
-    # Optimized to 320ms (down from 650ms) for snappy, natural turn-taking.
+    # Optimized to 320ms for snappy, natural conversational turn-taking.
     endpoint_silence_ms: int = int(os.getenv("VAD_ENDPOINT_SILENCE_MS", "320"))
     max_utterance_ms: int = 20000
     # Neural threshold (Silero probability) when the model is in use.
     neural_threshold: float = 0.50
     # Energy gate on top of the neural score, as dograh does with min_volume.
     min_volume: float = 0.003
-    # Speech must last this long before it counts as an interruption.
-    barge_in_ms: int = 200
+    # Speech must last this long before it counts as an interruption (~120ms / 1 syllable).
+    barge_in_ms: int = int(os.getenv("VAD_BARGE_IN_MS", "120"))
 
 
 class Vad:
