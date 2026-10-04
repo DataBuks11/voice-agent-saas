@@ -415,6 +415,25 @@ const looksFactual = (text: string): boolean =>
     text,
   );
 
+/** Small talk and greetings must never trigger a web search. */
+const CHITCHAT_ONLY =
+  /^\s*(hi|hey|hello|yo|thanks|thank you|ok|okay|sure|cool|bye|goodbye|yes|no|yep|nope|got it|perfect|great|nice|alright|hmm+|right|same|never mind)\b[\s.!?]*$/i;
+
+/**
+ * A question the documents cannot answer is worth searching the web for.
+ * Deliberately wider than looksFactual: that one only knows business facts
+ * (price, hours, fees), which is why "what is the capital of France" never
+ * reached the search.
+ */
+const isKnowledgeQuestion = (text: string): boolean => {
+  const q = text.trim();
+  if (!q || CHITCHAT_ONLY.test(q)) return false;
+  return (
+    /\?\s*$/.test(q) ||
+    /^\s*(what|who|whom|whose|when|where|which|why|how|is|are|was|were|do|does|did|can|could|would|will|shall|may|tell|explain|define|describe|name|list|give)\b/i.test(q)
+  );
+};
+
 /** Knowledge-sourced one-liner used when the model is too slow for a live call. */
 function groundedFallbackText(opts: { context: string; fallback: string }, fallback: string): string {
   const blocks = [...opts.context.matchAll(/# Knowledge \[([^\]]+) score=([0-9.]+)\]\n([\s\S]*?)(?=\n# Knowledge \[|\n# Conversation|$)/g)];
@@ -971,7 +990,7 @@ if (retrieved.length === 0 && docCount > 0) {
         // Documents exist but nothing matched. If this is a real question, look
         // it up before giving up: a dead-end "I don't have verified information"
         // is what made the agent sound broken.
-        const found = looksFactual(body.content) ? await webSearch(body.content) : { text: "", sources: [] };
+        const found = isKnowledgeQuestion(body.content) ? await webSearch(body.content) : { text: "", sources: [] };
         if (found.text) {
           answerText = found.text;
           verdict = { ok: true, confidence: 0.5, issues: ["answered from the web, not from the documents"], safeText: answerText };
@@ -1052,7 +1071,7 @@ if (retrieved.length === 0 && docCount > 0) {
 
             // The documents cannot answer this. Rather than dead-ending on "I
             // don't have verified information", look it up and say where it came from.
-            if (!verdict.ok && looksFactual(body.content)) {
+            if (!verdict.ok && isKnowledgeQuestion(body.content)) {
               const found = await webSearch(body.content);
               if (found.text) {
                 answerText = found.text;
