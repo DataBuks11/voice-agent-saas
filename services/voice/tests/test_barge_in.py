@@ -687,3 +687,26 @@ async def test_a_short_tail_triggers_the_full_pass_fallback(monkeypatch):
     await session._finalise_utterance()
     # the newest window did not reach the end, so the full pass ran
     assert max(stt.calls) > 0
+
+
+def test_the_echo_guard_grows_with_the_audio_we_sent():
+    """Regression: a fixed 120 ms guard let our own long answer barge us up.
+
+    streamcore bounds the barge threshold by what the agent just shipped, so a
+    long answer cannot be mistaken for the caller talking over it.
+    """
+    session = object.__new__(srv.Session)
+    short = session._echo_guard_for(24000, 24000)    # 0.5 s of our own audio
+    long = session._echo_guard_for(24000 * 8, 24000)  # 4.0 s of our own audio
+    assert long > short, "a longer answer must guard for longer"
+    assert short >= srv.ECHO_GUARD_FRAMES, "never guard for less than the base window"
+    # ...but never so long that a real interruption is missed.
+    assert long <= int(srv.ECHO_GUARD_MAX_S * 1000 / srv.FRAME_MS)
+
+
+def test_the_echo_guard_measures_actual_audio_time():
+    """The guard must scale with duration, not with byte count."""
+    session = object.__new__(srv.Session)
+    one_second_24k = session._echo_guard_for(24000 * 2, 24000)
+    one_second_48k = session._echo_guard_for(24000 * 4, 48000)
+    assert one_second_24k == one_second_48k, "the same duration must give the same guard"

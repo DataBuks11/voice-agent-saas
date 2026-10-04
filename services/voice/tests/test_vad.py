@@ -152,3 +152,9 @@ def test_a_real_pause_does_end_the_turn():
             if ev:
                 events.append(ev)
     assert events == ["speech_start", "endpoint"]
+
+
+def _speech(v, ms, rms=0.25):
+    """Feed ms of speech at a given energy."""
+    frames = max(1, int(ms / 20))
+    return [v.feed(rms_frame(rms)) for _ in range(frames)]

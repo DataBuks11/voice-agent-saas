@@ -51,6 +51,11 @@ _models_warmed = False
 ECHO_GUARD_S = float(os.getenv("ECHO_GUARD_S", "0.12"))
 # Expressed in 20 ms frames so the guard follows audio time, not wall-clock.
 ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
+# A longer answer keeps bleeding for longer, so the guard has to grow with it.
+# Bounding the threshold by what we just sent is how streamcore stops the agent
+# interrupting itself on paths with no echo cancellation (telephony, speakers).
+ECHO_GUARD_PER_S = float(os.getenv("ECHO_GUARD_PER_S", "0.25"))
+ECHO_GUARD_MAX_S = float(os.getenv("ECHO_GUARD_MAX_S", "0.45"))
 # Delta STT tuning: how much new audio before a window, how much context each
 # window carries, and how close the last window must reach the end to be trusted.
 STT_CHUNK_BYTES = int(float(os.getenv("STT_CHUNK_BYTES", "22400")))      # ~700 ms new
@@ -470,6 +475,17 @@ class Session:
             return items[0]["id"] if items else None
 
     # --- turn loop ---
+    def _echo_guard_for(self, pcm_bytes: int, sample_rate: int = 0) -> int:
+        """Frames to ignore after shipping pcm_bytes of our own audio.
+
+        The longer the phrase we just sent, the longer the speaker keeps bleeding
+        into the mic, so a fixed window either cuts a real interruption short
+        (short answers) or admits our own echo (long answers).
+        """
+        seconds = pcm_bytes / 2.0 / max(1, sample_rate or SAMPLE_RATE)
+        guard_s = min(ECHO_GUARD_MAX_S, ECHO_GUARD_S + ECHO_GUARD_PER_S * seconds)
+        return max(ECHO_GUARD_FRAMES, int(guard_s * 1000 / FRAME_MS))
+
     async def _speak_phrase(self, phrase: str, turn: Turn) -> None:
         """Synthesise and ship ONE phrase while the model is still generating.
 
@@ -505,7 +521,9 @@ class Session:
             )
             self.speaking = True
             self._echo_candidate = False
-            self._echo_guard_frames = ECHO_GUARD_FRAMES
+            # Bounded by the audio we are about to ship, so a long answer cannot
+            # be mistaken for the caller talking over it.
+            self._echo_guard_frames = self._echo_guard_for(len(chunk.pcm16), chunk.sample_rate)
             self._interrupt_buf.clear()
             self.vad.reset()
             await self.send_json({"type": "speak_start", "turnId": turn.turn_id if turn else None})
@@ -570,7 +588,7 @@ class Session:
                 # Half-duplex: ignore the echo of our own voice while it plays.
                 self.speaking = True
                 self._echo_candidate = False
-                self._echo_guard_frames = ECHO_GUARD_FRAMES
+                self._echo_guard_frames = self._echo_guard_for(len(chunk.pcm16), chunk.sample_rate)
                 self._interrupt_buf.clear()
                 self._interrupted_speech = False
                 self.vad.reset()

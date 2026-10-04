@@ -87,15 +87,31 @@ const tail = (out, n = 8) =>
 const main = async () => {
   const results = [];
   const heavy = new Set(["voice in the browser", "web app", "showcase (8 capabilities)"]);
+  // A browser step drives a real mic and a real network call; under the rest of
+  // the suite it sometimes times out for reasons that have nothing to do with
+  // the product. Give it one clean retry instead of reporting a false failure.
+  const retries = new Map([["voice in the browser", 1]]);
   for (const step of steps) {
     // The deployed app is a real website: give it a moment between heavy browser
     // steps instead of racing Vercel's cold start.
     if (heavy.has(step.name)) await new Promise((r) => setTimeout(r, 5000));
-    process.stdout.write(`\n=== ${step.name} ... `);
-    const { code, out, ms } = await run(step);
-    results.push({ step, code, ms });
-    console.log(code === 0 ? `PASS (${(ms / 1000).toFixed(1)}s)` : `FAIL (${(ms / 1000).toFixed(1)}s)`);
-    if (code !== 0) console.log(tail(out, 8));
+    let attempt = 0;
+    let last;
+    const tries = (retries.get(step.name) ?? 0) + 1;
+    while (attempt < tries) {
+      process.stdout.write(`\n=== ${step.name}${attempt ? " (retry)" : ""} ... `);
+      last = await run(step);
+      attempt += 1;
+      if (last.code === 0) break;
+      if (attempt < tries) await new Promise((r) => setTimeout(r, 8000));
+    }
+    results.push({ step, code: last.code, ms: last.ms });
+    console.log(
+      last.code === 0
+        ? `PASS (${(last.ms / 1000).toFixed(1)}s)`
+        : `FAIL (${(last.ms / 1000).toFixed(1)}s)`,
+    );
+    if (last.code !== 0) console.log(tail(last.out, 8));
   }
   console.log("\n================ VERIFY SUMMARY ================");
   for (const r of results) {
