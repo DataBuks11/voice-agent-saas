@@ -990,7 +990,8 @@ if (retrieved.length === 0 && docCount > 0) {
         // Documents exist but nothing matched. If this is a real question, look
         // it up before giving up: a dead-end "I don't have verified information"
         // is what made the agent sound broken.
-        const found = isKnowledgeQuestion(body.content) ? await webSearch(body.content) : { text: "", sources: [] };
+        const webBudget = channel === "voice" ? Number(process.env.LLM_WEB_SEARCH_VOICE_BUDGET_MS ?? 2500) : undefined;
+        const found = isKnowledgeQuestion(body.content) ? await webSearch(body.content, webBudget) : { text: "", sources: [] };
         if (found.text) {
           answerText = found.text;
           verdict = { ok: true, confidence: 0.5, issues: ["answered from the web, not from the documents"], safeText: answerText };

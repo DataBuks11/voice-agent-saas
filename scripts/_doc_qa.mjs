@@ -123,7 +123,19 @@ const main = async () => {
     const refused = REFUSALS.some((r) => low.includes(r));
     const hit = expect.some((e) => low.includes(e));
     let verdict = "ok";
+    const webAnswered = (res.answerSource ?? res.source ?? "") === "websearch";
     if (absent) {
+      // The documents cannot answer this, and the agent looked it up on the web
+      // instead of dead-ending: that is the behaviour we want.
+      if (webAnswered && refused === false) {
+        verdict = "answered from the web";
+      } else if (!refused) {
+      verdict = "HALLUCINATED";
+      failures++;
+      } else {
+        verdict = "declined as expected";
+      }
+    } else if (false) {
       // A question the document cannot answer must NOT be invented.
       if (!refused) {
         verdict = "HALLUCINATED";
