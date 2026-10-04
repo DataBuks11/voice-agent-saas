@@ -81,6 +81,16 @@ def stt_uses_deepgram() -> bool:
     return provider == "" and bool(os.getenv("DEEPGRAM_API_KEY"))
 
 
+def tts_uses_deepgram() -> bool:
+    """Deepgram Aura when asked for explicitly, or when only its key is configured."""
+    provider = (os.getenv("TTS_PROVIDER") or "").strip().lower()
+    if provider in _LOCAL:
+        return False
+    if provider == "deepgram":
+        return True
+    return provider == "" and bool(os.getenv("DEEPGRAM_API_KEY"))
+
+
 def wav_bytes(pcm16: bytes, sample_rate: int) -> bytes:
     """PCM16 mono -> WAV container (OpenAI-compatible /audio/transcriptions input)."""
     buf = io.BytesIO()
@@ -426,19 +436,70 @@ class FallbackTTS(TTSProvider):
         return await self.backup.synthesize(text, voice)
 
 
+class DeepgramTTS(TTSProvider):
+    """Deepgram Aura text-to-speech (24 kHz PCM16 mono).
+
+    Deepgram only serves Aura once the feature is enabled for the project, so a
+    404/403 here means "not enabled" rather than "broken": we say so once and
+    hand every later phrase to the local voice instead of stalling the call.
+    """
+
+    name = "deepgram-tts"
+
+    def __init__(self) -> None:
+        self._key = os.environ["DEEPGRAM_API_KEY"]
+        self._voice = os.getenv("DEEPGRAM_TTS_VOICE", "odysseus")
+        self._sample_rate = int(os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "24000"))
+        self._base = (os.getenv("DEEPGRAM_BASE_URL") or "https://api.deepgram.com/v1").rstrip("/")
+        self._client = httpx.AsyncClient(timeout=30.0)
+        self._fallback = build_tts_fallback()
+        # Once the project has told us Aura is off, stop paying for the probe.
+        self._fallback_only = False
+        log.info("TTS ready: deepgram voice=%s (fallback=%s)", self._voice, self._fallback.name)
+
+    async def synthesize(self, text: str, voice: str = "default") -> AudioChunk:
+        if self._fallback_only:
+            return await self._fallback.synthesize(text, voice)
+        try:
+            r = await self._client.post(
+                f"{self._base}/tts",
+                params={"model": self._voice, "encoding": "linear16",
+                        "sample_rate": str(self._sample_rate), "container": "none"},
+                content=(text or "").encode("utf-8"),
+                headers={"authorization": f"Token {self._key}", "content-type": "text/plain"},
+            )
+        except httpx.HTTPError as exc:
+            log.warning("deepgram tts error (%s) - using %s", exc, self._fallback.name)
+            return await self._fallback.synthesize(text, voice)
+        if r.status_code in (401, 402, 403, 404) or len(r.content) < 64:
+            log.warning(
+                "deepgram tts not available for this project (%s) - using %s. "
+                "Enable Aura TTS in the Deepgram console to switch over.",
+                r.status_code, self._fallback.name,
+            )
+            self._fallback_only = True
+            return await self._fallback.synthesize(text, voice)
+        return AudioChunk(pcm16=r.content, sample_rate=self._sample_rate)
+
+
+def build_tts_fallback() -> TTSProvider:
+    backup = PiperTTS()
+    try:
+        edge = EdgeTTS()
+    except Exception:  # noqa: BLE001 - edge-tts missing -> local voice
+        return backup
+    return FallbackTTS(edge, backup)
+
+
 def build_tts() -> TTSProvider:
+    if tts_uses_deepgram():
+        return DeepgramTTS()
     if tts_uses_http():
         return HttpTTS()
     provider = (os.getenv("TTS_PROVIDER") or "").strip().lower()
     if provider in _LOCAL:
         return PiperTTS()
-    backup = PiperTTS()
-    try:
-        edge = EdgeTTS()
-    except Exception:  # noqa: BLE001 - edge-tts missing → local voice
-        log.warning("edge-tts unavailable — using piper")
-        return backup
-    return FallbackTTS(edge, backup)
+    return build_tts_fallback()
 
 
 class FasterWhisperSTT(STTProvider):
