@@ -550,15 +550,37 @@ export function VoicePage() {
       const proc = ctx.createScriptProcessor(1024, 1, 1);
       proc.onaudioprocess = (e) => {
         const f32 = e.inputBuffer.getChannelData(0);
+        let sumSquares = 0;
         const out = new Int16Array(f32.length);
         for (let i = 0; i < f32.length; i++) {
           const s = Math.max(-1, Math.min(1, f32[i]));
+          sumSquares += s * s;
           out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
+        const rms = Math.sqrt(sumSquares / f32.length);
+
+        // Acoustic Echo Gate:
+        // While the assistant is actively speaking, drop low-energy speaker bleed
+        // so the agent never hears itself or interrupts itself!
+        // Only if the caller intentionally speaks aloud (rms >= 0.04) do we allow barge-in.
+        if (voiceStateRef.current === "speaking") {
+          if (rms < 0.04) {
+            return; // drop speaker bleed!
+          }
+          // The caller spoke loudly over the agent: trigger instant local barge-in!
+          stopPlayback("interrupted");
+          setVoiceState("listening");
+          pushLine("system", "barge-in: caller interrupted");
+        }
+
         if (socket.readyState === WebSocket.OPEN) socket.send(out.buffer);
       };
       src.connect(proc);
-      proc.connect(ctx.destination);
+      // Zero-gain mute node keeps ScriptProcessor alive in Chrome without playing mic through speakers!
+      const muteNode = ctx.createGain();
+      muteNode.gain.value = 0;
+      proc.connect(muteNode);
+      muteNode.connect(ctx.destination);
       micNodeRef.current = proc;
     } catch (err) {
       pushLine("system", `mic capture failed: ${(err as Error).message}`);

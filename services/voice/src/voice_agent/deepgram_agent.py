@@ -159,6 +159,7 @@ class DeepgramAgentSession:
         self.greeting = "Hello, thanks for calling! How can I help you today?"
         self.closed = False
         self._speaking = False
+        self._last_assistant_text = ""
         self._tasks: list[asyncio.Task] = []
 
     async def run(self) -> None:
@@ -416,12 +417,16 @@ class DeepgramAgentSession:
                         role = data.get("role")
                         content = str(data.get("content") or "").strip()
                         if content:
-                            if role == "user":
-                                await self.ws.send(json.dumps({"type": "user", "text": content}))
-                                self._save_message_async("user", content)
-                            elif role == "assistant":
+                            if role == "assistant":
+                                self._last_assistant_text = content
                                 await self.ws.send(json.dumps({"type": "assistant", "text": content}))
                                 self._save_message_async("assistant", content)
+                            elif role == "user":
+                                if self._is_echo(content):
+                                    log.info("Ignored self-echo user transcript: %r", content)
+                                    continue
+                                await self.ws.send(json.dumps({"type": "user", "text": content}))
+                                self._save_message_async("user", content)
                     elif mtype == "AgentAudioDone":
                         self._speaking = False
                         await self.ws.send(json.dumps({"type": "audio_end"}))
@@ -512,6 +517,16 @@ class DeepgramAgentSession:
                 await client.post(f"/v1/conversations/{self.conversation_id}/messages", json=payload, headers=headers)
         except Exception:
             pass
+
+    def _is_echo(self, user_text: str) -> bool:
+        """Check if incoming user transcript is actually an acoustic echo of assistant speech."""
+        if not self._last_assistant_text or not user_text:
+            return False
+        u = "".join(ch for ch in user_text.lower() if ch.isalnum())
+        a = "".join(ch for ch in self._last_assistant_text.lower() if ch.isalnum())
+        if len(u) < 4:
+            return False
+        return u in a or a in u or (len(u) >= 8 and (a.endswith(u[:10]) or a.startswith(u[:10])))
 
     async def close(self) -> None:
         self.closed = True
