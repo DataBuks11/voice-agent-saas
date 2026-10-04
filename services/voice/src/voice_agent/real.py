@@ -88,7 +88,7 @@ def tts_uses_deepgram() -> bool:
         return False
     if provider == "deepgram":
         return True
-    return provider == "" and bool(os.getenv("DEEPGRAM_API_KEY"))
+    return provider in ("", "auto") and bool(os.getenv("DEEPGRAM_API_KEY"))
 
 
 def wav_bytes(pcm16: bytes, sample_rate: int) -> bytes:
@@ -216,7 +216,11 @@ class DeepgramSTT(STTProvider):
 
     def __init__(self) -> None:
         self._key = os.environ["DEEPGRAM_API_KEY"]
-        self._model = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
+        model = (os.getenv("DEEPGRAM_STT_MODEL") or os.getenv("DEEPGRAM_MODEL") or "").strip()
+        if not model:
+            stt_model = (os.getenv("STT_MODEL") or "").strip()
+            model = stt_model if stt_model and not stt_model.endswith(".en") else "nova-3"
+        self._model = model
         self._language = (os.getenv("STT_LANGUAGE") or "en").strip()
         self._base = (os.getenv("DEEPGRAM_BASE_URL") or "https://api.deepgram.com/v1").rstrip("/")
         self._timeout = float(os.getenv("DEEPGRAM_TIMEOUT_S", "20"))
@@ -243,7 +247,6 @@ class DeepgramSTT(STTProvider):
             # ("$90", "10:30"), not spelled out, or the caller is misquoted.
             "numerals": "true",
             "filler_words": "false",
-            "endpointing": str(os.getenv("DEEPGRAM_ENDPOINTING", "240")),
         }
         if self._language and self._language != "auto":
             params["language"] = self._language
@@ -449,19 +452,19 @@ class FallbackTTS(TTSProvider):
 class DeepgramTTS(TTSProvider):
     """Deepgram Aura text-to-speech (24 kHz PCM16 mono).
 
-    Deepgram only serves Aura once the feature is enabled for the project, so a
-    404/403 here means "not enabled" rather than "broken": we say so once and
-    hand every later phrase to the local voice instead of stalling the call.
+    Fast, human neural speech via Deepgram's /v1/speak endpoint.
+    If the project lacks speak permissions or an outage occurs, seamlessly
+    switches to local Piper ONNX (<90ms) instead of stalling the conversation.
     """
 
     name = "deepgram-tts"
 
     def __init__(self) -> None:
         self._key = os.environ["DEEPGRAM_API_KEY"]
-        self._voice = os.getenv("DEEPGRAM_TTS_VOICE", "odysseus")
+        self._voice = os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en")
         self._sample_rate = int(os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "24000"))
         self._base = (os.getenv("DEEPGRAM_BASE_URL") or "https://api.deepgram.com/v1").rstrip("/")
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = httpx.AsyncClient(timeout=20.0)
         self._fallback = build_tts_fallback()
         self._fallback_only = False
         log.info("TTS ready: deepgram voice=%s (fallback=%s)", self._voice, self._fallback.name)
@@ -469,10 +472,11 @@ class DeepgramTTS(TTSProvider):
     async def synthesize(self, text: str, voice: str = "default") -> AudioChunk:
         if self._fallback_only:
             return await self._fallback.synthesize(text, voice)
+        target = self._voice if voice in ("", "default") else voice
         try:
             r = await self._client.post(
-                f"{self._base}/tts",
-                params={"model": self._voice, "encoding": "linear16",
+                f"{self._base}/speak",
+                params={"model": target, "encoding": "linear16",
                         "sample_rate": str(self._sample_rate), "container": "none"},
                 content=(text or "").encode("utf-8"),
                 headers={"authorization": f"Token {self._key}", "content-type": "text/plain"},
@@ -480,24 +484,27 @@ class DeepgramTTS(TTSProvider):
         except httpx.HTTPError as exc:
             log.warning("deepgram tts error (%s) - using %s", exc, self._fallback.name)
             return await self._fallback.synthesize(text, voice)
-        if r.status_code in (401, 402, 403, 404) or len(r.content) < 64:
+        if r.status_code != 200 or len(r.content) < 64:
             log.warning(
-                "deepgram tts not available for this project (%s) - using %s. "
-                "Enable Aura TTS in the Deepgram console to switch over.",
-                r.status_code, self._fallback.name,
+                "deepgram tts returned %s (%s) - switching to %s",
+                r.status_code, r.text[:100], self._fallback.name,
             )
-            self._fallback_only = True
+            if r.status_code in (401, 403, 404):
+                self._fallback_only = True
             return await self._fallback.synthesize(text, voice)
         return AudioChunk(pcm16=r.content, sample_rate=self._sample_rate)
 
 
 def build_tts_fallback() -> TTSProvider:
-    backup = PiperTTS()
+    # Always prefer local Piper ONNX for instant ~80ms TTS in production container
     try:
-        edge = EdgeTTS()
-    except Exception:  # noqa: BLE001 - edge-tts missing -> local voice
-        return backup
-    return FallbackTTS(edge, backup)
+        return PiperTTS()
+    except Exception as exc:
+        log.warning("PiperTTS init failed (%s) - trying edge-tts", exc)
+        try:
+            return EdgeTTS()
+        except Exception:
+            return PiperTTS()
 
 
 def build_tts() -> TTSProvider:
@@ -506,8 +513,12 @@ def build_tts() -> TTSProvider:
     if tts_uses_http():
         return HttpTTS()
     provider = (os.getenv("TTS_PROVIDER") or "").strip().lower()
-    if provider in _LOCAL:
+    if provider == "deepgram":
+        return DeepgramTTS()
+    if provider in _LOCAL or provider == "piper":
         return PiperTTS()
+    if provider in ("edge", "edge-tts"):
+        return EdgeTTS()
     return build_tts_fallback()
 
 

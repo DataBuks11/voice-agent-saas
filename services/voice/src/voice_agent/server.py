@@ -535,7 +535,7 @@ class Session:
                     orch.assistant_audio_started()
         data = chunk.pcm16
         for i in range(0, len(data), 16384):
-            if turn is not None and orch is not None and not orch.turns.is_live(turn):
+            if self.interrupted or (turn is not None and orch is not None and not orch.turns.is_live(turn)):
                 break
             await self._send_audio_chunk(data[i : i + 16384], chunk.sample_rate, turn)
         self._phrase_bytes += len(data)
@@ -558,9 +558,11 @@ class Session:
         # only consulted for turn-less playback (greeting), otherwise a queued
         # utterance would silence an answer that is still perfectly valid.
         def cancelled() -> bool:
+            if self.interrupted:
+                return True
             if turn is not None:
                 return orch is not None and not orch.turns.is_live(turn)
-            return self.interrupted
+            return False
 
         for phrase in split_for_tts(text):
             if cancelled():
@@ -1221,7 +1223,9 @@ class Session:
                             self._barge_taken = True
                             self._interrupted_speech = True
                             self.interrupted = True
+                            self.speaking = False
                             if self.orch is not None:
+                                self.orch.interrupt("caller_speech")
                                 # The caller now owns a turn: open it here so the
                                 # words spoken over our audio have an owner and can
                                 # never be answered as an unowned utterance.
@@ -1285,8 +1289,12 @@ class Session:
                             await self.enqueue("text", text, turn)
                 elif kind == "interrupt":
                     self.interrupted = True
+                    self.speaking = False
                     if self.pipeline is not None:
                         self.pipeline.handle_barge_in()
+                    if self.orch is not None:
+                        self.orch.interrupt("client_barge_in")
+                    await self.send_json({"type": "interrupted"})
                 elif kind == "ping":
                     await self.send_json({"type": "pong"})
 

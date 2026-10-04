@@ -20,7 +20,16 @@ interface Line {
 export function VoicePage() {
   const toast = useToast();
   const [status, setStatus] = React.useState<Status>("idle");
-  const [voiceState, setVoiceState] = React.useState<VoiceState>("idle");
+  const [voiceState, _setVoiceState] = React.useState<VoiceState>("idle");
+  const voiceStateRef = React.useRef<VoiceState>("idle");
+  const setVoiceState = React.useCallback((val: React.SetStateAction<VoiceState>) => {
+    _setVoiceState((prev) => {
+      const next = typeof val === "function" ? val(prev) : val;
+      voiceStateRef.current = next;
+      return next;
+    });
+  }, []);
+  const interruptRef = React.useRef<() => void>(() => {});
   const [lines, setLines] = React.useState<Line[]>([]);
   const [agents, setAgents] = React.useState<AgentRow[]>([]);
   const [agentId, setAgentId] = React.useState<string>("");
@@ -94,6 +103,10 @@ export function VoicePage() {
             const r = ev.results[i];
             const spoken = String(r[0]?.transcript ?? "").trim();
             if (!spoken) continue;
+            // Instant barge-in: If user speaks while the agent is speaking or replying, stop agent immediately!
+            if (voiceStateRef.current === "speaking" || replyStartedRef.current) {
+              interruptRef.current();
+            }
             if (r.isFinal) {
               if (socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({ type: "text", text: spoken }));
@@ -233,6 +246,8 @@ export function VoicePage() {
   React.useEffect(() => teardown, [teardown]);
 
   const stopPlayback = React.useCallback((reason = "flush") => {
+    playTurnRef.current = null;
+    replyStartedRef.current = false;
     const dropped = playbackQueueRef.current.flush();
     if (dropped > 0) pushLine("system", `audio queue flushed (${reason}): ${dropped} bytes dropped`);
     for (const n of playNodesRef.current) {
@@ -248,8 +263,23 @@ export function VoicePage() {
     if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
     playEndTimerRef.current = null;
     rateRef.current = null;
+    setVoiceState((s) => (s === "speaking" ? "listening" : s));
     resumeRecog();
-  }, [resumeRecog]);
+  }, [pushLine, resumeRecog, setVoiceState]);
+
+  const interrupt = React.useCallback(() => {
+    const socket = wsRef.current;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "interrupt" }));
+    stopPlayback("interrupted");
+    setVoiceState("listening");
+    replyStartedRef.current = false;
+    resumeRecog();
+    pushLine("system", "barge-in sent — agent stopped talking");
+  }, [stopPlayback, pushLine, resumeRecog, setVoiceState]);
+
+  React.useEffect(() => {
+    interruptRef.current = interrupt;
+  }, [interrupt]);
 
   const finishPlayback = React.useCallback(() => {
     if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
@@ -257,9 +287,10 @@ export function VoicePage() {
     playNodesRef.current = [];
     playNextRef.current = null;
     rateRef.current = null;
+    replyStartedRef.current = false;
     setVoiceState((s) => (s === "speaking" ? "listening" : s));
     resumeRecog();
-  }, [resumeRecog]);
+  }, [resumeRecog, setVoiceState]);
 
   const schedulePlayEnd = (ms: number) => {
     if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
@@ -482,7 +513,6 @@ export function VoicePage() {
           if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
           playEndTimerRef.current = null;
           setVoiceState("speaking");
-          pauseRecog();
         } else if (type === "audio_end") {
           scheduleAudio(true);
           if (playbackQueueRef.current.pendingBytes() === 0 && playNodesRef.current.length === 0) {
@@ -524,15 +554,6 @@ export function VoicePage() {
     } catch (err) {
       pushLine("system", `mic capture failed: ${(err as Error).message}`);
     }
-  };
-
-  const interrupt = () => {
-    const socket = wsRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "interrupt" }));
-    stopPlayback();
-    setVoiceState("listening");
-    resumeRecog();
-    pushLine("system", "barge-in sent — agent stopped talking");
   };
 
   const toggle = () => {
