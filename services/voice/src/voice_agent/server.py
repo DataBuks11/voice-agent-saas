@@ -54,8 +54,10 @@ ECHO_GUARD_FRAMES = max(0, int(ECHO_GUARD_S * 1000 / FRAME_MS))
 # A longer answer keeps bleeding for longer, so the guard has to grow with it.
 # Bounding the threshold by what we just sent is how streamcore stops the agent
 # interrupting itself on paths with no echo cancellation (telephony, speakers).
-ECHO_GUARD_PER_S = float(os.getenv("ECHO_GUARD_PER_S", "0.25"))
-ECHO_GUARD_MAX_S = float(os.getenv("ECHO_GUARD_MAX_S", "0.45"))
+# The growth is deliberately gentle and capped: a long guard would also swallow
+# a real interruption, which is worse than the echo it prevents.
+ECHO_GUARD_PER_S = float(os.getenv("ECHO_GUARD_PER_S", "0.06"))
+ECHO_GUARD_MAX_S = float(os.getenv("ECHO_GUARD_MAX_S", "0.22"))
 # Delta STT tuning: how much new audio before a window, how much context each
 # window carries, and how close the last window must reach the end to be trusted.
 STT_CHUNK_BYTES = int(float(os.getenv("STT_CHUNK_BYTES", "22400")))      # ~700 ms new
