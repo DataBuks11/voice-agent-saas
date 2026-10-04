@@ -317,24 +317,7 @@ class DeepgramAgentSession:
                     "output": {"encoding": "linear16", "sample_rate": 24000, "container": "none"},
                 },
                 "agent": {
-                    "listen": {
-                        "provider": {
-                            "type": "deepgram",
-                            "model": stt_model,
-                            "smart_format": True,
-                            "keyterms": [
-                                self.agent_name,
-                                "DataBuks",
-                                "booking",
-                                "appointment",
-                                "schedule",
-                                "pricing",
-                                "services",
-                                "hours",
-                                "quote",
-                            ],
-                        }
-                    },
+                    "listen": {"provider": {"type": "deepgram", "model": stt_model}},
                     "think": {
                         "provider": {"type": "open_ai", "model": llm_model},
                         "prompt": self.system_prompt,
