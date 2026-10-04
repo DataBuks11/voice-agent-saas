@@ -294,16 +294,7 @@ export function VoicePage() {
         // Convert whatever native device sample rate (48k/44.1k/16k) to 16kHz linear PCM
         const pcm16 = downsampleTo16k(f32, nativeSampleRate);
 
-        // Responsive voice barge-in:
-        // If caller speaks while assistant is talking (rms >= 0.012), instantly halt speaker output
-        if (voiceStateRef.current === "speaking" && rms >= 0.012) {
-          stopPlayback("interrupted");
-          setVoiceState("listening");
-          pushLine("system", "barge-in: caller interrupted agent");
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: "interrupt" }));
-          }
-        }
+        // Stream 16kHz audio frames directly to Deepgram Voice Agent (server-side neural VAD handles barge-in)
 
         // Stream 16kHz audio frames to backend
         if (socket.readyState === WebSocket.OPEN) {

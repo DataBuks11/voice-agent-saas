@@ -160,6 +160,8 @@ export const api = {
     ),
   bookings: () => get<{ items: BookingRow[]; total: number }>("/v1/bookings?workspaceId=" + getWorkspace()!.id),
   documents: () => get<{ items: DocumentRow[]; total: number }>("/v1/knowledge/documents?workspaceId=" + getWorkspace()!.id),
+  deleteDocument: (documentId: string) =>
+    request<{ deleted: boolean; id: string; title?: string }>(`/v1/knowledge/documents/${documentId}`, { method: "DELETE" }),
   search: (query: string, topK = 6) =>
     post<{ items: SearchHit[]; total: number }>("/v1/knowledge/search", { workspaceId: getWorkspace()!.id, query, topK }),
   listConversations: () => get<{ items: ConversationRow[]; total: number }>("/v1/conversations?workspaceId=" + getWorkspace()!.id),

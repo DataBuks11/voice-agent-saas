@@ -258,4 +258,55 @@ export async function knowledgeRoutes(app: FastifyInstance): Promise<void> {
     if (error) throw Object.assign(new Error(`search failed: ${error.message}`), { status: 500 });
     return { items: data ?? [], total: (data ?? []).length };
   });
+
+  // Delete document and all associated chunks
+  app.delete("/knowledge/documents/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const tenant = await requireTenant(req);
+    const db = getSupabase();
+
+    const { data: doc, error: docErr } = await db
+      .from("documents")
+      .select("id, source_id, title")
+      .eq("id", id)
+      .eq("workspace_id", tenant.workspaceId)
+      .maybeSingle();
+
+    if (docErr || !doc) {
+      throw Object.assign(new Error("document not found"), { status: 404 });
+    }
+
+    // Delete associated vector chunks
+    const { error: chunkErr } = await db
+      .from("chunks")
+      .delete()
+      .eq("document_id", id)
+      .eq("workspace_id", tenant.workspaceId);
+    if (chunkErr) {
+      throw Object.assign(new Error(`failed to delete chunks: ${chunkErr.message}`), { status: 500 });
+    }
+
+    // Delete document record
+    const { error: delErr } = await db
+      .from("documents")
+      .delete()
+      .eq("id", id)
+      .eq("workspace_id", tenant.workspaceId);
+    if (delErr) {
+      throw Object.assign(new Error(`failed to delete document: ${delErr.message}`), { status: 500 });
+    }
+
+    // Clean up knowledge source if no other documents reference it
+    if (doc.source_id) {
+      const { data: siblings } = await db
+        .from("documents")
+        .select("id")
+        .eq("source_id", doc.source_id);
+      if (!siblings || siblings.length === 0) {
+        await db.from("knowledge_sources").delete().eq("id", doc.source_id);
+      }
+    }
+
+    return reply.send({ deleted: true, id, title: doc.title });
+  });
 }

@@ -69,7 +69,7 @@ async def run_web_search(query: str) -> str:
 
 
 async def search_knowledge(workspace_id: str, query: str) -> str:
-    """Search workspace documents and chunks in Supabase with multi-keyword matching."""
+    """Search workspace documents and chunks in Supabase with multi-keyword matching across all docs."""
     if not SB_URL or not SB_KEY or not workspace_id:
         return "No knowledge base documents configured for this workspace."
     try:
@@ -85,15 +85,20 @@ async def search_knowledge(workspace_id: str, query: str) -> str:
         if filter_parts:
             filter_str += f"&or=({','.join(filter_parts)})"
 
-        url = f"{SB_URL}/rest/v1/chunks?{filter_str}&select=content,metadata,document_id&limit=8"
+        url = f"{SB_URL}/rest/v1/chunks?{filter_str}&select=content,metadata,document_id&limit=10"
         headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
         async with httpx.AsyncClient(timeout=4.0) as client:
             r = await client.get(url, headers=headers)
             if r.status_code == 200 and r.json():
                 items = r.json()
-                results = [c.get("content", "").strip() for c in items if c.get("content")]
+                results = []
+                for c in items:
+                    cnt = (c.get("content") or "").strip()
+                    doc_title = c.get("metadata", {}).get("doc_title") or ""
+                    if cnt:
+                        results.append(f"[{doc_title}]\n{cnt}" if doc_title else cnt)
                 if results:
-                    return "\n\n".join(results[:4])
+                    return "\n\n".join(results[:5])
     except Exception as exc:
         log.warning("knowledge search failed: %s", exc)
 
@@ -101,7 +106,7 @@ async def search_knowledge(workspace_id: str, query: str) -> str:
 
 
 async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str]:
-    """Fetch agent details and verified knowledge chunks from all uploaded documents in Supabase."""
+    """Fetch agent details and verified knowledge chunks from ALL uploaded documents in Supabase (Mixture of Experts)."""
     agent_info = {
         "name": "Front Desk Receptionist",
         "prompt": "",
@@ -113,7 +118,7 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
         return agent_info, knowledge_text
 
     headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
-    async with httpx.AsyncClient(timeout=4.0) as client:
+    async with httpx.AsyncClient(timeout=6.0) as client:
         # 1. Load agent details
         try:
             agent_url = (
@@ -132,36 +137,52 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
         except Exception as exc:
             log.warning("failed to load agent from Supabase: %s", exc)
 
-        # 2. Load all verified documents & chunks with OKF titles
+        # 2. Load verified documents & chunks balanced across ALL uploaded documents
         try:
-            doc_titles: dict[str, str] = {}
-            docs_url = f"{SB_URL}/rest/v1/documents?workspace_id=eq.{workspace_id}&select=id,title,metadata"
+            docs_url = f"{SB_URL}/rest/v1/documents?workspace_id=eq.{workspace_id}&select=id,title,metadata&order=created_at.asc"
             r_docs = await client.get(docs_url, headers=headers)
-            if r_docs.status_code == 200 and r_docs.json():
-                for d in r_docs.json():
-                    doc_titles[d["id"]] = d.get("title") or "Business Knowledge"
+            docs = r_docs.json() if r_docs.status_code == 200 and r_docs.json() else []
 
-            chunks_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&select=document_id,content,metadata&order=created_at.desc&limit=60"
-            r_chunks = await client.get(chunks_url, headers=headers)
-            if r_chunks.status_code == 200 and r_chunks.json():
-                chunks = r_chunks.json()
-                by_doc: dict[str, list[str]] = {}
-                for c in chunks:
-                    d_id = c.get("document_id") or "general"
-                    d_title = doc_titles.get(d_id) or c.get("metadata", {}).get("doc_title") or "Business Knowledge"
-                    cnt = (c.get("content") or "").strip()
+            doc_titles: dict[str, str] = {d["id"]: d.get("title") or "Business Knowledge" for d in docs}
+            by_doc: dict[str, list[str]] = {}
+
+            # Fetch chunks per document so NO document is starved by single-document chunk flood!
+            if docs:
+                for d in docs:
+                    d_id = d["id"]
+                    d_title = d.get("title") or "Business Knowledge"
+                    by_doc.setdefault(d_title, [])
+                    # Fetch up to 25 chunks for this specific document
+                    c_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&document_id=eq.{d_id}&select=content,metadata&order=created_at.asc&limit=25"
+                    r_c = await client.get(c_url, headers=headers)
+                    if r_c.status_code == 200 and r_c.json():
+                        for row in r_c.json():
+                            cnt = (row.get("content") or "").strip()
+                            if cnt and cnt not in by_doc[d_title]:
+                                by_doc[d_title].append(cnt)
+
+            # Also fetch recent general chunks in case some chunks are unassigned to documents
+            fallback_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&select=document_id,content,metadata&order=created_at.desc&limit=60"
+            r_fb = await client.get(fallback_url, headers=headers)
+            if r_fb.status_code == 200 and r_fb.json():
+                for row in r_fb.json():
+                    d_id = row.get("document_id") or "general"
+                    d_title = doc_titles.get(d_id) or row.get("metadata", {}).get("doc_title") or "General Knowledge"
+                    cnt = (row.get("content") or "").strip()
                     if cnt:
                         by_doc.setdefault(d_title, [])
                         if cnt not in by_doc[d_title]:
                             by_doc[d_title].append(cnt)
 
-                doc_sections: list[str] = []
-                for d_title, snippets in by_doc.items():
-                    doc_sections.append(f"Document: {d_title}\n" + "\n\n".join(snippets))
-                if doc_sections:
-                    knowledge_text = "\n\n---\n\n".join(doc_sections)
+            doc_sections: list[str] = []
+            for d_title, snippets in by_doc.items():
+                if snippets:
+                    doc_sections.append(f"=== DOCUMENT: {d_title} ===\n" + "\n\n".join(snippets[:20]))
+
+            if doc_sections:
+                knowledge_text = "\n\n--------------------\n\n".join(doc_sections)
         except Exception as exc:
-            log.warning("failed to load documents and chunks from Supabase: %s", exc)
+            log.warning("failed to load multi-document context from Supabase: %s", exc)
 
     return agent_info, knowledge_text
 
@@ -247,7 +268,10 @@ class DeepgramAgentSession:
                 knowledge_text,
                 "=== END OF VERIFIED BUSINESS KNOWLEDGE ===",
                 "\nLAYA 4-PILLAR INTELLIGENCE & HYBRID SYNTHESIS (OKF + RAG + LAYA + WEB SEARCH):",
-                "Pillar 1 (OKF & RAG Document Grounding): For any company offerings, services, verified pricing, hours, or policies, ALWAYS answer directly and faithfully from the VERIFIED BUSINESS KNOWLEDGE above.",
+                "Pillar 1 (OKF & RAG Multi-Document Mixture of Experts):",
+                "  - You have verified knowledge across MULTIPLE uploaded documents (e.g. project synopsis, platform architecture, technical retrieval, pricing, FAQ).",
+                "  - Act as a Mixture of Experts across ALL documents: if the caller asks about ANY aspect from ANY uploaded document, answer directly from that document's facts.",
+                "  - Never restrict yourself to only the first or latest document. When an inquiry touches multiple documents, synthesize facts across all relevant documents into a cohesive answer.",
                 "Pillar 2 (Laya Decision & Intent Routing): Automatically classify the caller's intent:",
                 "  - Direct company inquiry -> Answer instantly from verified documents.",
                 "  - Booking / appointment request -> Collect caller name, ask to spell it, get date/time, then call book_appointment.",
@@ -266,6 +290,8 @@ class DeepgramAgentSession:
             ])
 
         prompt_parts.extend([
+            "\nPHONETIC RECOGNITION (COMPANY NAME):",
+            "- The company name is DataBuks. Speech recognition (STT) may transcribe it as 'Data Box', 'Data Books', 'DataBux', or 'dataverse'. Recognize all of these as references to DataBuks and answer accordingly.",
             "\nNAME SPELLING RULE (CRITICAL FOR ACCURACY):",
             "- When the caller provides their name (e.g. for booking or leaving contact details), ALWAYS ask them to spell out their name letter-by-letter to guarantee exact spelling accuracy (for example, to distinguish between 'Sudhanshu' and 'Sudhansu', 'Pooja' and 'Puja', 'Ritu' and 'Reetu'):",
             "  Say: 'Could you please spell your name out for me so I make sure I have the exact spelling right?'",

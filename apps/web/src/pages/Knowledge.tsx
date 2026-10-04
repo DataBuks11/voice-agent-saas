@@ -28,6 +28,7 @@ export function KnowledgePage() {
   const [file, setFile] = React.useState<File | null>(null);
   const [fileBusy, setFileBusy] = React.useState(false);
   const [fileProg, setFileProg] = React.useState<string | null>(null);
+  const [deletingId, setDeletingId] = React.useState<string | null>(null);
 
   const load = React.useCallback(() => {
     api
@@ -35,6 +36,20 @@ export function KnowledgePage() {
       .then((r) => setDocs(r.items))
       .catch((e) => toast({ kind: "err", text: e.message }));
   }, [toast]);
+
+  const handleDelete = async (id: string, docTitle: string) => {
+    if (!window.confirm(`Delete "${docTitle}" and all its vector chunks?`)) return;
+    setDeletingId(id);
+    try {
+      await api.deleteDocument(id);
+      toast({ kind: "ok", text: `Deleted "${docTitle}"` });
+      setDocs((prev) => prev.filter((d) => d.id !== id));
+    } catch (err) {
+      toast({ kind: "err", text: (err as Error).message });
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   React.useEffect(load, [load]);
 
@@ -223,7 +238,7 @@ export function KnowledgePage() {
         ) : (
           <table className="table">
             <thead>
-              <tr><th>Title</th><th>Chunks</th><th>Created</th><th>Id</th></tr>
+              <tr><th>Title</th><th>Chunks</th><th>Created</th><th>Id</th><th>Action</th></tr>
             </thead>
             <tbody>
               {docs.map((d) => (
@@ -232,6 +247,17 @@ export function KnowledgePage() {
                   <td><span className="badge info">{d.chunkCount}</span></td>
                   <td className="muted">{new Date(d.createdAt).toLocaleString()}</td>
                   <td className="mono muted">{d.id.slice(0, 8)}…</td>
+                  <td>
+                    <button
+                      className="btn btn-sm btn-ghost"
+                      style={{ color: "#ef4444", padding: "3px 8px" }}
+                      onClick={() => handleDelete(d.id, d.title)}
+                      disabled={deletingId === d.id}
+                      title={`Delete "${d.title}"`}
+                    >
+                      {deletingId === d.id ? <span className="spinner" /> : <><i className="fa-solid fa-trash" /> Delete</>}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
