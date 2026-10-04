@@ -224,6 +224,8 @@ class DeepgramSTT(STTProvider):
         # The caller we settled on: background voices and side conversations must
         # never become the transcript we answer.
         self._speaker: str | None = None
+        # Set by the server before the committed pass; interim drafts skip it.
+        self.final_pass = True
         log.info("STT ready: deepgram %s lang=%s diarize=%s", self._model, self._language,
                  self._diarize)
 
@@ -240,8 +242,9 @@ class DeepgramSTT(STTProvider):
         }
         if self._language and self._language != "auto":
             params["language"] = self._language
-        if self._diarize:
-            # Tells us who spoke, so one voice answers and the rest is noise.
+        if self._diarize and self.final_pass:
+            # Speaker attribution is only worth its extra ~0.6 s on the answer we
+            # actually keep; interim drafts run without it.
             params["diarize"] = "true"
             params["utterances"] = "true"
         # Deepgram biases towards these terms, the hosted equivalent of the
@@ -317,7 +320,7 @@ class DeepgramSTT(STTProvider):
         channels = results.get("channels") or []
         alternatives = (channels[0].get("alternatives") or [{}])[0] if channels else {}
         utterances = results.get("utterances") or []
-        if self._diarize and utterances:
+        if self._diarize and self.final_pass and utterances:
             text = self._caller_text(utterances)
         else:
             text = str(alternatives.get("transcript") or "").strip()
@@ -453,7 +456,6 @@ class DeepgramTTS(TTSProvider):
         self._base = (os.getenv("DEEPGRAM_BASE_URL") or "https://api.deepgram.com/v1").rstrip("/")
         self._client = httpx.AsyncClient(timeout=30.0)
         self._fallback = build_tts_fallback()
-        # Once the project has told us Aura is off, stop paying for the probe.
         self._fallback_only = False
         log.info("TTS ready: deepgram voice=%s (fallback=%s)", self._voice, self._fallback.name)
 

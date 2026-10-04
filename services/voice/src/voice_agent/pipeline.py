@@ -41,13 +41,21 @@ class VoicePipeline:
             self.interrupted = True
             log.info("barge-in: stopping TTS playback")
 
-    async def transcribe(self, pcm16: bytes) -> str:
+    async def transcribe(self, pcm16: bytes, final: bool = False) -> str:
         """Transcript of arbitrary audio (used for speculative streaming drafts)."""
+        if hasattr(self.stt, "final_pass"):
+            self.stt.final_pass = final
         result = await self.stt.transcribe(pcm16, self.config.sample_rate)
         return result.text
 
-    async def transcribe_detailed(self, pcm16: bytes) -> tuple[str, float]:
-        """Text plus decode confidence, so noise can be rejected before the LLM."""
+    async def transcribe_detailed(self, pcm16: bytes, final: bool = True) -> tuple[str, float]:
+        """Text plus decode confidence, so noise can be rejected before the LLM.
+
+        Speaker attribution costs ~0.6 s on Deepgram, so interim drafts pass
+        final=False and only the transcript we answer pays for diarization.
+        """
+        if hasattr(self.stt, "final_pass"):
+            self.stt.final_pass = final
         result = await self.stt.transcribe(pcm16, self.config.sample_rate)
         return result.text, float(getattr(result, "confidence", 1.0) or 0.0)
 
