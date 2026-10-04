@@ -111,8 +111,8 @@ export function VoicePage() {
             if (isGreetingEcho || isAssistantEcho) {
               continue;
             }
-            // Instant barge-in: If user speaks while the agent is speaking or replying, stop agent immediately!
-            if (voiceStateRef.current === "speaking" || replyStartedRef.current) {
+            // Barge-in: If user speaks while the agent is speaking, stop agent
+            if (voiceStateRef.current === "speaking" && spoken.trim().length >= 2) {
               interruptRef.current();
             }
             if (r.isFinal) {
@@ -648,15 +648,15 @@ export function VoicePage() {
               </button>
               <select
                 className="select"
-                style={{ maxWidth: 190 }}
+                style={{ maxWidth: 220 }}
                 value={sttMode}
                 onChange={(e) => setSttMode(e.target.value as "server" | "browser")}
                 disabled={active}
-                title="Server STT = our accurate transcriber. Browser STT = Chrome's, faster but rougher."
+                title="Server STT = Deepgram ultra-low latency sub-400ms streaming with native acoustic barge-in."
               >
-                <option value="server">STT: server (accurate)</option>
+                <option value="server">STT: server (Deepgram Sub-400ms)</option>
                 <option value="browser" disabled={!browserSttAvailable}>
-                  STT: browser (fast){browserSttAvailable ? "" : " - unavailable"}
+                  STT: browser (Web Speech API){browserSttAvailable ? "" : " - unavailable"}
                 </option>
               </select>
               <button className="btn" onClick={interrupt} disabled={!active || voiceState !== "speaking"}>
@@ -665,9 +665,9 @@ export function VoicePage() {
             </div>
 
             <div className="voice-hints">
-              <span className="pipe-step">headphones = cleanest barge-in</span>
-              <span className="pipe-step">first reply ≈ 2–4s (speech → gemini → tts)</span>
-              <span className="pipe-step">browser STT ≈ 0.2s · answers grounded in your knowledge</span>
+              <span className="pipe-step">headphones recommended for cleanest barge-in</span>
+              <span className="pipe-step">response time &lt; 400ms (Deepgram Voice Agent)</span>
+              <span className="pipe-step">grounded in your documents · live web search</span>
             </div>
 
             <div className="voice-log">

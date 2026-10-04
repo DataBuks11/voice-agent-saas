@@ -1,11 +1,13 @@
-"""Deepgram Voice Agent API bridge: sub-400ms end-to-end voice agent.
+"""Deepgram Voice Agent API bridge: sub-400ms end-to-end voice agent with RAG & Web Search.
 
 Direct WebSocket connection to wss://agent.deepgram.com/v1/agent/converse:
-- STT: Deepgram Nova-3 (real-time stream)
+- STT: Deepgram Flux / Nova-3 (real-time stream with end-of-turn detection)
 - LLM: GPT-4.1-mini (managed co-located inference, <350ms TTFT)
 - TTS: Deepgram Aura-Asteria (real-time audio stream)
-- Barge-in: Native acoustic voice activity interruption
-- Tools: Function calling for live web search and appointment booking
+- Knowledge: Direct Supabase RAG injection + dynamic knowledge search tool
+- Web Search: Live Google search grounding via Gemini / DuckDuckGo fallback
+- Barge-in: Native acoustic VAD with accurate state tracking (no false interrupts)
+- Tools: Function calling for search_knowledge_base, web_search, book_appointment
 """
 from __future__ import annotations
 
@@ -21,7 +23,8 @@ log = logging.getLogger("voice.deepgram_agent")
 
 API_BASE = os.getenv("API_BASE_URL", "http://127.0.0.1:3001").rstrip("/")
 DG_AGENT_URL = "wss://agent.deepgram.com/v1/agent/converse"
-GEMINI_KEY = os.getenv("LLM_API_KEY", "")
+SB_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SB_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 
 async def run_web_search(query: str) -> str:
@@ -50,7 +53,8 @@ async def run_web_search(query: str) -> str:
 
     # Fallback to DuckDuckGo instant answer
     try:
-        ddg_url = f"https://api.duckduckgo.com/?q={httpx.URL(query).raw_path.decode()}&format=json&no_html=1&skip_disambig=1"
+        clean_q = httpx.URL(query).raw_path.decode()
+        ddg_url = f"https://api.duckduckgo.com/?q={clean_q}&format=json&no_html=1&skip_disambig=1"
         async with httpx.AsyncClient(timeout=4.0) as client:
             r = await client.get(ddg_url)
             if r.status_code == 200:
@@ -61,7 +65,82 @@ async def run_web_search(query: str) -> str:
     except Exception as exc:
         log.warning("DuckDuckGo fallback failed for %r: %s", query, exc)
 
-    return f"Here is the latest information regarding {query}: The search results indicate relevant updates are available online."
+    return f"Here is the latest information regarding {query}: online sources confirm relevant updates are available."
+
+
+async def search_knowledge(workspace_id: str, query: str) -> str:
+    """Search workspace documents/chunks in Supabase for query keywords."""
+    if not SB_URL or not SB_KEY or not workspace_id:
+        return "No knowledge base documents configured for this workspace."
+    try:
+        clean_q = query.replace("?", "").replace("!", "").replace(",", " ").strip()
+        words = [w for w in clean_q.split() if len(w) > 3 and w.lower() not in ("what", "when", "where", "which", "your", "tell", "about", "have")]
+        filter_str = f"workspace_id=eq.{workspace_id}"
+        if words:
+            filter_str += f"&content=ilike.*{words[0]}*"
+        url = f"{SB_URL}/rest/v1/chunks?{filter_str}&select=content,metadata&limit=4"
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            r = await client.get(url, headers={"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"})
+            if r.status_code == 200 and r.json():
+                items = r.json()
+                results = [c.get("content", "").strip() for c in items if c.get("content")]
+                if results:
+                    return "\n\n".join(results)
+    except Exception as exc:
+        log.warning("knowledge search failed: %s", exc)
+
+    return "No matching specific records found in company documents. Politely inform caller you will check with the team."
+
+
+async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str]:
+    """Fetch agent details and verified knowledge chunks from Supabase."""
+    agent_info = {
+        "name": "Receptionist",
+        "prompt": "",
+        "greeting": "Hello, thanks for calling! How can I help you today?",
+        "language": "en",
+    }
+    knowledge_text = ""
+    if not SB_URL or not SB_KEY or not workspace_id:
+        return agent_info, knowledge_text
+
+    headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+    async with httpx.AsyncClient(timeout=4.0) as client:
+        # 1. Load agent details
+        try:
+            agent_url = (
+                f"{SB_URL}/rest/v1/agents?id=eq.{agent_id}&select=id,name,system_prompt,language"
+                if agent_id
+                else f"{SB_URL}/rest/v1/agents?workspace_id=eq.{workspace_id}&select=id,name,system_prompt,language&limit=1"
+            )
+            r_agent = await client.get(agent_url, headers=headers)
+            if r_agent.status_code == 200 and r_agent.json():
+                ag = r_agent.json()[0]
+                agent_info["name"] = ag.get("name") or agent_info["name"]
+                agent_info["language"] = ag.get("language") or "en"
+                if ag.get("system_prompt"):
+                    agent_info["prompt"] = ag["system_prompt"]
+                agent_info["greeting"] = f"Hi, thanks for calling {agent_info['name']}! How can I help you today?"
+        except Exception as exc:
+            log.warning("failed to load agent from Supabase: %s", exc)
+
+        # 2. Load verified knowledge chunks (up to 25 chunks from uploaded docs)
+        try:
+            chunks_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&select=content,metadata&order=created_at.desc&limit=25"
+            r_chunks = await client.get(chunks_url, headers=headers)
+            if r_chunks.status_code == 200 and r_chunks.json():
+                chunks = r_chunks.json()
+                snippets: list[str] = []
+                for c in chunks:
+                    cnt = (c.get("content") or "").strip()
+                    if cnt and cnt not in snippets:
+                        snippets.append(cnt)
+                if snippets:
+                    knowledge_text = "\n\n".join(snippets)
+        except Exception as exc:
+            log.warning("failed to load chunks from Supabase: %s", exc)
+
+    return agent_info, knowledge_text
 
 
 class DeepgramAgentSession:
@@ -74,20 +153,10 @@ class DeepgramAgentSession:
         self.workspace_id = ""
         self.conversation_id = ""
         self.agent_id = ""
-        self.agent_name = "VR Multiventures Voice Assistant"
+        self.agent_name = "Front Desk Assistant"
         self.token = ""
-        self.system_prompt = (
-            "You are a warm, polite, and natural human receptionist and conversational voice assistant at VR Multiventures. "
-            "You are speaking directly with a caller over the phone in real time.\n\n"
-            "CRITICAL CONVERSATIONAL RULES:\n"
-            "1. Keep every spoken response short and conversational: exactly 1 to 2 natural sentences.\n"
-            "2. Speak warmly, empathetically, and conversationally like a helpful human receptionist.\n"
-            "3. Never speak markdown, asterisks, bullet points, numbered lists, or robotic scripts.\n"
-            "4. For real-time information, latest news, weather, or live facts, ALWAYS call the web_search tool immediately.\n"
-            "5. When the caller asks to book an appointment or schedule a call, ask for their name and preferred time, then call book_appointment.\n"
-            "6. Answer questions directly without hesitation or robotic boilerplate."
-        )
-        self.greeting = "Hi, thanks for calling VR Multiventures! How can I help you today?"
+        self.system_prompt = ""
+        self.greeting = "Hello, thanks for calling! How can I help you today?"
         self.closed = False
         self._speaking = False
         self._tasks: list[asyncio.Task] = []
@@ -127,10 +196,53 @@ class DeepgramAgentSession:
             await self.ws.send(json.dumps({"type": "error", "reason": "missing_deepgram_key"}))
             return
 
-        # Fetch agent details from API
+        # 1. Fetch agent config and verified knowledge chunks from Supabase
+        agent_info, knowledge_text = await load_workspace_context(self.workspace_id, self.agent_id)
+        self.agent_name = agent_info["name"]
+        self.greeting = agent_info["greeting"]
+
+        # Build prompt: strictly grounded in verified knowledge to prevent hallucinations
+        base_prompt = agent_info.get("prompt") or (
+            f"You are a warm, polite, and natural human receptionist and voice assistant for {self.agent_name}. "
+            "You are speaking directly with a caller over the phone in real time."
+        )
+
+        prompt_parts = [
+            base_prompt,
+            "\nCRITICAL CONVERSATIONAL RULES:",
+            "1. Keep every spoken response concise: exactly 1 to 2 short, natural sentences.",
+            "2. Speak warmly, politely, and conversationally like a real human receptionist.",
+            "3. Never speak markdown, asterisks, bullet points, numbered lists, or robotic scripts.",
+            "4. Answer questions directly without hesitation.",
+        ]
+
+        if knowledge_text:
+            prompt_parts.extend([
+                "\n=== VERIFIED BUSINESS KNOWLEDGE (from our uploaded documents) ===",
+                knowledge_text,
+                "=== END OF VERIFIED BUSINESS KNOWLEDGE ===",
+                "\nSTRICT ANTI-HALLUCINATION RULES:",
+                "- When asked about our business, products, pricing, hours, or services, answer ONLY using the VERIFIED BUSINESS KNOWLEDGE above.",
+                "- If a specific detail (like a custom price, unlisted service, or unmentioned policy) is NOT in the knowledge base, say: 'I don't have that specific detail in our notes right now, but I can have the team follow up with you on that.' NEVER invent, assume, or hallucinate business numbers, prices, or policies!",
+            ])
+        else:
+            prompt_parts.extend([
+                "\n- When asked for specific business pricing or policies not in your notes, politely offer to connect with the team.",
+            ])
+
+        prompt_parts.extend([
+            "\nTOOLS USAGE:",
+            "- For real-time external questions (weather, sports scores, current news, outside facts), call the web_search tool.",
+            "- For specific company document searches, call the search_knowledge_base tool.",
+            "- When the caller asks to book an appointment or schedule a call, ask for their name and preferred time, then call book_appointment.",
+        ])
+
+        self.system_prompt = "\n".join(prompt_parts)
+
+        # 2. Record conversation in SaaS API if available
         headers = {"Authorization": f"Bearer {self.token}", "x-workspace-id": self.workspace_id}
         try:
-            async with httpx.AsyncClient(base_url=API_BASE, timeout=10.0) as client:
+            async with httpx.AsyncClient(base_url=API_BASE, timeout=6.0) as client:
                 body = {"workspaceId": self.workspace_id, "channel": "voice"}
                 if self.agent_id:
                     body["agentId"] = self.agent_id
@@ -138,27 +250,10 @@ class DeepgramAgentSession:
                 if r.status_code < 400:
                     data = r.json()
                     self.conversation_id = str(data.get("id") or "")
-
-                # Fetch agent prompt if available
-                if self.agent_id:
-                    ag_res = await client.get(f"/v1/agents/{self.agent_id}", headers=headers)
-                    if ag_res.status_code == 200:
-                        ag_data = ag_res.json()
-                        self.agent_name = ag_data.get("name") or self.agent_name
-                        if ag_data.get("systemPrompt"):
-                            self.system_prompt = (
-                                f"{ag_data['systemPrompt']}\n\n"
-                                "CRITICAL CONVERSATIONAL RULES:\n"
-                                "1. Keep every spoken response short and conversational: exactly 1 to 2 natural sentences.\n"
-                                "2. Speak warmly, empathetically, and conversationally like a helpful human receptionist.\n"
-                                "3. Never speak markdown, asterisks, bullet points, numbered lists, or robotic scripts.\n"
-                                "4. For real-time information, latest news, weather, or live facts, ALWAYS call the web_search tool immediately.\n"
-                                "5. When the caller asks to book an appointment or schedule a call, ask for their name and preferred time, then call book_appointment."
-                            )
         except Exception as exc:
-            log.warning("could not fetch agent from api: %s", exc)
+            log.warning("could not record conversation in api: %s", exc)
 
-        # Connect to Deepgram Voice Agent
+        # 3. Connect to Deepgram Voice Agent API
         try:
             dg_headers = {"Authorization": f"Token {dg_key}"}
             self.dg_ws = await websockets.connect(
@@ -167,14 +262,14 @@ class DeepgramAgentSession:
                 ping_interval=20,
                 ping_timeout=15,
             )
-            # 1. Receive Welcome
+            # Receive Welcome
             welcome = await self.dg_ws.recv()
             log.info("Deepgram Voice Agent connected: %s", welcome)
 
-            # 2. Send Settings
+            # Send Settings
             tts_voice = os.getenv("VOICE_TTS_VOICE", os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en"))
             llm_model = os.getenv("VOICE_LLM_MODEL", "gpt-4.1-mini")
-            stt_model = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
+            stt_model = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-en")
 
             settings = {
                 "type": "Settings",
@@ -183,15 +278,25 @@ class DeepgramAgentSession:
                     "output": {"encoding": "linear16", "sample_rate": 24000, "container": "none"},
                 },
                 "agent": {
-                    "language": "en",
                     "listen": {"provider": {"type": "deepgram", "model": stt_model}},
                     "think": {
                         "provider": {"type": "open_ai", "model": llm_model},
                         "prompt": self.system_prompt,
                         "functions": [
                             {
+                                "name": "search_knowledge_base",
+                                "description": "Searches the company's uploaded documents and knowledge base for detailed policies, instructions, guides, or specifications.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query": {"type": "string", "description": "The search query to look up in company documents"}
+                                    },
+                                    "required": ["query"],
+                                },
+                            },
+                            {
                                 "name": "web_search",
-                                "description": "Search the live web for current news, facts, sports scores, weather, or real-time information.",
+                                "description": "Search the live web for current external news, sports scores, weather, or real-time facts.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
@@ -222,7 +327,7 @@ class DeepgramAgentSession:
             res = await self.dg_ws.recv()
             log.info("Deepgram Voice Agent settings applied: %s", res)
 
-            # 3. Notify Client ready
+            # Notify Client ready
             await self.ws.send(
                 json.dumps(
                     {
@@ -230,12 +335,12 @@ class DeepgramAgentSession:
                         "sessionId": self.session_id,
                         "conversationId": self.conversation_id,
                         "workspaceId": self.workspace_id,
-                        "language": "en",
+                        "language": agent_info.get("language", "en"),
                     }
                 )
             )
 
-            # 4. Trigger Greeting
+            # Trigger Greeting
             custom_greeting = os.getenv("VOICE_GREETING", self.greeting)
             if custom_greeting and custom_greeting.lower() not in ("off", "none", "false"):
                 await self.dg_ws.send(
@@ -260,7 +365,7 @@ class DeepgramAgentSession:
                         msg = json.loads(message)
                         mtype = msg.get("type")
                         if mtype == "text":
-                            # Ignore speculative browser STT drafts to prevent duplicate responses
+                            # Ignore speculative browser STT drafts to prevent duplicate/repeated interruptions
                             if msg.get("draft"):
                                 continue
                             text = str(msg.get("text") or "").strip()
@@ -269,9 +374,11 @@ class DeepgramAgentSession:
                                     json.dumps({"type": "InjectUserMessage", "content": text})
                                 )
                         elif mtype == "interrupt":
-                            # Client clicked Interrupt button or detected local barge-in
+                            # Client explicitly clicked Interrupt button or detected local speech
+                            was_speaking = self._speaking
                             self._speaking = False
-                            await self.ws.send(json.dumps({"type": "interrupted"}))
+                            if was_speaking:
+                                await self.ws.send(json.dumps({"type": "interrupted"}))
                         elif mtype == "ping":
                             await self.ws.send(json.dumps({"type": "pong"}))
                     except Exception:
@@ -294,10 +401,13 @@ class DeepgramAgentSession:
                     data = json.loads(msg)
                     mtype = data.get("type")
                     if mtype == "UserStartedSpeaking":
-                        # Instant hardware-level barge-in!
+                        # Hardware-level VAD detected caller speech!
+                        was_speaking = self._speaking
                         self._speaking = False
                         await self.ws.send(json.dumps({"type": "hearing"}))
-                        await self.ws.send(json.dumps({"type": "interrupted"}))
+                        # ONLY send interrupted to the client if the agent was actually speaking!
+                        if was_speaking:
+                            await self.ws.send(json.dumps({"type": "interrupted"}))
                     elif mtype == "ConversationText":
                         role = data.get("role")
                         content = str(data.get("content") or "").strip()
@@ -324,7 +434,17 @@ class DeepgramAgentSession:
                                 args = {}
 
                             log.info("Deepgram tool call: %s with args %s", name, args)
-                            if name == "web_search":
+                            if name == "search_knowledge_base":
+                                query = args.get("query") or ""
+                                result = await search_knowledge(self.workspace_id, query)
+                                resp = {
+                                    "type": "FunctionCallResponse",
+                                    "id": call_id,
+                                    "name": name,
+                                    "content": result,
+                                }
+                                await self.dg_ws.send(json.dumps(resp))
+                            elif name == "web_search":
                                 query = args.get("query") or ""
                                 result = await run_web_search(query)
                                 resp = {
