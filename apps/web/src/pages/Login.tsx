@@ -42,7 +42,7 @@ export function LoginPage() {
         <div className="brand" style={{ padding: "0 0 18px" }}>
           <BrandLogo />
           <div>
-            <div className="brand-name">Voice Agent OS</div>
+            <div className="brand-name">DataBuks Voice AI</div>
             <div className="brand-sub">sign in to your console</div>
           </div>
         </div>

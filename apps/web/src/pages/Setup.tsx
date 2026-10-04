@@ -49,7 +49,7 @@ export function SetupPage() {
         <div className="brand" style={{ padding: "0 0 18px" }}>
           <BrandLogo />
           <div>
-            <div className="brand-name">Voice Agent OS</div>
+            <div className="brand-name">DataBuks Voice AI</div>
             <div className="brand-sub">create or pick a workspace to continue</div>
           </div>
         </div>

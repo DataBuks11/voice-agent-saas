@@ -80,7 +80,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/conversations", label: "Conversations", ico: "fa-solid fa-comments" },
     { to: "/bookings", label: "Bookings", ico: "fa-solid fa-calendar-check" },
   ];
-  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "Voice Agent OS";
+  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "DataBuks Voice AI";
 
   return (
     <ToastCtx.Provider value={push}>
@@ -91,8 +91,8 @@ function Shell({ children }: { children: React.ReactNode }) {
           <div className="brand">
             <BrandLogo />
             <div>
-              <div className="brand-name">Voice Agent OS</div>
-              <div className="brand-sub">multi-tenant · RAG · voice</div>
+              <div className="brand-name">DataBuks Voice AI</div>
+              <div className="brand-sub">enterprise · OKF RAG · voice</div>
             </div>
           </div>
           <div className="nav-section">Workspace</div>
