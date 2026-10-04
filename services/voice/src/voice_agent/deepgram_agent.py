@@ -69,33 +69,41 @@ async def run_web_search(query: str) -> str:
 
 
 async def search_knowledge(workspace_id: str, query: str) -> str:
-    """Search workspace documents/chunks in Supabase for query keywords."""
+    """Search workspace documents and chunks in Supabase with multi-keyword matching."""
     if not SB_URL or not SB_KEY or not workspace_id:
         return "No knowledge base documents configured for this workspace."
     try:
         clean_q = query.replace("?", "").replace("!", "").replace(",", " ").strip()
-        words = [w for w in clean_q.split() if len(w) > 3 and w.lower() not in ("what", "when", "where", "which", "your", "tell", "about", "have")]
+        stop_words = {"what", "when", "where", "which", "your", "tell", "about", "have", "with", "from", "that", "this", "some", "need", "know", "much", "many", "does", "will"}
+        words = [w for w in clean_q.split() if len(w) > 2 and w.lower() not in stop_words]
+
+        filter_parts = []
+        for w in words[:4]:
+            filter_parts.append(f"content.ilike.*{w}*")
+
         filter_str = f"workspace_id=eq.{workspace_id}"
-        if words:
-            filter_str += f"&content=ilike.*{words[0]}*"
-        url = f"{SB_URL}/rest/v1/chunks?{filter_str}&select=content,metadata&limit=4"
+        if filter_parts:
+            filter_str += f"&or=({','.join(filter_parts)})"
+
+        url = f"{SB_URL}/rest/v1/chunks?{filter_str}&select=content,metadata,document_id&limit=8"
+        headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
         async with httpx.AsyncClient(timeout=4.0) as client:
-            r = await client.get(url, headers={"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"})
+            r = await client.get(url, headers=headers)
             if r.status_code == 200 and r.json():
                 items = r.json()
                 results = [c.get("content", "").strip() for c in items if c.get("content")]
                 if results:
-                    return "\n\n".join(results)
+                    return "\n\n".join(results[:4])
     except Exception as exc:
         log.warning("knowledge search failed: %s", exc)
 
-    return "No matching specific records found in company documents. Politely inform caller you will check with the team."
+    return "No matching specific records found in company documents. You may combine verified knowledge with the web_search tool or inform the caller the team will follow up."
 
 
 async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str]:
-    """Fetch agent details and verified knowledge chunks from Supabase."""
+    """Fetch agent details and verified knowledge chunks from all uploaded documents in Supabase."""
     agent_info = {
-        "name": "Receptionist",
+        "name": "Front Desk Receptionist",
         "prompt": "",
         "greeting": "Hello, thanks for calling! How can I help you today?",
         "language": "en",
@@ -124,21 +132,36 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
         except Exception as exc:
             log.warning("failed to load agent from Supabase: %s", exc)
 
-        # 2. Load verified knowledge chunks (up to 25 chunks from uploaded docs)
+        # 2. Load all verified documents & chunks with OKF titles
         try:
-            chunks_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&select=content,metadata&order=created_at.desc&limit=25"
+            doc_titles: dict[str, str] = {}
+            docs_url = f"{SB_URL}/rest/v1/documents?workspace_id=eq.{workspace_id}&select=id,title,metadata"
+            r_docs = await client.get(docs_url, headers=headers)
+            if r_docs.status_code == 200 and r_docs.json():
+                for d in r_docs.json():
+                    doc_titles[d["id"]] = d.get("title") or "Business Knowledge"
+
+            chunks_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&select=document_id,content,metadata&order=created_at.desc&limit=60"
             r_chunks = await client.get(chunks_url, headers=headers)
             if r_chunks.status_code == 200 and r_chunks.json():
                 chunks = r_chunks.json()
-                snippets: list[str] = []
+                by_doc: dict[str, list[str]] = {}
                 for c in chunks:
+                    d_id = c.get("document_id") or "general"
+                    d_title = doc_titles.get(d_id) or c.get("metadata", {}).get("doc_title") or "Business Knowledge"
                     cnt = (c.get("content") or "").strip()
-                    if cnt and cnt not in snippets:
-                        snippets.append(cnt)
-                if snippets:
-                    knowledge_text = "\n\n".join(snippets)
+                    if cnt:
+                        by_doc.setdefault(d_title, [])
+                        if cnt not in by_doc[d_title]:
+                            by_doc[d_title].append(cnt)
+
+                doc_sections: list[str] = []
+                for d_title, snippets in by_doc.items():
+                    doc_sections.append(f"Document: {d_title}\n" + "\n\n".join(snippets))
+                if doc_sections:
+                    knowledge_text = "\n\n---\n\n".join(doc_sections)
         except Exception as exc:
-            log.warning("failed to load chunks from Supabase: %s", exc)
+            log.warning("failed to load documents and chunks from Supabase: %s", exc)
 
     return agent_info, knowledge_text
 
@@ -212,23 +235,34 @@ class DeepgramAgentSession:
             base_prompt,
             "\nCRITICAL CONVERSATIONAL RULES:",
             "1. Keep every spoken response concise: exactly 1 to 2 short, natural sentences.",
-            "2. Speak warmly, politely, and conversationally like a real human receptionist.",
-            "3. Never speak markdown, asterisks, bullet points, numbered lists, or robotic scripts.",
+            "2. Speak warmly, politely, and conversationally like an experienced human receptionist.",
+            "3. Never speak markdown, asterisks, bullet points, numbered lists, emojis, or robotic scripts.",
             "4. Answer questions directly without hesitation.",
+            "5. CONVERSATION CONTINUITY & INTERRUPTIONS: Always maintain conversational memory. If the caller interrupts you mid-sentence, seamlessly pivot to address what they just said while retaining all prior context from the call.",
         ]
 
         if knowledge_text:
             prompt_parts.extend([
-                "\n=== VERIFIED BUSINESS KNOWLEDGE (from our uploaded documents) ===",
+                "\n=== OKF VERIFIED BUSINESS KNOWLEDGE (from uploaded documents) ===",
                 knowledge_text,
                 "=== END OF VERIFIED BUSINESS KNOWLEDGE ===",
-                "\nSTRICT ANTI-HALLUCINATION RULES:",
-                "- When asked about our business, products, pricing, hours, or services, answer ONLY using the VERIFIED BUSINESS KNOWLEDGE above.",
-                "- If a specific detail (like a custom price, unlisted service, or unmentioned policy) is NOT in the knowledge base, say: 'I don't have that specific detail in our notes right now, but I can have the team follow up with you on that.' NEVER invent, assume, or hallucinate business numbers, prices, or policies!",
+                "\nLAYA 4-PILLAR INTELLIGENCE & HYBRID SYNTHESIS (OKF + RAG + LAYA + WEB SEARCH):",
+                "Pillar 1 (OKF & RAG Document Grounding): For any company offerings, services, verified pricing, hours, or policies, ALWAYS answer directly and faithfully from the VERIFIED BUSINESS KNOWLEDGE above.",
+                "Pillar 2 (Laya Decision & Intent Routing): Automatically classify the caller's intent:",
+                "  - Direct company inquiry -> Answer instantly from verified documents.",
+                "  - Booking / appointment request -> Collect caller name, ask to spell it, get date/time, then call book_appointment.",
+                "  - External real-time question (weather, current outside facts) -> Call web_search.",
+                "  - Hybrid inquiry (business context + external details) -> Synthesize Document Knowledge + Live Web Search (see Pillar 3).",
+                "Pillar 3 (Hybrid Knowledge Synthesis):",
+                "  - If the caller asks a question where our documents have partial context, but the specific detail requires external, real-time, or comparative data: take the verified facts from our documents, call the web_search tool, and combine both into ONE seamless, accurate 1-2 sentence response!",
+                "  - Example: If asked about store hours and today's weather/traffic, provide the verified hours from notes and the real-time weather from web_search.",
+                "Pillar 4 (Strict Anti-Hallucination):",
+                "  - NEVER invent, assume, or hallucinate internal business policies, private numbers, or unlisted custom prices.",
+                "  - If a company-specific detail is not in your documents and cannot be verified, politely offer to connect them with the team.",
             ])
         else:
             prompt_parts.extend([
-                "\n- When asked for specific business pricing or policies not in your notes, politely offer to connect with the team.",
+                "\n- When asked for specific business pricing or policies not in your notes, politely offer to connect with the team, and use web_search for public real-time information.",
             ])
 
         prompt_parts.extend([
@@ -283,7 +317,24 @@ class DeepgramAgentSession:
                     "output": {"encoding": "linear16", "sample_rate": 24000, "container": "none"},
                 },
                 "agent": {
-                    "listen": {"provider": {"type": "deepgram", "model": stt_model}},
+                    "listen": {
+                        "provider": {
+                            "type": "deepgram",
+                            "model": stt_model,
+                            "smart_format": True,
+                            "keyterms": [
+                                self.agent_name,
+                                "DataBuks",
+                                "booking",
+                                "appointment",
+                                "schedule",
+                                "pricing",
+                                "services",
+                                "hours",
+                                "quote",
+                            ],
+                        }
+                    },
                     "think": {
                         "provider": {"type": "open_ai", "model": llm_model},
                         "prompt": self.system_prompt,

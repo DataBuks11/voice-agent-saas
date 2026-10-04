@@ -68,15 +68,15 @@ export function DashboardPage() {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "flex-start" }}>
           <div className="pipeline">
-            <span className="pipe-step">Ingest</span>
+            <span className="pipe-step">OKF Ingest</span>
             <span className="pipe-arrow">→</span>
-            <span className="pipe-step">Embed 1536d</span>
+            <span className="pipe-step">Vector Embed</span>
             <span className="pipe-arrow">→</span>
-            <span className="pipe-step">Retrieve</span>
+            <span className="pipe-step">RAG Retrieve</span>
             <span className="pipe-arrow">→</span>
-            <span className="pipe-step">Context</span>
+            <span className="pipe-step">Laya Decision</span>
             <span className="pipe-arrow">→</span>
-            <span className="pipe-step">Harness</span>
+            <span className="pipe-step">Voice AI Engine</span>
           </div>
           <Link className="btn btn-primary" to="/voice">
             <i className="fa-solid fa-microphone" /> Test the voice agent
@@ -183,7 +183,7 @@ export function DashboardPage() {
               <tr><td className="muted">Database</td><td><span className="badge ok">supabase · pgvector</span></td></tr>
               <tr><td className="muted">Backend host</td><td><span className="badge info">railway</span></td></tr>
               <tr><td className="muted">Frontend host</td><td><span className="badge info">vercel</span></td></tr>
-              <tr><td className="muted">Voice runtime</td><td><span className="badge ok">wss · whisper + piper · live</span></td></tr>
+              <tr><td className="muted">Voice runtime</td><td><span className="badge ok">wss · Real-Time Voice AI · &lt;400ms</span></td></tr>
             </tbody>
           </table>
         </div>
