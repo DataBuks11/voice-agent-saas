@@ -1374,8 +1374,14 @@ class Session:
 
 
 async def handler(ws) -> None:
-    session = Session(ws)
-    log.info("client connected: %s", ws.remote_address)
+    engine = os.getenv("VOICE_ENGINE", "deepgram_agent").strip().lower()
+    dg_key = os.getenv("DEEPGRAM_API_KEY", "").strip()
+    if engine == "deepgram_agent" and dg_key:
+        from .deepgram_agent import DeepgramAgentSession
+        session = DeepgramAgentSession(ws)
+    else:
+        session = Session(ws)
+    log.info("client connected: %s (engine=%s)", ws.remote_address, type(session).__name__)
     try:
         await session.run()
     except Exception:  # noqa: BLE001 - connection dropped is normal
@@ -1386,7 +1392,10 @@ async def handler(ws) -> None:
 
 
 async def serve_forever() -> None:
-    await shared_models()
+    engine = os.getenv("VOICE_ENGINE", "deepgram_agent").strip().lower()
+    dg_key = os.getenv("DEEPGRAM_API_KEY", "").strip()
+    if not (engine == "deepgram_agent" and dg_key):
+        await shared_models()
     ready = {"ok": False, "since": time.time()}
 
     async def health(ws, request):
@@ -1403,8 +1412,9 @@ async def serve_forever() -> None:
                 {
                     "ok": True,
                     "uptime_s": round(time.time() - ready["since"], 1),
-                    "stt": _stt.name if _stt else None,
-                    "tts": _tts.name if _tts else None,
+                    "engine": engine if (engine == "deepgram_agent" and dg_key) else "pipeline",
+                    "stt": "nova-3" if (engine == "deepgram_agent" and dg_key) else (_stt.name if _stt else None),
+                    "tts": "aura-asteria" if (engine == "deepgram_agent" and dg_key) else (_tts.name if _tts else None),
                 }
             )
             # websockets>=14 respond(status, text); the content type is text/plain
