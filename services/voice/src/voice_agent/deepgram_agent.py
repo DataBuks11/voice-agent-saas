@@ -231,10 +231,14 @@ class DeepgramAgentSession:
             ])
 
         prompt_parts.extend([
+            "\nNAME SPELLING RULE (CRITICAL FOR ACCURACY):",
+            "- When the caller provides their name (e.g. for booking or leaving contact details), ALWAYS ask them to spell out their name letter-by-letter to guarantee exact spelling accuracy (for example, to distinguish between 'Sudhanshu' and 'Sudhansu', 'Pooja' and 'Puja', 'Ritu' and 'Reetu'):",
+            "  Say: 'Could you please spell your name out for me so I make sure I have the exact spelling right?'",
+            "- When the caller spells out letters (e.g., 'S-U-D-H-A-N-S-H-U'), capture and confirm that exact spelling without guessing or changing it.",
             "\nTOOLS USAGE:",
             "- For real-time external questions (weather, sports scores, current news, outside facts), call the web_search tool.",
             "- For specific company document searches, call the search_knowledge_base tool.",
-            "- When the caller asks to book an appointment or schedule a call, ask for their name and preferred time, then call book_appointment.",
+            "- When the caller asks to book an appointment or schedule a call, ask for their name, ask them to spell it out, ask their preferred date and time, then call book_appointment.",
         ])
 
         self.system_prompt = "\n".join(prompt_parts)
@@ -267,7 +271,7 @@ class DeepgramAgentSession:
             log.info("Deepgram Voice Agent connected: %s", welcome)
 
             # Send Settings
-            tts_voice = os.getenv("VOICE_TTS_VOICE", os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en"))
+            tts_voice = os.getenv("VOICE_TTS_VOICE", os.getenv("DEEPGRAM_TTS_VOICE", "flux-hannah-en"))
             llm_model = os.getenv("VOICE_LLM_MODEL", "gpt-4.1-mini")
             stt_model = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-en")
 
@@ -457,6 +461,8 @@ class DeepgramAgentSession:
                             elif name == "book_appointment":
                                 caller_name = args.get("name") or "Guest"
                                 dt = args.get("datetime") or "the requested time"
+                                notes = args.get("notes") or ""
+                                self._save_booking_async(caller_name, dt, notes)
                                 result = f"Successfully scheduled appointment for {caller_name} on {dt}."
                                 resp = {
                                     "type": "FunctionCallResponse",
@@ -467,6 +473,29 @@ class DeepgramAgentSession:
                                 await self.dg_ws.send(json.dumps(resp))
         except Exception:
             pass
+
+    def _save_booking_async(self, customer_name: str, starts_at: str, notes: str) -> None:
+        if not SB_URL or not SB_KEY or not self.workspace_id:
+            return
+        asyncio.create_task(self._insert_booking(customer_name, starts_at, notes))
+
+    async def _insert_booking(self, customer_name: str, starts_at: str, notes: str) -> None:
+        try:
+            row = {
+                "workspace_id": self.workspace_id,
+                "conversation_id": self.conversation_id or None,
+                "customer_name": customer_name,
+                "contact": "",
+                "starts_at": starts_at,
+                "notes": notes,
+                "status": "confirmed",
+                "source": "agent",
+            }
+            headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(f"{SB_URL}/rest/v1/bookings", json=row, headers=headers)
+        except Exception as exc:
+            log.warning("could not insert booking: %s", exc)
 
     def _save_message_async(self, role: str, text: str) -> None:
         if not self.conversation_id or not text or not self.token:
