@@ -250,6 +250,35 @@ input, textarea, select { font: inherit; }
 }
 .page-head p { margin: 0; color: var(--muted); max-width: 720px; }
 
+.hero {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 28px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--nav-shadow);
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.hero h3 {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: clamp(17px, 2.2vw, 21px);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+.hero p {
+  margin: 0;
+  color: var(--muted);
+  max-width: 620px;
+  line-height: 1.6;
+}
+
 /* ---------- Components ---------- */
 .grid { display: grid; gap: 16px; }
 .grid-4 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }

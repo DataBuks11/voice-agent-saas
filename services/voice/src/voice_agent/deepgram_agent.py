@@ -105,32 +105,37 @@ async def search_knowledge(workspace_id: str, query: str) -> str:
     return "No matching specific records found in company documents. You may combine verified knowledge with the web_search tool or inform the caller the team will follow up."
 
 
-async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str]:
+async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str, list[str]]:
     """Fetch agent details and verified knowledge chunks from ALL uploaded documents in Supabase (Mixture of Experts)."""
     agent_info = {
-        "name": "Front Desk Receptionist",
+        "name": "DataBuks Receptionist",
         "prompt": "",
-        "greeting": "Hello, thanks for calling! How can I help you today?",
+        "greeting": "Hello, thanks for calling DataBuks! How can I help you today?",
         "language": "en",
+        "tone": "professional",
+        "fallback": "I don't have verified information about that yet.",
     }
     knowledge_text = ""
+    keyterm_titles: list[str] = []
     if not SB_URL or not SB_KEY or not workspace_id:
-        return agent_info, knowledge_text
+        return agent_info, knowledge_text, keyterm_titles
 
     headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
     async with httpx.AsyncClient(timeout=6.0) as client:
-        # 1. Load agent details
+        # 1. Load agent details (pick requested agent, or latest created agent for this workspace)
         try:
             agent_url = (
-                f"{SB_URL}/rest/v1/agents?id=eq.{agent_id}&select=id,name,system_prompt,language"
+                f"{SB_URL}/rest/v1/agents?id=eq.{agent_id}&select=id,name,system_prompt,language,tone,fallback_response"
                 if agent_id
-                else f"{SB_URL}/rest/v1/agents?workspace_id=eq.{workspace_id}&select=id,name,system_prompt,language&limit=1"
+                else f"{SB_URL}/rest/v1/agents?workspace_id=eq.{workspace_id}&select=id,name,system_prompt,language,tone,fallback_response&order=created_at.desc&limit=1"
             )
             r_agent = await client.get(agent_url, headers=headers)
             if r_agent.status_code == 200 and r_agent.json():
                 ag = r_agent.json()[0]
                 agent_info["name"] = ag.get("name") or agent_info["name"]
                 agent_info["language"] = ag.get("language") or "en"
+                agent_info["tone"] = ag.get("tone") or "professional"
+                agent_info["fallback"] = ag.get("fallback_response") or agent_info["fallback"]
                 if ag.get("system_prompt"):
                     agent_info["prompt"] = ag["system_prompt"]
                 agent_info["greeting"] = f"Hi, thanks for calling {agent_info['name']}! How can I help you today?"
@@ -181,10 +186,11 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
 
             if doc_sections:
                 knowledge_text = "\n\n--------------------\n\n".join(doc_sections)
+            keyterm_titles = [d.get("title") for d in docs if d.get("title")]
         except Exception as exc:
             log.warning("failed to load multi-document context from Supabase: %s", exc)
 
-    return agent_info, knowledge_text
+    return agent_info, knowledge_text, keyterm_titles
 
 
 class DeepgramAgentSession:
@@ -242,7 +248,7 @@ class DeepgramAgentSession:
             return
 
         # 1. Fetch agent config and verified knowledge chunks from Supabase
-        agent_info, knowledge_text = await load_workspace_context(self.workspace_id, self.agent_id)
+        agent_info, knowledge_text, keyterm_titles = await load_workspace_context(self.workspace_id, self.agent_id)
         self.agent_name = agent_info["name"]
         self.greeting = agent_info["greeting"]
 
@@ -254,12 +260,27 @@ class DeepgramAgentSession:
 
         prompt_parts = [
             base_prompt,
-            "\nCRITICAL CONVERSATIONAL RULES:",
-            "1. Keep every spoken response concise: exactly 1 to 2 short, natural sentences.",
-            "2. Speak warmly, politely, and conversationally like an experienced human receptionist.",
-            "3. Never speak markdown, asterisks, bullet points, numbered lists, emojis, or robotic scripts.",
-            "4. Answer questions directly without hesitation.",
-            "5. CONVERSATION CONTINUITY & INTERRUPTIONS: Always maintain conversational memory. If the caller interrupts you mid-sentence, seamlessly pivot to address what they just said while retaining all prior context from the call.",
+            f"\nTone: {agent_info.get('tone', 'professional')}. Default fallback policy: {agent_info.get('fallback', 'I do not have verified information about that yet.')}",
+            "\nCRITICAL CONVERSATIONAL RULES (MUST FOLLOW AT ALL TIMES):",
+            "1. KEEP SPOKEN TURNS BRIEF: exactly 1 to 2 short, natural conversational sentences. Never speak markdown, lists, or bullets.",
+            "2. DIRECT ANSWERS: Answer questions promptly and concisely without hesitation.",
+            "3. CONTINUITY: If interrupted, seamlessly address what the caller just said while retaining the prior call history.",
+            "\n*** MANDATORY NAME CAPTURE PROTOCOL (CRITICAL RULE — STRICT HARD GATE) ***:",
+            "- When a caller asks to book an appointment, schedule a call, or leave contact details:",
+            "  Ask ONLY for their name first: 'I would be happy to help with that! May I have your name, please?'",
+            "- AS SOON AS THE CALLER GIVES OR CHANGES THEIR NAME (e.g. 'I am Piyush', 'My name is Alex', 'This is Sudhanshu', 'Call me Rahul'):",
+            "  YOU ARE STRICTLY FORBIDDEN from asking for date, time, notes, or proceeding with booking yet!",
+            "  You MUST IMMEDIATELY respond by asking them to spell their name letter-by-letter:",
+            "  'Nice to meet you! Could you please spell your name out letter-by-letter for me so I make sure I record the exact spelling correctly?'",
+            "- ONLY AFTER THE CALLER SPELLS THE LETTERS (e.g. 'P-I-Y-U-S-H' or 'A-L-E-X' or 'S-U-D-H-A-N-S-H-U'):",
+            "  Confirm their exact spelling and THEN ask for their preferred date and time:",
+            "  'Thank you! Got it, [Name], spelled [Letters]! What date and time works best for your call?'",
+            "- If the caller has already spelled their name in the same turn (e.g. 'I am Piyush, P-I-Y-U-S-H'):",
+            "  Acknowledge the spelling immediately: 'Thank you, Piyush, P-I-Y-U-S-H! What date and time would you prefer?'",
+            "- NEVER SKIP ASKING FOR THE SPELLING UNDER ANY CIRCUMSTANCES!",
+            "\nPHONETIC CORRECTIONS & ACCENT HANDLING:",
+            "- The company name is DataBuks. Speech recognition (STT) may transcribe it as 'Data Box', 'Data Books', 'DataBux', 'dataverse', or 'data loss'. Recognize all of these as references to DataBuks and answer accurately.",
+            "- Caller names: Speech recognition may transcribe Indian or unique names with common phonetics (e.g. 'Jewish' or 'Yush' or 'Pious' for 'Piyush'). Always prioritize the caller's spelling confirmation.",
         ]
 
         if knowledge_text:
@@ -279,7 +300,6 @@ class DeepgramAgentSession:
                 "  - Hybrid inquiry (business context + external details) -> Synthesize Document Knowledge + Live Web Search (see Pillar 3).",
                 "Pillar 3 (Hybrid Knowledge Synthesis):",
                 "  - If the caller asks a question where our documents have partial context, but the specific detail requires external, real-time, or comparative data: take the verified facts from our documents, call the web_search tool, and combine both into ONE seamless, accurate 1-2 sentence response!",
-                "  - Example: If asked about store hours and today's weather/traffic, provide the verified hours from notes and the real-time weather from web_search.",
                 "Pillar 4 (Strict Anti-Hallucination):",
                 "  - NEVER invent, assume, or hallucinate internal business policies, private numbers, or unlisted custom prices.",
                 "  - If a company-specific detail is not in your documents and cannot be verified, politely offer to connect them with the team.",
@@ -290,16 +310,10 @@ class DeepgramAgentSession:
             ])
 
         prompt_parts.extend([
-            "\nPHONETIC RECOGNITION (COMPANY NAME):",
-            "- The company name is DataBuks. Speech recognition (STT) may transcribe it as 'Data Box', 'Data Books', 'DataBux', or 'dataverse'. Recognize all of these as references to DataBuks and answer accordingly.",
-            "\nNAME SPELLING RULE (CRITICAL FOR ACCURACY):",
-            "- When the caller provides their name (e.g. for booking or leaving contact details), ALWAYS ask them to spell out their name letter-by-letter to guarantee exact spelling accuracy (for example, to distinguish between 'Sudhanshu' and 'Sudhansu', 'Pooja' and 'Puja', 'Ritu' and 'Reetu'):",
-            "  Say: 'Could you please spell your name out for me so I make sure I have the exact spelling right?'",
-            "- When the caller spells out letters (e.g., 'S-U-D-H-A-N-S-H-U'), capture and confirm that exact spelling without guessing or changing it.",
             "\nTOOLS USAGE:",
             "- For real-time external questions (weather, sports scores, current news, outside facts), call the web_search tool.",
             "- For specific company document searches, call the search_knowledge_base tool.",
-            "- When the caller asks to book an appointment or schedule a call, ask for their name, ask them to spell it out, ask their preferred date and time, then call book_appointment.",
+            "- When the caller asks to book an appointment or schedule a call, follow the MANDATORY NAME CAPTURE PROTOCOL: get their name, ask to spell it out letter-by-letter, get date and time, then call book_appointment.",
         ])
 
         self.system_prompt = "\n".join(prompt_parts)
@@ -334,7 +348,27 @@ class DeepgramAgentSession:
             # Send Settings
             tts_voice = os.getenv("VOICE_TTS_VOICE", os.getenv("DEEPGRAM_TTS_VOICE", "flux-hannah-en"))
             llm_model = os.getenv("VOICE_LLM_MODEL", "gpt-4.1-mini")
-            stt_model = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-en")
+            stt_model = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
+            if stt_model in ("flux-general-en", "base.en", "nova-2"):
+                stt_model = "nova-3"
+
+            # Build intelligent keyterms list for Nova-3 to boost recognition of company, names, and documents
+            keyterms = [
+                "DataBuks", "Data Box", "Data Books", "Piyush", "Alex", "Sudhanshu", "Sudhansu", "Pooja", "Puja"
+            ]
+            if self.agent_name and self.agent_name not in keyterms:
+                keyterms.append(self.agent_name)
+            for kt in keyterm_titles:
+                clean_kt = kt.strip()
+                if clean_kt and len(clean_kt) <= 35 and clean_kt not in keyterms:
+                    keyterms.append(clean_kt)
+
+            listen_provider = {
+                "type": "deepgram",
+                "model": stt_model,
+                "smart_format": True,
+                "keyterms": keyterms[:30],
+            }
 
             settings = {
                 "type": "Settings",
@@ -343,7 +377,7 @@ class DeepgramAgentSession:
                     "output": {"encoding": "linear16", "sample_rate": 24000, "container": "none"},
                 },
                 "agent": {
-                    "listen": {"provider": {"type": "deepgram", "model": stt_model}},
+                    "listen": {"provider": listen_provider},
                     "think": {
                         "provider": {"type": "open_ai", "model": llm_model},
                         "prompt": self.system_prompt,

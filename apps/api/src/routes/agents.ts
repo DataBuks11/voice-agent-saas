@@ -108,4 +108,54 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     if (!data) throw Object.assign(new Error("agent not found"), { status: 404 });
     return rowToAgent(data as Record<string, unknown>);
   });
+
+  const agentUpdateSchema = z.object({
+    name: z.string().min(1).optional(),
+    language: z.string().optional(),
+    tone: z.string().optional(),
+    systemPrompt: z.string().optional(),
+    fallbackResponse: z.string().optional(),
+    location: z.string().optional(),
+  });
+
+  app.patch("/agents/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = agentUpdateSchema.parse((req as { body: unknown }).body);
+    const tenant = await requireTenant(req);
+    const db = getSupabase();
+
+    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (body.name !== undefined) updates.name = body.name;
+    if (body.language !== undefined) updates.language = body.language;
+    if (body.tone !== undefined) updates.tone = body.tone;
+    if (body.systemPrompt !== undefined) updates.system_prompt = body.systemPrompt;
+    if (body.fallbackResponse !== undefined) updates.fallback_response = body.fallbackResponse;
+    if (body.location !== undefined) updates.location = body.location;
+
+    const { data, error } = await db
+      .from("agents")
+      .update(updates)
+      .eq("id", id)
+      .eq("workspace_id", tenant.workspaceId)
+      .select()
+      .single();
+
+    if (error) throw Object.assign(new Error(`agent update failed: ${error.message}`), { status: 500 });
+    return reply.send(rowToAgent(data as Record<string, unknown>));
+  });
+
+  app.delete("/agents/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const tenant = await requireTenant(req);
+    const db = getSupabase();
+
+    const { error } = await db
+      .from("agents")
+      .delete()
+      .eq("id", id)
+      .eq("workspace_id", tenant.workspaceId);
+
+    if (error) throw Object.assign(new Error(`agent delete failed: ${error.message}`), { status: 500 });
+    return reply.send({ deleted: true, id });
+  });
 }

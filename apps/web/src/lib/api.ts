@@ -148,6 +148,10 @@ export const api = {
   listAgents: () => get<{ items: AgentRow[]; total: number }>("/v1/agents?workspaceId=" + getWorkspace()!.id),
   createAgent: (body: { name: string; language: string; tone: string; systemPrompt: string; fallbackResponse: string; location?: string }) =>
     post<AgentRow>("/v1/agents", { workspaceId: getWorkspace()!.id, ...body }),
+  updateAgent: (id: string, body: Partial<{ name: string; language: string; tone: string; systemPrompt: string; fallbackResponse: string; location?: string }>) =>
+    request<AgentRow>(`/v1/agents/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteAgent: (id: string) =>
+    request<{ deleted: boolean; id: string }>(`/v1/agents/${id}`, { method: "DELETE" }),
   ingest: (title: string, markdown: string, opts?: { documentId?: string }) =>
     post<{ sourceId: string | null; documentId: string; title: string; chunkCount: number; embeddingProvider: string; preview: { tokens: number; text: string }[] }>(
       "/v1/knowledge/ingest",

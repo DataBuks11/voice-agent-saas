@@ -1,4 +1,5 @@
 import React from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, type AgentRow } from "../lib/api";
 import { getWorkspace, getToken } from "../lib/session";
 import { useToast } from "../main";
@@ -101,9 +102,20 @@ export function VoicePage() {
     setLines((prev) => [...prev, { id: lineIdRef.current++, role, text }].slice(-60));
   }, []);
 
+  const [searchParams] = useSearchParams();
+  const urlAgentId = searchParams.get("agentId");
+
   React.useEffect(() => {
-    api.listAgents().then((r) => setAgents(r.items)).catch(() => undefined);
-  }, []);
+    api
+      .listAgents()
+      .then((r) => {
+        setAgents(r.items);
+        if (urlAgentId && r.items.some((a) => a.id === urlAgentId)) {
+          setAgentId(urlAgentId);
+        }
+      })
+      .catch(() => undefined);
+  }, [urlAgentId]);
 
   const teardown = React.useCallback(() => {
     if (pingRef.current) window.clearInterval(pingRef.current);
@@ -269,42 +281,27 @@ export function VoicePage() {
       const nativeSampleRate = ctx.sampleRate;
       const src = ctx.createMediaStreamSource(streamRef.current!);
 
-      // DSP Traffic & Street Noise Filter:
-      // High-pass filter at 85 Hz eliminates low-frequency road rumble, bus noise, and AC hum
+      // Standard acoustic high-pass filter at 75 Hz eliminates low-frequency AC rumble/desk vibrations
       const highpass = ctx.createBiquadFilter();
       highpass.type = "highpass";
-      highpass.frequency.value = 85;
+      highpass.frequency.value = 75;
       highpass.Q.value = 0.7;
-
-      // Vocal peak filter at 2500 Hz boosts consonant clarity
-      const voicePeak = ctx.createBiquadFilter();
-      voicePeak.type = "peaking";
-      voicePeak.frequency.value = 2500;
-      voicePeak.gain.value = 2.0;
 
       const proc = ctx.createScriptProcessor(2048, 1, 1);
       proc.onaudioprocess = (e) => {
         const f32 = e.inputBuffer.getChannelData(0);
-        let sumSquares = 0;
-        for (let i = 0; i < f32.length; i++) {
-          sumSquares += f32[i] * f32[i];
-        }
-        const rms = Math.sqrt(sumSquares / f32.length);
 
-        // Convert whatever native device sample rate (48k/44.1k/16k) to 16kHz linear PCM
+        // Convert whatever native device sample rate (48k/44.1k/16k) to uncolored 16kHz linear PCM
         const pcm16 = downsampleTo16k(f32, nativeSampleRate);
 
-        // Stream 16kHz audio frames directly to Deepgram Voice Agent (server-side neural VAD handles barge-in)
-
-        // Stream 16kHz audio frames to backend
+        // Stream clean 16kHz audio frames to Deepgram Nova-3 Voice Agent
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(pcm16.buffer);
         }
       };
 
       src.connect(highpass);
-      highpass.connect(voicePeak);
-      voicePeak.connect(proc);
+      highpass.connect(proc);
 
       const muteNode = ctx.createGain();
       muteNode.gain.value = 0;
@@ -549,6 +546,14 @@ export function VoicePage() {
               {statusLabel[status]}
               {status === "live" && elapsed > 0 ? <span className="mono"> · {elapsed}s</span> : null}
             </div>
+
+            {agentId && agents.some((a) => a.id === agentId) ? (
+              <div style={{ marginTop: 8, fontSize: 12, color: "var(--info)", display: "flex", alignItems: "center", gap: 6 }}>
+                <span className="badge info" style={{ fontSize: 11, padding: "2px 8px" }}>
+                  <i className="fa-solid fa-robot" /> Active Agent: {agents.find((a) => a.id === agentId)?.name} ({agents.find((a) => a.id === agentId)?.tone})
+                </span>
+              </div>
+            ) : null}
 
             <div className="voice-actions">
               {agents.length > 0 ? (
