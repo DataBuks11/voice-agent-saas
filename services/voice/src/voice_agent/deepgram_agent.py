@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import struct
 import uuid
 import httpx
 import websockets
@@ -151,41 +152,42 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
             doc_titles: dict[str, str] = {d["id"]: d.get("title") or "Business Knowledge" for d in docs}
             by_doc: dict[str, list[str]] = {}
 
-            # Fetch chunks per document so NO document is starved by single-document chunk flood!
+            # Fetch chunks per document so NO document is starved, keeping prompt compact & fast
             if docs:
+                chunks_per_doc = max(2, min(5, 12 // len(docs)))
                 for d in docs:
                     d_id = d["id"]
                     d_title = d.get("title") or "Business Knowledge"
                     by_doc.setdefault(d_title, [])
-                    # Fetch up to 25 chunks for this specific document
-                    c_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&document_id=eq.{d_id}&select=content,metadata&order=created_at.asc&limit=25"
+                    c_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&document_id=eq.{d_id}&select=content,metadata&order=created_at.asc&limit={chunks_per_doc}"
                     r_c = await client.get(c_url, headers=headers)
                     if r_c.status_code == 200 and r_c.json():
                         for row in r_c.json():
                             cnt = (row.get("content") or "").strip()
                             if cnt and cnt not in by_doc[d_title]:
-                                by_doc[d_title].append(cnt)
-
-            # Also fetch recent general chunks in case some chunks are unassigned to documents
-            fallback_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&select=document_id,content,metadata&order=created_at.desc&limit=60"
-            r_fb = await client.get(fallback_url, headers=headers)
-            if r_fb.status_code == 200 and r_fb.json():
-                for row in r_fb.json():
-                    d_id = row.get("document_id") or "general"
-                    d_title = doc_titles.get(d_id) or row.get("metadata", {}).get("doc_title") or "General Knowledge"
-                    cnt = (row.get("content") or "").strip()
-                    if cnt:
-                        by_doc.setdefault(d_title, [])
-                        if cnt not in by_doc[d_title]:
-                            by_doc[d_title].append(cnt)
+                                by_doc[d_title].append(cnt[:450])
+            else:
+                fallback_url = f"{SB_URL}/rest/v1/chunks?workspace_id=eq.{workspace_id}&select=document_id,content,metadata&order=created_at.desc&limit=6"
+                r_fb = await client.get(fallback_url, headers=headers)
+                if r_fb.status_code == 200 and r_fb.json():
+                    for row in r_fb.json():
+                        d_id = row.get("document_id") or "general"
+                        d_title = doc_titles.get(d_id) or row.get("metadata", {}).get("doc_title") or "General Knowledge"
+                        cnt = (row.get("content") or "").strip()
+                        if cnt:
+                            by_doc.setdefault(d_title, [])
+                            if cnt not in by_doc[d_title]:
+                                by_doc[d_title].append(cnt[:450])
 
             doc_sections: list[str] = []
             for d_title, snippets in by_doc.items():
                 if snippets:
-                    doc_sections.append(f"=== DOCUMENT: {d_title} ===\n" + "\n\n".join(snippets[:20]))
+                    doc_sections.append(f"=== DOCUMENT: {d_title} ===\n" + "\n\n".join(snippets[:5]))
 
             if doc_sections:
                 knowledge_text = "\n\n--------------------\n\n".join(doc_sections)
+                if len(knowledge_text) > 6500:
+                    knowledge_text = knowledge_text[:6500].rsplit("\n", 1)[0]
             keyterm_titles = [d.get("title") for d in docs if d.get("title")]
         except Exception as exc:
             log.warning("failed to load multi-document context from Supabase: %s", exc)
@@ -265,20 +267,40 @@ class DeepgramAgentSession:
             "1. KEEP SPOKEN TURNS BRIEF: exactly 1 to 2 short, natural conversational sentences. Never speak markdown, lists, or bullets.",
             "2. DIRECT ANSWERS: Answer questions promptly and concisely without hesitation.",
             "3. CONTINUITY: If interrupted, seamlessly address what the caller just said while retaining the prior call history.",
-            "\n*** NAME CAPTURE PROTOCOL (ONE-TIME SPELLING RULE) ***:",
-            "1. When a caller introduces their name (e.g. 'I am Piyush', 'My name is Alex', 'This is Sudhanshu'):",
+            "\n*** MANDATORY PROTOCOL: CALLER NAME CAPTURE (ONE-TIME SPELLING RULE) ***:",
+            "1. When a caller asks to book an appointment or schedule a call, ask for their name.",
+            "2. When a caller introduces their name (e.g. 'I am Piyush', 'My name is Alex', 'This is Sudhanshu'):",
             "   Greet them and ask them to spell it out ONCE in your immediate response:",
             "   'Nice to meet you, [Name]! Could you please spell your name out letter-by-letter for me so I make sure I record the exact spelling correctly?'",
-            "2. ABSOLUTE RULE — NEVER ASK TO SPELL TWICE:",
+            "3. ABSOLUTE RULE — NEVER ASK TO SPELL TWICE:",
             "   Once you have asked to spell the name, whatever the caller says next (whether they spell individual letters like 'P I Y U S H', or repeat the name 'Piyush', or say 'It is Piyush'):",
             "   ACCEPT IT IMMEDIATELY! Do NOT ask them to spell it again under any circumstances!",
             "   Acknowledge the name and move directly to asking for their preferred date and time:",
             "   'Thank you, [Name]! What date and time works best for your call?'",
-            "3. If the caller spells their name in the very first turn (e.g. 'I am Piyush, P-I-Y-U-S-H'):",
+            "4. If the caller spells their name in the very first turn (e.g. 'I am Piyush, P-I-Y-U-S-H'):",
             "   Acknowledge it immediately without asking to spell: 'Thank you, Piyush! What date and time works best for your call?'",
+            "\nTOOLS USAGE:",
+            "- For specific company document searches or detailed inquiries, call the search_knowledge_base tool.",
+            "- For real-time external questions (weather, sports scores, current news, outside facts), call the web_search tool.",
+            "- When you have the caller's name and preferred date/time, call the book_appointment tool immediately.",
             "\nPHONETIC CORRECTIONS & ACCENT HANDLING:",
             "- The company name is DataBuks. Speech recognition (STT) may transcribe it as 'Data Box', 'Data Books', 'DataBux', 'dataverse', or 'data loss'. Recognize all of these as references to DataBuks and answer accurately.",
             "- Caller names: Speech recognition may transcribe Indian or unique names with common phonetics (e.g. 'Jewish' or 'Yush' or 'Pious' for 'Piyush'). Always prioritize the caller's spelling confirmation.",
+            "\nLAYA 4-PILLAR INTELLIGENCE & HYBRID SYNTHESIS (MIXTURE OF EXPERTS):",
+            "Pillar 1 (OKF & RAG Multi-Document Mixture of Experts):",
+            "  - You have verified knowledge across MULTIPLE uploaded documents (project synopsis, platform architecture, technical retrieval, pricing, FAQ).",
+            "  - Act as a Mixture of Experts across ALL documents: if the caller asks about ANY aspect from ANY uploaded document, answer directly from that document's facts.",
+            "  - Never restrict yourself to only the first or latest document. When an inquiry touches multiple documents, synthesize facts across all relevant documents into a cohesive answer.",
+            "Pillar 2 (Laya Decision & Intent Routing): Automatically classify the caller's intent:",
+            "  - Direct company inquiry -> Answer instantly from verified documents.",
+            "  - Booking / appointment request -> Collect caller name, ask to spell it, get date/time, then call book_appointment.",
+            "  - External real-time question (weather, current outside facts) -> Call web_search.",
+            "  - Hybrid inquiry (business context + external details) -> Synthesize Document Knowledge + Live Web Search.",
+            "Pillar 3 (Hybrid Knowledge Synthesis):",
+            "  - If the caller asks a question where our documents have partial context, but the specific detail requires external, real-time, or comparative data: take the verified facts from our documents, call the web_search tool, and combine both into ONE seamless, accurate 1-2 sentence response!",
+            "Pillar 4 (Strict Anti-Hallucination):",
+            "  - NEVER invent, assume, or hallucinate internal business policies, private numbers, or unlisted custom prices.",
+            "  - If a company-specific detail is not in your documents and cannot be verified, politely offer to connect them with the team.",
         ]
 
         if knowledge_text:
@@ -286,33 +308,11 @@ class DeepgramAgentSession:
                 "\n=== OKF VERIFIED BUSINESS KNOWLEDGE (from uploaded documents) ===",
                 knowledge_text,
                 "=== END OF VERIFIED BUSINESS KNOWLEDGE ===",
-                "\nLAYA 4-PILLAR INTELLIGENCE & HYBRID SYNTHESIS (OKF + RAG + LAYA + WEB SEARCH):",
-                "Pillar 1 (OKF & RAG Multi-Document Mixture of Experts):",
-                "  - You have verified knowledge across MULTIPLE uploaded documents (e.g. project synopsis, platform architecture, technical retrieval, pricing, FAQ).",
-                "  - Act as a Mixture of Experts across ALL documents: if the caller asks about ANY aspect from ANY uploaded document, answer directly from that document's facts.",
-                "  - Never restrict yourself to only the first or latest document. When an inquiry touches multiple documents, synthesize facts across all relevant documents into a cohesive answer.",
-                "Pillar 2 (Laya Decision & Intent Routing): Automatically classify the caller's intent:",
-                "  - Direct company inquiry -> Answer instantly from verified documents.",
-                "  - Booking / appointment request -> Collect caller name, ask to spell it, get date/time, then call book_appointment.",
-                "  - External real-time question (weather, current outside facts) -> Call web_search.",
-                "  - Hybrid inquiry (business context + external details) -> Synthesize Document Knowledge + Live Web Search (see Pillar 3).",
-                "Pillar 3 (Hybrid Knowledge Synthesis):",
-                "  - If the caller asks a question where our documents have partial context, but the specific detail requires external, real-time, or comparative data: take the verified facts from our documents, call the web_search tool, and combine both into ONE seamless, accurate 1-2 sentence response!",
-                "Pillar 4 (Strict Anti-Hallucination):",
-                "  - NEVER invent, assume, or hallucinate internal business policies, private numbers, or unlisted custom prices.",
-                "  - If a company-specific detail is not in your documents and cannot be verified, politely offer to connect them with the team.",
             ])
         else:
             prompt_parts.extend([
                 "\n- When asked for specific business pricing or policies not in your notes, politely offer to connect with the team, and use web_search for public real-time information.",
             ])
-
-        prompt_parts.extend([
-            "\nTOOLS USAGE:",
-            "- For real-time external questions (weather, sports scores, current news, outside facts), call the web_search tool.",
-            "- For specific company document searches, call the search_knowledge_base tool.",
-            "- When the caller asks to book an appointment or schedule a call, follow the MANDATORY NAME CAPTURE PROTOCOL: get their name, ask to spell it out letter-by-letter, get date and time, then call book_appointment.",
-        ])
 
         self.system_prompt = "\n".join(prompt_parts)
 
@@ -458,6 +458,13 @@ class DeepgramAgentSession:
                 if self.closed or not self.dg_ws:
                     break
                 if isinstance(message, bytes):
+                    # Acoustic Echo Shield: If assistant is actively speaking, drop low-energy frames
+                    # that represent laptop speaker bleed leaking into the microphone.
+                    if self._speaking and len(message) >= 4:
+                        shorts = struct.unpack(f"<{len(message)//2}h", message)
+                        peak = max(abs(s) for s in shorts)
+                        if peak < 2200:  # Below barge-in threshold -> drop speaker bleed
+                            continue
                     # Forward 16kHz PCM audio directly to Deepgram Voice Agent
                     await self.dg_ws.send(message)
                 elif isinstance(message, str):

@@ -32,7 +32,8 @@ class Continuous16kResampler {
     if (inputRate === 16000) {
       const out = new Int16Array(input.length);
       for (let i = 0; i < input.length; i++) {
-        const s = Math.max(-1, Math.min(1, input[i]));
+        // Soft-limiting prevents harsh digital clipping on laptop microphones with Windows mic boost
+        const s = Math.max(-1, Math.min(1, Math.tanh(input[i] * 1.15)));
         out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
       return out;
@@ -48,7 +49,8 @@ class Continuous16kResampler {
       const idx0 = Math.floor(pos);
       const frac = pos - idx0;
       const idx1 = Math.min(idx0 + 1, input.length - 1);
-      const s = Math.max(-1, Math.min(1, input[idx0] * (1 - frac) + input[idx1] * frac));
+      const val = input[idx0] * (1 - frac) + input[idx1] * frac;
+      const s = Math.max(-1, Math.min(1, Math.tanh(val * 1.15)));
       out[outIdx++] = s < 0 ? s * 0x8000 : s * 0x7fff;
       pos += step;
     }
@@ -67,10 +69,12 @@ export function VoicePage() {
   const [status, setStatus] = React.useState<Status>("idle");
   const [voiceState, _setVoiceState] = React.useState<VoiceState>("idle");
   const voiceStateRef = React.useRef<VoiceState>("idle");
+  const lastSpeakingTimeRef = React.useRef(0);
   const setVoiceState = React.useCallback((val: React.SetStateAction<VoiceState>) => {
     _setVoiceState((prev) => {
       const next = typeof val === "function" ? val(prev) : val;
       voiceStateRef.current = next;
+      lastSpeakingTimeRef.current = performance.now();
       return next;
     });
   }, []);
@@ -319,6 +323,37 @@ export function VoicePage() {
       const proc = ctx.createScriptProcessor(2048, 1, 1);
       proc.onaudioprocess = (e) => {
         const f32 = e.inputBuffer.getChannelData(0);
+
+        // Acoustic Echo Shield: prevents laptop speaker playback from leaking into the built-in microphone
+        const now = performance.now();
+        const isSpeaking = voiceStateRef.current === "speaking";
+        if (isSpeaking) {
+          lastSpeakingTimeRef.current = now;
+        }
+        const inCooldown = (now - lastSpeakingTimeRef.current) < 250;
+
+        // Calculate RMS of incoming microphone audio
+        let sumSquares = 0;
+        for (let i = 0; i < f32.length; i++) {
+          sumSquares += f32[i] * f32[i];
+        }
+        const rms = Math.sqrt(sumSquares / f32.length);
+
+        // If agent is speaking (or in 250ms room reverb decay), suppress speaker bleed (rms < 0.075)
+        if ((isSpeaking || inCooldown) && rms < 0.075) {
+          return;
+        }
+
+        // If caller speaks with authority over agent (rms >= 0.075), trigger instant barge-in!
+        if (isSpeaking && rms >= 0.075) {
+          interruptRef.current();
+        }
+
+        // Background noise gate when idle: suppress low-level laptop fan hiss & room silence (rms < 0.003)
+        if (!isSpeaking && !inCooldown && rms < 0.003) {
+          return;
+        }
+
         const pcm16 = resampler.resample(f32, nativeSampleRate);
         if (socket.readyState === WebSocket.OPEN && pcm16.length > 0) {
           socket.send(pcm16.buffer);
