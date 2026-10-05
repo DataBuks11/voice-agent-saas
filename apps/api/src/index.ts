@@ -28,6 +28,19 @@ export function buildServer() {
   // Raised body limit: document uploads (pdf/docx base64) ride on JSON requests.
   const app = Fastify({ logger: false, bodyLimit: Number(process.env.BODY_LIMIT ?? 48 * 1024 * 1024) });
 
+  // Gracefully handle empty bodies when content-type is application/json (e.g. DELETE requests)
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    if (!body || (typeof body === "string" && body.trim() === "")) {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   app.decorate("jwtSecret", config.JWT_SECRET);
   app.decorate("stats", { served: 0, blocked: 0, startedAt: new Date().toISOString() });
 

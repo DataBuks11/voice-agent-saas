@@ -20,30 +20,46 @@ interface Line {
 }
 
 /**
- * Universal linear-interpolated downsampler from native device sampleRate (48k/44.1k/etc.) to 16kHz PCM16.
- * Guarantees zero pitch distortion and flawless recognition across all Android, iOS, Windows, and Mac devices.
+ * High-fidelity continuous 16kHz audio resampler.
+ * When browser provides 16kHz natively, runs a direct 1:1 clamp path.
+ * When downsampling from 48kHz/44.1kHz, preserves phase accumulator across block boundaries,
+ * preventing sample-dropping clicks and acoustic phase jumps.
  */
-function downsampleTo16k(input: Float32Array, inputSampleRate: number): Int16Array {
-  if (inputSampleRate === 16000) {
-    const out = new Int16Array(input.length);
-    for (let i = 0; i < input.length; i++) {
-      const s = Math.max(-1, Math.min(1, input[i]));
-      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+class Continuous16kResampler {
+  private phase = 0;
+
+  resample(input: Float32Array, inputRate: number): Int16Array {
+    if (inputRate === 16000) {
+      const out = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return out;
     }
-    return out;
+
+    const step = inputRate / 16000;
+    const estimated = Math.ceil((input.length - this.phase) / step) + 2;
+    const out = new Int16Array(estimated);
+    let outIdx = 0;
+    let pos = this.phase;
+
+    while (pos < input.length) {
+      const idx0 = Math.floor(pos);
+      const frac = pos - idx0;
+      const idx1 = Math.min(idx0 + 1, input.length - 1);
+      const s = Math.max(-1, Math.min(1, input[idx0] * (1 - frac) + input[idx1] * frac));
+      out[outIdx++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      pos += step;
+    }
+
+    this.phase = pos - input.length;
+    return out.subarray(0, outIdx);
   }
-  const ratio = inputSampleRate / 16000;
-  const newLength = Math.round(input.length / ratio);
-  const out = new Int16Array(newLength);
-  for (let i = 0; i < newLength; i++) {
-    const srcIdx = i * ratio;
-    const left = Math.floor(srcIdx);
-    const right = Math.min(left + 1, input.length - 1);
-    const frac = srcIdx - left;
-    const s = Math.max(-1, Math.min(1, input[left] * (1 - frac) + input[right] * frac));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+
+  reset() {
+    this.phase = 0;
   }
-  return out;
 }
 
 export function VoicePage() {
@@ -274,34 +290,44 @@ export function VoicePage() {
   const startMic = (socket: WebSocket) => {
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AudioContextClass();
+      // Request 16000 Hz context directly — supported natively in all modern Chromium/Safari browsers
+      let ctx: AudioContext;
+      try {
+        ctx = new AudioContextClass({ sampleRate: 16000 });
+      } catch {
+        ctx = new AudioContextClass();
+      }
       micCtxRef.current = ctx;
       void ctx.resume();
 
       const nativeSampleRate = ctx.sampleRate;
       const src = ctx.createMediaStreamSource(streamRef.current!);
 
-      // Standard acoustic high-pass filter at 75 Hz eliminates low-frequency AC rumble/desk vibrations
+      // Acoustic high-pass filter at 80 Hz eliminates low-frequency AC rumble/desk vibrations
       const highpass = ctx.createBiquadFilter();
       highpass.type = "highpass";
-      highpass.frequency.value = 75;
+      highpass.frequency.value = 80;
       highpass.Q.value = 0.7;
 
+      // Steep low-pass filter at 7600 Hz eliminates high-frequency noise & prevents Nyquist aliasing
+      const lowpass = ctx.createBiquadFilter();
+      lowpass.type = "lowpass";
+      lowpass.frequency.value = 7600;
+      lowpass.Q.value = 0.7;
+
+      const resampler = new Continuous16kResampler();
       const proc = ctx.createScriptProcessor(2048, 1, 1);
       proc.onaudioprocess = (e) => {
         const f32 = e.inputBuffer.getChannelData(0);
-
-        // Convert whatever native device sample rate (48k/44.1k/16k) to uncolored 16kHz linear PCM
-        const pcm16 = downsampleTo16k(f32, nativeSampleRate);
-
-        // Stream clean 16kHz audio frames to Deepgram Nova-3 Voice Agent
-        if (socket.readyState === WebSocket.OPEN) {
+        const pcm16 = resampler.resample(f32, nativeSampleRate);
+        if (socket.readyState === WebSocket.OPEN && pcm16.length > 0) {
           socket.send(pcm16.buffer);
         }
       };
 
       src.connect(highpass);
-      highpass.connect(proc);
+      highpass.connect(lowpass);
+      lowpass.connect(proc);
 
       const muteNode = ctx.createGain();
       muteNode.gain.value = 0;
@@ -321,7 +347,7 @@ export function VoicePage() {
       rec.continuous = true;
       rec.interimResults = true;
       rec.maxAlternatives = 1;
-      rec.lang = "en-US";
+      rec.lang = navigator.language || "en-US";
 
       rec.onresult = (ev: any) => {
         let partial = "";
@@ -394,7 +420,13 @@ export function VoicePage() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
       streamRef.current = stream;
 

@@ -109,7 +109,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const ws = getWorkspace();
   const token = getToken();
   const headers: Record<string, string> = {
-    "content-type": "application/json",
+    ...(init.body ? { "content-type": "application/json" } : {}),
     ...(token ? { authorization: `Bearer ${token}` } : {}),
     ...(ws ? { "x-workspace-id": ws.id } : {}),
     ...((init.headers as Record<string, string>) ?? {}),

@@ -351,8 +351,9 @@ class DeepgramAgentSession:
                 stt_model = "nova-3"
 
             # Build intelligent keyterms list for Nova-3 to boost recognition of company, names, and documents
+            # NOTE: Only include the true target terms so STT accurately favors DataBuks
             keyterms = [
-                "DataBuks", "Data Box", "Data Books", "Piyush", "Alex", "Sudhanshu", "Sudhansu", "Pooja", "Puja"
+                "DataBuks", "databuks", "Piyush", "piyush", "Alex", "Sudhanshu", "Sudhansu", "Pooja", "Puja", "appointment", "booking"
             ]
             if self.agent_name and self.agent_name not in keyterms:
                 keyterms.append(self.agent_name)
@@ -365,6 +366,8 @@ class DeepgramAgentSession:
                 "type": "deepgram",
                 "model": stt_model,
                 "smart_format": True,
+                "language": agent_info.get("language") or "en",
+                "endpointing": 350,
                 "keyterms": keyterms[:30],
             }
 
