@@ -49,8 +49,8 @@ export function SetupPage() {
         <div className="brand" style={{ padding: "0 0 18px" }}>
           <BrandLogo />
           <div>
-            <div className="brand-name">DataBuks Voice AI</div>
-            <div className="brand-sub">create or pick a workspace to continue</div>
+            <div className="brand-name">Allright Dental Voice AI</div>
+            <div className="brand-sub">Practice Workspace & Clinic Setup</div>
           </div>
         </div>
 

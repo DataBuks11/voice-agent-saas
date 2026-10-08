@@ -4,13 +4,13 @@ import { api, type AgentRow } from "../lib/api";
 import { useToast } from "../main";
 
 const DEFAULT_FORM = {
-  name: "",
+  name: "Allright Dental Receptionist",
   language: "en",
-  tone: "professional",
+  tone: "warm",
   systemPrompt:
-    "You are a professional American-English receptionist. Be warm, natural and concise. Only answer from provided knowledge.",
-  fallbackResponse: "I don't have verified information about that yet.",
-  location: "",
+    "You are Sarah, the dedicated front desk receptionist at Allright Dental, the practice of Dr. Shalini Mandapatti, DDS in Morrisville, PA. You speak natural Native American English with a warm, caring bedside manner. You assist patients with dental appointment bookings, cleanings, cosmetic treatments (veneers, whitening), implants, emergency toothache relief, and dental insurance queries.",
+  fallbackResponse: "I'd be glad to have Dr. Shalini's clinical team verify that directly for you at (215) 295-1348.",
+  location: "229 Plaza Blvd, Suite 23, Morrisville, PA 19067",
 };
 
 export function AgentsPage() {
@@ -194,7 +194,7 @@ export function AgentsPage() {
               className="input"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="Salon Receptionist"
+              placeholder="e.g. Allright Dental Receptionist"
               required
             />
           </div>
@@ -253,7 +253,7 @@ export function AgentsPage() {
               className="input"
               value={form.location}
               onChange={(e) => setForm({ ...form, location: e.target.value })}
-              placeholder="123 Main St, Springfield, IL 62701"
+              placeholder="229 Plaza Blvd, Suite 23, Morrisville, PA 19067"
             />
           </div>
 

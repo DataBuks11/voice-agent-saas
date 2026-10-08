@@ -32,8 +32,20 @@ const BG_VIDEO =
 
 export function BrandLogo({ size = 38 }: { size?: number }) {
   return (
-    <div className="brand-logo" style={{ width: size, height: size }}>
-      <img src={LOGO} alt="" width={size} height={size} />
+    <div
+      className="brand-logo"
+      style={{
+        width: size,
+        height: size,
+        background: "linear-gradient(135deg, #0284c7 0%, #00b4d8 50%, #06d6a0 100%)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: "12px",
+        boxShadow: "0 0 16px rgba(0, 180, 216, 0.4)",
+      }}
+    >
+      <i className="fa-solid fa-tooth" style={{ color: "#ffffff", fontSize: size * 0.52 }} />
     </div>
   );
 }
@@ -41,10 +53,7 @@ export function BrandLogo({ size = 38 }: { size?: number }) {
 export function BgScene() {
   return (
     <div className="bg-scene" aria-hidden="true">
-      <video className="bg-video" autoPlay muted loop playsInline>
-        <source src={BG_VIDEO} type="video/mp4" />
-      </video>
-      <div className="bg-veil" />
+      <div className="bg-dental-gradient" />
     </div>
   );
 }
@@ -73,14 +82,14 @@ function Shell({ children }: { children: React.ReactNode }) {
   React.useEffect(() => setMenuOpen(false), [loc.pathname]);
 
   const nav = [
-    { to: "/", label: "Dashboard", ico: "fa-solid fa-gauge-high" },
-    { to: "/voice", label: "Voice", ico: "fa-solid fa-microphone" },
-    { to: "/agents", label: "Agents", ico: "fa-solid fa-robot" },
-    { to: "/knowledge", label: "Knowledge", ico: "fa-solid fa-book-open" },
-    { to: "/conversations", label: "Conversations", ico: "fa-solid fa-comments" },
-    { to: "/bookings", label: "Bookings", ico: "fa-solid fa-calendar-check" },
+    { to: "/voice", label: "Front Desk (Voice)", ico: "fa-solid fa-microphone-lines" },
+    { to: "/bookings", label: "Patient Bookings", ico: "fa-solid fa-calendar-check" },
+    { to: "/knowledge", label: "Dental Knowledge", ico: "fa-solid fa-tooth" },
+    { to: "/agents", label: "AI Receptionist", ico: "fa-solid fa-user-doctor" },
+    { to: "/", label: "Clinic Overview", ico: "fa-solid fa-house-medical" },
+    { to: "/conversations", label: "Call Transcripts", ico: "fa-solid fa-phone-volume" },
   ];
-  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "DataBuks Voice AI";
+  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "Allright Dental Voice AI";
 
   return (
     <ToastCtx.Provider value={push}>
@@ -91,11 +100,11 @@ function Shell({ children }: { children: React.ReactNode }) {
           <div className="brand">
             <BrandLogo />
             <div>
-              <div className="brand-name">DataBuks Voice AI</div>
-              <div className="brand-sub">enterprise · OKF RAG · voice</div>
+              <div className="brand-name">Allright Dental</div>
+              <div className="brand-sub">Dr. Mandapatti, DDS · AI Front Desk</div>
             </div>
           </div>
-          <div className="nav-section">Workspace</div>
+          <div className="nav-section">Practice Console</div>
           {nav.map((n) => (
             <NavLink
               key={n.to}
@@ -107,15 +116,22 @@ function Shell({ children }: { children: React.ReactNode }) {
               {n.label}
             </NavLink>
           ))}
-          <div className="nav-section">Runtime</div>
-          <a className="nav-link" href={`${api.base}/health`} target="_blank" rel="noreferrer">
-            <span className="ico"><i className="fa-solid fa-wave-square" /></span>
-            API health
-          </a>
+          <div className="nav-section">Clinical Info</div>
+          <div className="sidebar-clinic-info">
+            <div className="clinic-info-item">
+              <i className="fa-solid fa-location-dot" /> 229 Plaza Blvd, Ste 23, Morrisville, PA
+            </div>
+            <div className="clinic-info-item">
+              <i className="fa-solid fa-phone" /> (215) 295-1348
+            </div>
+            <div className="clinic-info-item">
+              <i className="fa-solid fa-clock" /> Wed–Sat 10am–7pm
+            </div>
+          </div>
           <div className="sidebar-footer">
             <div className="ws-chip">
               <span className="ws-dot" />
-              <span>{ws?.name ?? "no workspace"}</span>
+              <span>{ws?.name ?? "Allright Dental Practice"}</span>
             </div>
             <div className="brand-sub mono" style={{ marginTop: 6 }}>
               {user?.email ?? ""}
@@ -146,10 +162,14 @@ function Shell({ children }: { children: React.ReactNode }) {
               <h1>{title}</h1>
             </div>
             <div className="topbar-right">
+              <div className="topbar-clinic-banner">
+                <span className="clinic-pill"><i className="fa-solid fa-shield-halved" /> Delta Dental &amp; PPO</span>
+                <span className="clinic-pill"><i className="fa-solid fa-bolt" /> Sub-400ms Turnaround</span>
+              </div>
               <span className={`badge ${health === "up" ? "ok" : health === "down" ? "danger" : "muted"}`}>
-                {health === "checking" ? "checking api…" : health === "up" ? "api online" : "api offline"}
+                {health === "checking" ? "checking…" : health === "up" ? "front desk online" : "front desk offline"}
               </span>
-              <span className="badge muted">{user?.email ?? "signed out"}</span>
+              <span className="badge muted">{user?.email ?? "reception"}</span>
             </div>
           </header>
           <main className="content">{children}</main>

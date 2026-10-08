@@ -59,27 +59,27 @@ export function DashboardPage() {
     <>
       <div className="hero">
         <div>
-          <h3>{ws?.name} · voice agent control plane</h3>
+          <h3>{ws?.name || "Allright Dental Practice"} · 24/7 Virtual Front Desk</h3>
           <p>
-            Ingest what your business knows, and the agent answers from it — with citations, a
-            response harness in front of every turn, and a live voice pipeline on top. Nothing is
-            made up: retrieval decides what the model is allowed to say.
+            Grounding Dr. Shalini Mandapatti's patient communications in verified clinical procedures,
+            in-network dental insurance policies, and office protocols. Every response is verified through
+            our real-time dental knowledge harness and sub-400ms neural voice stream.
           </p>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 14, alignItems: "flex-start" }}>
           <div className="pipeline">
-            <span className="pipe-step">OKF Ingest</span>
+            <span className="pipe-step">Dental Ingest</span>
             <span className="pipe-arrow">→</span>
             <span className="pipe-step">Vector Embed</span>
             <span className="pipe-arrow">→</span>
-            <span className="pipe-step">RAG Retrieve</span>
+            <span className="pipe-step">Clinical RAG</span>
             <span className="pipe-arrow">→</span>
-            <span className="pipe-step">Laya Decision</span>
+            <span className="pipe-step">Safety Guard</span>
             <span className="pipe-arrow">→</span>
-            <span className="pipe-step">Voice AI Engine</span>
+            <span className="pipe-step">Aura Voice</span>
           </div>
           <Link className="btn btn-primary" to="/voice">
-            <i className="fa-solid fa-microphone" /> Test the voice agent
+            <i className="fa-solid fa-microphone" /> Speak with Sarah (AI Receptionist)
           </Link>
         </div>
       </div>
@@ -110,13 +110,13 @@ export function DashboardPage() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="section-row">
           <div className="card-title" style={{ margin: 0 }}>
-            Bookings {stats ? `(${stats.bookings})` : ""}
+            Dental Appointments {stats ? `(${stats.bookings})` : ""}
           </div>
-          <span className="hint">agent books via chat & voice · add to Google Calendar in one click</span>
+          <span className="hint">Sarah schedules patient visits live · sync to Google Calendar in one click</span>
         </div>
         {bookings.length === 0 ? (
           <div className="hint">
-            No bookings yet — say “book a haircut for tomorrow at 5pm” in the console or on the voice page.
+            No appointments booked yet — say “I'd like to schedule a dental checkup and cleaning with Dr. Shalini for tomorrow at 10 AM” in the console or on the Voice Receptionist page.
           </div>
         ) : (
           <table className="table">

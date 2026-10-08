@@ -148,7 +148,7 @@ export function ConversationsPage() {
 
               <div className="chat" style={{ minHeight: 220 }}>
                 {messages.length === 0 ? (
-                  <div className="hint">Say something — try “how much is a haircut?” after ingesting knowledge.</div>
+                  <div className="hint">Say something — try “Do you accept Delta Dental?” or “I need to book a dental checkup” after ingesting knowledge.</div>
                 ) : (
                   messages.map((m) => (
                     <div key={m.id} className={`msg ${m.role}`}>

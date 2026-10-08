@@ -107,14 +107,14 @@ async def search_knowledge(workspace_id: str, query: str) -> str:
 
 
 async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str, list[str]]:
-    """Fetch agent details and verified knowledge chunks from ALL uploaded documents in Supabase (Mixture of Experts)."""
+    """Fetch agent details and verified dental clinic knowledge chunks from Supabase."""
     agent_info = {
-        "name": "DataBuks Receptionist",
+        "name": "Allright Dental Receptionist",
         "prompt": "",
-        "greeting": "Hello, thanks for calling DataBuks! How can I help you today?",
+        "greeting": "Thank you for calling Allright Dental! My name is Sarah. How can I help you with your dental care today?",
         "language": "en",
-        "tone": "professional",
-        "fallback": "I don't have verified information about that yet.",
+        "tone": "warm, professional and comforting",
+        "fallback": "I'd be happy to check with Dr. Mandapatti's team and have someone follow up with you.",
     }
     knowledge_text = ""
     keyterm_titles: list[str] = []
@@ -135,11 +135,11 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
                 ag = r_agent.json()[0]
                 agent_info["name"] = ag.get("name") or agent_info["name"]
                 agent_info["language"] = ag.get("language") or "en"
-                agent_info["tone"] = ag.get("tone") or "professional"
+                agent_info["tone"] = ag.get("tone") or "warm, professional and comforting"
                 agent_info["fallback"] = ag.get("fallback_response") or agent_info["fallback"]
                 if ag.get("system_prompt"):
                     agent_info["prompt"] = ag["system_prompt"]
-                agent_info["greeting"] = f"Hi, thanks for calling {agent_info['name']}! How can I help you today?"
+                agent_info["greeting"] = f"Thank you for calling {agent_info['name']}! My name is Sarah. How can I help you with your dental care today?"
         except Exception as exc:
             log.warning("failed to load agent from Supabase: %s", exc)
 
@@ -254,64 +254,77 @@ class DeepgramAgentSession:
         self.agent_name = agent_info["name"]
         self.greeting = agent_info["greeting"]
 
-        # Build prompt: strictly grounded in verified knowledge to prevent hallucinations
+        # Build prompt: strictly grounded in verified dental knowledge & clinic procedures
         base_prompt = agent_info.get("prompt") or (
-            f"You are a warm, polite, and natural human receptionist and voice assistant for {self.agent_name}. "
-            "You are speaking directly with a caller over the phone in real time."
+            f"You are Sarah, the warm, caring, and highly professional American dental receptionist for {self.agent_name} "
+            "(Allright Dental, practice of Dr. Shalini Mandapatti, DDS in Morrisville, PA). "
+            "You are speaking live with a patient over the telephone in real time. "
+            "Your main role is to welcome callers warmly, answer questions about dental treatments, "
+            "and schedule dental care appointments smoothly and efficiently."
         )
 
         prompt_parts = [
             base_prompt,
-            f"\nTone: {agent_info.get('tone', 'professional')}. Default fallback policy: {agent_info.get('fallback', 'I do not have verified information about that yet.')}",
+            f"\nTone: {agent_info.get('tone', 'warm, professional and comforting')}. Default fallback policy: {agent_info.get('fallback', 'I would be glad to check with Dr. Mandapatti and have our front desk team confirm that for you.')}",
+            "\nCLINIC OVERVIEW & ESSENTIAL DETAILS:",
+            "- Practice Name: Allright Dental (also recognized as All Right Dental)",
+            "- Lead Dentist: Dr. Shalini Mandapatti, DDS (15+ years experience, graduate of New York University College of Dentistry; specialist in cosmetic dentistry, dental implants, restorative crowns, and gentle anxiety-free care)",
+            "- Clinic Address: 229 Plaza Blvd, Suite 23, Morrisville, PA 19067 (conveniently serving Morrisville, Yardley, Levittown, Fairless Hills, Fallsington, and Bucks County)",
+            "- Phone: (215) 295-1348",
+            "- Operating Hours:",
+            "  * Wednesday – Thursday: 10:00 AM – 7:00 PM",
+            "  * Friday: 10:00 AM – 6:00 PM",
+            "  * Saturday: 9:00 AM – 12:00 PM (Noon)",
+            "  * Monday, Tuesday, Sunday: Emergency dental triage & dedicated visits by appointment",
+            "  * 24/7 Virtual AI Receptionist (You): Answering patient questions and booking appointments around the clock!",
+            "- Services Provided:",
+            "  * General & Preventive: Comprehensive exams, gentle dental cleanings (prophylaxis), digital low-dose X-rays, oral cancer screening, deep cleaning / periodontal scaling.",
+            "  * Emergency Dental Care: Urgent same-day care for severe toothaches, broken/chipped teeth, knocked-out teeth, lost fillings/crowns, swelling, or abscesses.",
+            "  * Cosmetic Dentistry: Zoom professional in-office & take-home teeth whitening, handcrafted porcelain veneers, aesthetic bonding, smile makeovers.",
+            "  * Restorative & Implants: Dental implants (single tooth, bridges, full-arch), porcelain crowns, tooth-colored composite fillings, bridges, dentures.",
+            "  * Endodontics: Gentle root canal therapy to relieve tooth pain and preserve natural teeth.",
+            "  * Orthodontics: Invisalign clear aligners for adults and teens.",
+            "- Insurances & Financing:",
+            "  * In-network with major PPO dental insurances: Delta Dental, MetLife, Cigna, Aetna, Guardian, United Healthcare, and others.",
+            "  * Flexible patient financing available through CareCredit (with interest-free options), all major credit cards, and transparent self-pay pricing.",
             "\nCRITICAL CONVERSATIONAL RULES (MUST FOLLOW AT ALL TIMES):",
             "1. KEEP SPOKEN TURNS BRIEF: exactly 1 to 2 short, natural conversational sentences. Never speak markdown, lists, or bullets.",
-            "2. DIRECT ANSWERS: Answer questions promptly and concisely without hesitation.",
+            "2. DIRECT, EMPATHETIC ANSWERS: Reassure anxious dental patients with warmth and empathy.",
             "3. CONTINUITY: If interrupted, seamlessly address what the caller just said while retaining the prior call history.",
-            "\n*** MANDATORY PROTOCOL: CALLER NAME CAPTURE (ONE-TIME SPELLING RULE) ***:",
-            "1. When a caller asks to book an appointment or schedule a call, ask for their name.",
-            "2. When a caller introduces their name (e.g. 'I am Piyush', 'My name is Alex', 'This is Sudhanshu'):",
+            "\n*** MANDATORY PROTOCOL: PATIENT NAME CAPTURE (ONE-TIME SPELLING RULE) ***:",
+            "1. When a caller asks to book an appointment or schedule a visit, ask for their name and visit reason.",
+            "2. When a caller introduces their name (e.g. 'I am Piyush', 'My name is Sarah', 'This is Alex'):",
             "   Greet them and ask them to spell it out ONCE in your immediate response:",
-            "   'Nice to meet you, [Name]! Could you please spell your name out letter-by-letter for me so I make sure I record the exact spelling correctly?'",
+            "   'Wonderful to meet you, [Name]! Could you spell your name for me so I make sure I record it correctly?'",
             "3. ABSOLUTE RULE — NEVER ASK TO SPELL TWICE:",
-            "   Once you have asked to spell the name, whatever the caller says next (whether they spell individual letters like 'P I Y U S H', or repeat the name 'Piyush', or say 'It is Piyush'):",
+            "   Once you have asked to spell the name, whatever the caller says next (whether they spell individual letters like 'P I Y U S H', or repeat the name, or say 'It is Piyush'):",
             "   ACCEPT IT IMMEDIATELY! Do NOT ask them to spell it again under any circumstances!",
-            "   Acknowledge the name and move directly to asking for their preferred date and time:",
-            "   'Thank you, [Name]! What date and time works best for your call?'",
+            "   Acknowledge the name and move directly to asking for their preferred appointment day and time:",
+            "   'Thank you, [Name]! What day and time works best for your appointment?'",
             "4. If the caller spells their name in the very first turn (e.g. 'I am Piyush, P-I-Y-U-S-H'):",
-            "   Acknowledge it immediately without asking to spell: 'Thank you, Piyush! What date and time works best for your call?'",
-            "\nTOOLS USAGE:",
-            "- For specific company document searches or detailed inquiries, call the search_knowledge_base tool.",
-            "- For real-time external questions (weather, sports scores, current news, outside facts), call the web_search tool.",
-            "- When you have the caller's name and preferred date/time, call the book_appointment tool immediately.",
+            "   Acknowledge it immediately without asking to spell: 'Thank you, Piyush! What day and time works best for your appointment?'",
+            "\nAPPOINTMENT BOOKING EXECUTION:",
+            "- When you have the patient's name, requested day/time, and visit reason, call the book_appointment tool immediately.",
+            "- Confirm warmly: 'I have scheduled your appointment with Dr. Mandapatti for [day/time]. We look forward to seeing your smile at Allright Dental!'",
+            "\nEMERGENCY DENTAL CARE PROTOCOL:",
+            "- If a patient reports severe tooth pain, swelling, a broken tooth, or dental trauma, express immediate empathy and prioritize urgent same-day booking.",
+            "\nFOCUS BOUNDARIES:",
+            "- You represent Allright Dental clinic exclusively. If a caller asks about unrelated outside businesses, politely steer back to dental care.",
             "\nPHONETIC CORRECTIONS & ACCENT HANDLING:",
-            "- The company name is DataBuks. Speech recognition (STT) may transcribe it as 'Data Box', 'Data Books', 'DataBux', 'dataverse', or 'data loss'. Recognize all of these as references to DataBuks and answer accurately.",
-            "- Caller names: Speech recognition may transcribe Indian or unique names with common phonetics (e.g. 'Jewish' or 'Yush' or 'Pious' for 'Piyush'). Always prioritize the caller's spelling confirmation.",
-            "\nLAYA 4-PILLAR INTELLIGENCE & HYBRID SYNTHESIS (MIXTURE OF EXPERTS):",
-            "Pillar 1 (OKF & RAG Multi-Document Mixture of Experts):",
-            "  - You have verified knowledge across MULTIPLE uploaded documents (project synopsis, platform architecture, technical retrieval, pricing, FAQ).",
-            "  - Act as a Mixture of Experts across ALL documents: if the caller asks about ANY aspect from ANY uploaded document, answer directly from that document's facts.",
-            "  - Never restrict yourself to only the first or latest document. When an inquiry touches multiple documents, synthesize facts across all relevant documents into a cohesive answer.",
-            "Pillar 2 (Laya Decision & Intent Routing): Automatically classify the caller's intent:",
-            "  - Direct company inquiry -> Answer instantly from verified documents.",
-            "  - Booking / appointment request -> Collect caller name, ask to spell it, get date/time, then call book_appointment.",
-            "  - External real-time question (weather, current outside facts) -> Call web_search.",
-            "  - Hybrid inquiry (business context + external details) -> Synthesize Document Knowledge + Live Web Search.",
-            "Pillar 3 (Hybrid Knowledge Synthesis):",
-            "  - If the caller asks a question where our documents have partial context, but the specific detail requires external, real-time, or comparative data: take the verified facts from our documents, call the web_search tool, and combine both into ONE seamless, accurate 1-2 sentence response!",
-            "Pillar 4 (Strict Anti-Hallucination):",
-            "  - NEVER invent, assume, or hallucinate internal business policies, private numbers, or unlisted custom prices.",
-            "  - If a company-specific detail is not in your documents and cannot be verified, politely offer to connect them with the team.",
+            "- The clinic name is Allright Dental. Speech recognition (STT) may transcribe it as 'All Right Dental', 'Alright Dental', 'All Right', or 'Allred Dental'. Recognize all of these as Allright Dental.",
+            "- Doctor name: Dr. Shalini Mandapatti. Speech recognition may hear 'Mandapatti', 'Manda Patti', or 'Shalini'.",
+            "- Caller names: Prioritize the caller's spelling confirmation.",
         ]
 
         if knowledge_text:
             prompt_parts.extend([
-                "\n=== OKF VERIFIED BUSINESS KNOWLEDGE (from uploaded documents) ===",
+                "\n=== OKF VERIFIED DENTAL CLINIC KNOWLEDGE ===",
                 knowledge_text,
-                "=== END OF VERIFIED BUSINESS KNOWLEDGE ===",
+                "=== END OF VERIFIED DENTAL CLINIC KNOWLEDGE ===",
             ])
         else:
             prompt_parts.extend([
-                "\n- When asked for specific business pricing or policies not in your notes, politely offer to connect with the team, and use web_search for public real-time information.",
+                "\n- For specific procedure fees or insurance verification not in your notes, politely offer to check with the front desk team.",
             ])
 
         self.system_prompt = "\n".join(prompt_parts)
@@ -343,17 +356,18 @@ class DeepgramAgentSession:
             welcome = await self.dg_ws.recv()
             log.info("Deepgram Voice Agent connected: %s", welcome)
 
-            # Send Settings
-            tts_voice = os.getenv("VOICE_TTS_VOICE", os.getenv("DEEPGRAM_TTS_VOICE", "flux-hannah-en"))
+            # Send Settings - Native American English voice (aura-asteria-en)
+            tts_voice = os.getenv("VOICE_TTS_VOICE", os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en"))
             llm_model = os.getenv("VOICE_LLM_MODEL", "gpt-4.1-mini")
             stt_model = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
             if stt_model in ("flux-general-en", "base.en", "nova-2"):
                 stt_model = "nova-3"
 
-            # Build intelligent keyterms list for Nova-3 to boost recognition of company, names, and documents
-            # NOTE: Only include the true target terms so STT accurately favors DataBuks
+            # Intelligent keyterms list for Nova-3 to boost recognition of clinic, dental terms, and names
             keyterms = [
-                "DataBuks", "databuks", "Piyush", "piyush", "Alex", "Sudhanshu", "Sudhansu", "Pooja", "Puja", "appointment", "booking"
+                "Allright Dental", "All Right Dental", "Dr. Shalini Mandapatti", "Mandapatti", "Morrisville", "Yardley",
+                "Invisalign", "cleaning", "toothache", "veneers", "implant", "crown", "Delta Dental", "CareCredit",
+                "appointment", "booking", "Piyush", "piyush", "Alex", "Sarah", "Emily"
             ]
             if self.agent_name and self.agent_name not in keyterms:
                 keyterms.append(self.agent_name)
@@ -407,13 +421,16 @@ class DeepgramAgentSession:
                             },
                             {
                                 "name": "book_appointment",
-                                "description": "Books a phone call or appointment for the caller.",
+                                "description": "Books a dental care appointment for the patient with Dr. Mandapatti at Allright Dental.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
-                                        "name": {"type": "string", "description": "Caller name"},
-                                        "datetime": {"type": "string", "description": "Requested date and time"},
-                                        "notes": {"type": "string", "description": "Topic or notes"},
+                                        "name": {"type": "string", "description": "Patient full name"},
+                                        "datetime": {"type": "string", "description": "Requested appointment day and time"},
+                                        "service": {"type": "string", "description": "Reason for visit (routine cleaning, toothache emergency, cosmetic, implants, checkup)"},
+                                        "phone": {"type": "string", "description": "Callback phone number if provided"},
+                                        "insurance": {"type": "string", "description": "Dental insurance provider if provided"},
+                                        "notes": {"type": "string", "description": "Symptoms, pain details, or special requests"},
                                     },
                                     "required": ["name", "datetime"],
                                 },
@@ -569,11 +586,19 @@ class DeepgramAgentSession:
                                 }
                                 await self.dg_ws.send(json.dumps(resp))
                             elif name == "book_appointment":
-                                caller_name = args.get("name") or "Guest"
+                                caller_name = args.get("name") or "Patient"
                                 dt = args.get("datetime") or "the requested time"
+                                service = args.get("service") or "Dental Care Visit"
+                                phone = args.get("phone") or ""
+                                insurance = args.get("insurance") or ""
                                 notes = args.get("notes") or ""
-                                self._save_booking_async(caller_name, dt, notes)
-                                result = f"Successfully scheduled appointment for {caller_name} on {dt}."
+                                combined_notes = f"Service: {service}"
+                                if insurance:
+                                    combined_notes += f" | Insurance: {insurance}"
+                                if notes:
+                                    combined_notes += f" | Notes: {notes}"
+                                self._save_booking_async(caller_name, dt, combined_notes, phone)
+                                result = f"Successfully scheduled dental appointment for {caller_name} on {dt} for {service} with Dr. Mandapatti."
                                 resp = {
                                     "type": "FunctionCallResponse",
                                     "id": call_id,
@@ -584,22 +609,22 @@ class DeepgramAgentSession:
         except Exception:
             pass
 
-    def _save_booking_async(self, customer_name: str, starts_at: str, notes: str) -> None:
+    def _save_booking_async(self, customer_name: str, starts_at: str, notes: str, contact: str = "") -> None:
         if not SB_URL or not SB_KEY or not self.workspace_id:
             return
-        asyncio.create_task(self._insert_booking(customer_name, starts_at, notes))
+        asyncio.create_task(self._insert_booking(customer_name, starts_at, notes, contact))
 
-    async def _insert_booking(self, customer_name: str, starts_at: str, notes: str) -> None:
+    async def _insert_booking(self, customer_name: str, starts_at: str, notes: str, contact: str = "") -> None:
         try:
             row = {
                 "workspace_id": self.workspace_id,
                 "conversation_id": self.conversation_id or None,
                 "customer_name": customer_name,
-                "contact": "",
+                "contact": contact,
                 "starts_at": starts_at,
                 "notes": notes,
                 "status": "confirmed",
-                "source": "agent",
+                "source": "allright_dental_voice",
             }
             headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -624,26 +649,19 @@ class DeepgramAgentSession:
             pass
 
     def _is_echo(self, user_text: str) -> bool:
-        """Check if incoming user transcript is actually an acoustic echo of assistant speech."""
+        """Check if incoming user transcript is strictly an acoustic echo of assistant speech."""
         if not self._last_assistant_text or not user_text:
+            return False
+        # If assistant is not currently outputting audio, it's genuine user speech!
+        if not self._speaking:
             return False
         u = "".join(ch for ch in user_text.lower() if ch.isalnum())
         a = "".join(ch for ch in self._last_assistant_text.lower() if ch.isalnum())
-        if len(u) < 4:
+        if len(u) < 8:
             return False
-        # Direct substring match in either direction
-        if u in a or a in u:
+        # Suppress ONLY if user input is an exact verbatim match or 90%+ identical echo of what assistant just spoke
+        if u == a or (len(u) >= 18 and u in a):
             return True
-        # Prefix or suffix overlap (e.g. agent said 'DataBuks provides', user echo hears 'DataBuks provides')
-        if len(u) >= 6 and (a.endswith(u[:8]) or a.startswith(u[:8]) or u.endswith(a[-8:]) or u.startswith(a[:8])):
-            return True
-        # Keyword set overlap: if >35% of meaningful words match the assistant's speech
-        u_words = [w.lower() for w in user_text.split() if len(w) > 3]
-        a_words = set(w.lower() for w in self._last_assistant_text.split() if len(w) > 3)
-        if u_words and a_words:
-            matched = sum(1 for w in u_words if w in a_words)
-            if matched / len(u_words) >= 0.35:
-                return True
         return False
 
     async def close(self) -> None:

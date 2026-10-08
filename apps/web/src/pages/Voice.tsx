@@ -89,6 +89,17 @@ export function VoicePage() {
   const [agentId, setAgentId] = React.useState<string>("");
   const [elapsed, setElapsed] = React.useState(0);
   const [interim, setInterim] = React.useState("");
+  const [micLevel, setMicLevel] = React.useState(0);
+
+  const sendPromptText = (promptText: string) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "text", text: promptText }));
+      pushLine("user", promptText);
+      setVoiceState("thinking");
+    } else {
+      toast({ kind: "info", text: "Start call first to speak or ask questions to Sarah" });
+    }
+  };
 
   // Ordered assistant audio queue (2048 bytes = 42ms block size for ultra-low latency onset)
   const playbackQueueRef = React.useRef(new PlaybackQueue(2048));
@@ -307,10 +318,10 @@ export function VoicePage() {
       const nativeSampleRate = ctx.sampleRate;
       const src = ctx.createMediaStreamSource(streamRef.current!);
 
-      // Acoustic high-pass filter at 80 Hz eliminates low-frequency AC rumble/desk vibrations
+      // Acoustic high-pass filter at 75 Hz eliminates low-frequency AC rumble/desk vibrations
       const highpass = ctx.createBiquadFilter();
       highpass.type = "highpass";
-      highpass.frequency.value = 80;
+      highpass.frequency.value = 75;
       highpass.Q.value = 0.7;
 
       // Steep low-pass filter at 7600 Hz eliminates high-frequency noise & prevents Nyquist aliasing
@@ -318,6 +329,14 @@ export function VoicePage() {
       lowpass.type = "lowpass";
       lowpass.frequency.value = 7600;
       lowpass.Q.value = 0.7;
+
+      // Dynamics compressor prevents clipping and boosts soft speech on laptop built-in microphones
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = -24;
+      compressor.knee.value = 30;
+      compressor.ratio.value = 6;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
 
       const resampler = new Continuous16kResampler();
       const proc = ctx.createScriptProcessor(2048, 1, 1);
@@ -338,31 +357,34 @@ export function VoicePage() {
           sumSquares += f32[i] * f32[i];
         }
         const rms = Math.sqrt(sumSquares / f32.length);
+        if (rms > 0.005) {
+          setMicLevel(Math.min(100, Math.round(rms * 400)));
+        } else {
+          setMicLevel(0);
+        }
 
-        // If agent is speaking (or in 250ms room reverb decay), suppress speaker bleed (rms < 0.075)
-        if ((isSpeaking || inCooldown) && rms < 0.075) {
+        // If agent is speaking (or in 250ms room reverb decay), suppress speaker bleed (rms < 0.038)
+        if ((isSpeaking || inCooldown) && rms < 0.038) {
           return;
         }
 
-        // If caller speaks with authority over agent (rms >= 0.075), trigger instant barge-in!
-        if (isSpeaking && rms >= 0.075) {
+        // If caller speaks over agent (rms >= 0.038), trigger instant barge-in!
+        if (isSpeaking && rms >= 0.038) {
           interruptRef.current();
         }
 
-        // Background noise gate when idle: suppress low-level laptop fan hiss & room silence (rms < 0.003)
-        if (!isSpeaking && !inCooldown && rms < 0.003) {
-          return;
-        }
-
+        // Send 16kHz PCM audio continuously to Deepgram streaming recognizer
         const pcm16 = resampler.resample(f32, nativeSampleRate);
         if (socket.readyState === WebSocket.OPEN && pcm16.length > 0) {
-          socket.send(pcm16.buffer);
+          const slice = pcm16.buffer.slice(pcm16.byteOffset, pcm16.byteOffset + pcm16.byteLength);
+          socket.send(slice);
         }
       };
 
       src.connect(highpass);
       highpass.connect(lowpass);
-      lowpass.connect(proc);
+      lowpass.connect(compressor);
+      compressor.connect(proc);
 
       const muteNode = ctx.createGain();
       muteNode.gain.value = 0;
@@ -521,7 +543,7 @@ export function VoicePage() {
           if (sttModeRef.current === "browser" && browserSttAvailable) {
             setupBrowserStt(socket);
           } else {
-            pushLine("system", "DataBuks Neural Stream online (Instant Sub-400ms Turnaround)");
+            pushLine("system", "Allright Dental Virtual Front Desk online (Native American Voice · Sub-400ms Turnaround)");
             startMic(socket);
           }
 
@@ -538,7 +560,7 @@ export function VoicePage() {
         } else if (type === "interrupted") {
           stopPlayback("interrupted");
           setVoiceState("listening");
-          pushLine("system", "barge-in: caller interrupted agent");
+          pushLine("system", "barge-in: patient speaking over front desk");
         } else if (type === "audio_start") {
           playTurnRef.current = (msg.turnId as string | undefined) ?? null;
           audioSeqRef.current = 0;
@@ -578,18 +600,32 @@ export function VoicePage() {
   };
 
   const statusLabel: Record<Status, string> = {
-    idle: "mic off — press the orb to start",
-    connecting: "connecting to DataBuks Voice AI…",
-    live: `live · ${voiceState}`,
+    idle: "mic off — tap the orb to call Allright Dental",
+    connecting: "connecting to Allright Dental Virtual Front Desk…",
+    live: `live · ${voiceState} (Sarah listening)`,
     error: "connection error",
   };
+
+  const QUICK_PROMPTS = [
+    { label: "📅 Book Cleaning & Exam", text: "I'd like to book an appointment for a routine dental cleaning and exam." },
+    { label: "🚨 Emergency Toothache", text: "I have severe toothache pain on my tooth, do you have emergency appointments today?" },
+    { label: "✨ Veneers & Whitening", text: "How much are porcelain veneers and do you do cosmetic consultations?" },
+    { label: "🛡️ Delta Dental & Financing", text: "Do you accept Delta Dental insurance, and what financing options do you have?" },
+    { label: "📍 Clinic Hours & Location", text: "Where is Allright Dental located and what are Dr. Mandapatti's office hours?" },
+  ];
 
   return (
     <>
       <div className="page-head">
-        <h2>DataBuks Voice AI</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <span className="badge info" style={{ fontSize: 12, padding: "3px 10px", background: "rgba(0, 180, 216, 0.15)", border: "1px solid rgba(0, 180, 216, 0.3)" }}>
+            <i className="fa-solid fa-tooth" /> Practice of Dr. Shalini Mandapatti, DDS
+          </span>
+          <span className="badge" style={{ fontSize: 11 }}>Morrisville &amp; Yardley, PA</span>
+        </div>
+        <h2>Allright Dental — Virtual Front Desk &amp; Appointment Booking</h2>
         <p>
-          Real-time human conversation with sub-400ms turnaround on laptop and mobile. Grounded in your business knowledge with Laya decision routing and live web search.
+          Real-time dental care receptionist with native American voice AI and sub-400ms turnaround on laptop &amp; mobile. Schedule cleanings, triage urgent toothaches, inquire about cosmetic procedures, or verify insurance coverage.
         </p>
       </div>
 
@@ -600,9 +636,9 @@ export function VoicePage() {
               className={`voice-orb${status === "connecting" ? " live" : ""}${voiceState === "speaking" ? " speaking" : ""}`}
               onClick={voiceState === "speaking" ? interrupt : toggle}
               aria-label={active ? (voiceState === "speaking" ? "Interrupt" : "End call") : "Start call"}
-              title={voiceState === "speaking" ? "Click orb to interrupt agent" : active ? "End call" : "Start call"}
+              title={voiceState === "speaking" ? "Click orb to interrupt front desk" : active ? "End call" : "Start call"}
             >
-              <i className={voiceState === "speaking" ? "fa-solid fa-hand" : active ? "fa-solid fa-stop" : "fa-solid fa-microphone"} />
+              <i className={voiceState === "speaking" ? "fa-solid fa-hand" : active ? "fa-solid fa-stop" : "fa-solid fa-tooth"} />
             </button>
 
             <div className={`voice-status ${status === "live" ? "on" : status === "connecting" ? "busy" : status === "error" ? "err" : ""}`}>
@@ -614,24 +650,25 @@ export function VoicePage() {
               {status === "live" && elapsed > 0 ? <span className="mono"> · {elapsed}s</span> : null}
             </div>
 
-            {agentId && agents.some((a) => a.id === agentId) ? (
-              <div style={{ marginTop: 8, fontSize: 12, color: "var(--info)", display: "flex", alignItems: "center", gap: 6 }}>
-                <span className="badge info" style={{ fontSize: 11, padding: "2px 8px" }}>
-                  <i className="fa-solid fa-robot" /> Active Agent: {agents.find((a) => a.id === agentId)?.name} ({agents.find((a) => a.id === agentId)?.tone})
-                </span>
+            {status === "live" && (
+              <div className="mic-meter-wrap" title="Live Laptop Microphone Volume Level">
+                <div className="mic-meter-track">
+                  <div className="mic-meter-fill" style={{ width: `${Math.max(4, micLevel)}%` }} />
+                </div>
+                <span className="mic-meter-text"><i className="fa-solid fa-microphone" /> Mic Input: {micLevel}%</span>
               </div>
-            ) : null}
+            )}
 
             <div className="voice-actions">
               {agents.length > 0 ? (
                 <select
                   className="select"
-                  style={{ maxWidth: 200 }}
+                  style={{ maxWidth: 220 }}
                   value={agentId}
                   onChange={(e) => setAgentId(e.target.value)}
                   disabled={active}
                 >
-                  <option value="">default agent</option>
+                  <option value="">Sarah — Allright Dental</option>
                   {agents.map((a) => (
                     <option key={a.id} value={a.id}>{a.name}</option>
                   ))}
@@ -646,43 +683,68 @@ export function VoicePage() {
                 disabled={active}
                 title="Choose voice recognition mode"
               >
-                <option value="server">STT: DataBuks Neural Stream (Sub-400ms)</option>
+                <option value="server">STT: Neural Stream (Sub-400ms Turnaround)</option>
                 <option value="browser" disabled={!browserSttAvailable}>
                   STT: Device Native Voice (Web Speech Engine){browserSttAvailable ? "" : " - unavailable"}
                 </option>
               </select>
 
               <button className="btn btn-primary" onClick={toggle}>
-                {active ? "End call" : "Start call"}
+                {active ? "End Call" : "Call Front Desk"}
               </button>
 
               <button
                 className="btn btn-warning"
                 onClick={interrupt}
                 disabled={!active || voiceState !== "speaking"}
-                title="Interrupt the agent immediately (or press Spacebar)"
+                title="Interrupt the receptionist immediately (or press Spacebar)"
               >
                 Interrupt
               </button>
             </div>
 
+            <div className="quick-prompts-section">
+              <div className="quick-prompts-label">Quick Patient Inquiries (Click to ask Sarah):</div>
+              <div className="quick-prompts-pills">
+                {QUICK_PROMPTS.map((p, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    className="quick-pill-btn"
+                    onClick={() => {
+                      if (!active) {
+                        setLines([]);
+                        void start().then(() => {
+                          window.setTimeout(() => sendPromptText(p.text), 1200);
+                        });
+                      } else {
+                        sendPromptText(p.text);
+                      }
+                    }}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="voice-hints">
-              <span className="pipe-step">instant response &lt; 400ms</span>
-              <span className="pipe-step">traffic &amp; noise filter active</span>
-              <span className="pipe-step">OKF knowledge · live web synthesis</span>
-              <span className="pipe-step">instant voice &amp; button barge-in</span>
+              <span className="pipe-step"><i className="fa-solid fa-bolt" /> &lt;400ms Turnaround</span>
+              <span className="pipe-step"><i className="fa-solid fa-microphone" /> Native American Voice</span>
+              <span className="pipe-step"><i className="fa-solid fa-tooth" /> Verified Dental Knowledge</span>
+              <span className="pipe-step"><i className="fa-solid fa-calendar-check" /> Instant Booking</span>
             </div>
 
             <div className="voice-log">
               {lines.length === 0 ? (
                 <div className="hint center">
-                  Live conversation appears here — speak into your microphone to chat with the voice agent.
+                  Live phone conversation appears here — tap <strong>Call Front Desk</strong> to speak with Sarah or click a quick prompt above.
                 </div>
               ) : (
                 lines.map((l) => (
                   <div key={l.id} className={`voice-line ${l.role}`}>
                     <span className="who">
-                      {l.role === "user" ? "you" : l.role === "assistant" ? "agent" : "system"}
+                      {l.role === "user" ? "Patient" : l.role === "assistant" ? "Sarah (Allright Dental)" : "System"}
                     </span>
                     <span className="said">{l.text}</span>
                   </div>
@@ -690,7 +752,7 @@ export function VoicePage() {
               )}
               {interim ? (
                 <div className="voice-line user">
-                  <span className="who">you</span>
+                  <span className="who">Patient</span>
                   <span className="said">
                     {interim}
                     <span className="muted"> …</span>
@@ -702,30 +764,51 @@ export function VoicePage() {
         </div>
 
         <div className="card">
-          <div className="card-title">DataBuks Voice AI Architecture</div>
+          <div className="card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <i className="fa-solid fa-tooth" style={{ color: "var(--accent)" }} />
+            Allright Dental Practice Information
+          </div>
           <div className="trace">
             <div className="trace-item">
-              <div className="k">DataBuks Voice Engine</div>
+              <div className="k">Lead Dentist &amp; Director</div>
               <div className="v">
-                High-performance real-time streaming pipeline with co-located neural STT, conversational reasoning, and natural voice synthesis for sub-400ms turnaround.
+                <strong>Dr. Shalini Mandapatti, DDS</strong> — Board-certified cosmetic &amp; restorative dentist with 15+ years of clinical excellence. Graduate of New York University College of Dentistry (NYU).
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">Traffic &amp; Noise Suppression</div>
+              <div className="k">Practice Location</div>
               <div className="v">
-                Hardware &amp; Web Audio high-pass DSP filtering (85 Hz) to eliminate road traffic rumble, bus noise, and HVAC hum, with dynamic vocal clarity enhancement.
+                <strong>229 Plaza Blvd, Suite 23, Morrisville, PA 19067</strong><br />
+                Conveniently serving Morrisville, Yardley, Levittown, Fallsington, Fairless Hills, and Bucks County. Free parking available.
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">OKF &amp; RAG Knowledge Grounding</div>
+              <div className="k">Office Phone &amp; Emergency Line</div>
               <div className="v">
-                Preloaded verified business documents from Supabase with Laya decision routing and real-time live web search synthesis.
+                <strong>(215) 295-1348</strong> · contact@allrightdental.com<br />
+                Same-day emergency dental relief for severe toothaches, broken teeth, bleeding, and facial trauma.
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">Interruption &amp; Barge-In Handling</div>
+              <div className="k">Clinic Operating Hours</div>
               <div className="v">
-                Full-duplex conversation with instant voice barge-in, hardware VAD interruption detection, and one-tap manual interrupt on both laptop and mobile.
+                <strong>Wed – Thu:</strong> 10:00 AM – 7:00 PM<br />
+                <strong>Friday:</strong> 10:00 AM – 6:00 PM<br />
+                <strong>Saturday:</strong> 9:00 AM – 12:00 PM (Noon)<br />
+                <strong>Mon, Tue, Sun:</strong> Emergency triage &amp; appointments by arrangement<br />
+                <strong>24/7 AI Receptionist:</strong> Booking &amp; emergency intake available round the clock.
+              </div>
+            </div>
+            <div className="trace-item">
+              <div className="k">In-Network Dental Insurances &amp; Financing</div>
+              <div className="v">
+                In-network with Delta Dental (Premier &amp; PPO), MetLife, Cigna, Aetna, Guardian, United Healthcare, and Ameritas. Flexible 0% interest financing via CareCredit and transparent self-pay pricing.
+              </div>
+            </div>
+            <div className="trace-item">
+              <div className="k">Clinical Services Offered</div>
+              <div className="v">
+                Routine cleanings &amp; exams · Emergency dentistry · Zoom! teeth whitening · Porcelain veneers · Dental implants · Zirconia crowns · Root canal therapy (Endodontics) · Invisalign® clear aligners.
               </div>
             </div>
           </div>
