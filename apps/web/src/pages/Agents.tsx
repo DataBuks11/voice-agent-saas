@@ -194,7 +194,7 @@ export function AgentsPage() {
               className="input"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="e.g. Allright Dental Receptionist"
+              placeholder="e.g. Apex Dental Care Receptionist"
               required
             />
           </div>

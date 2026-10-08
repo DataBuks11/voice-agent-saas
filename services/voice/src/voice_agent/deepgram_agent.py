@@ -110,8 +110,9 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
     """Fetch agent details and verified dental clinic knowledge chunks from Supabase."""
     agent_info = {
         "name": "Dental Care Receptionist",
+        "clinic_name": "",
         "prompt": "",
-        "greeting": "Thank you for calling our dental clinic! My name is Sarah. How can I help you with your dental care today?",
+        "greeting": "Thank you for calling! My name is Sarah. How can I help you with your dental care today?",
         "language": "en",
         "tone": "warm, professional and comforting",
         "fallback": "I'd be happy to check with our clinical team and have our front desk follow up with you.",
@@ -139,9 +140,43 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
                 agent_info["fallback"] = ag.get("fallback_response") or agent_info["fallback"]
                 if ag.get("system_prompt"):
                     agent_info["prompt"] = ag["system_prompt"]
-                agent_info["greeting"] = f"Thank you for calling {agent_info['name']}! My name is Sarah. How can I help you with your dental care today?"
         except Exception as exc:
             log.warning("failed to load agent from Supabase: %s", exc)
+
+        # 2. Check workspace name for dynamic practice identity
+        ws_name = ""
+        try:
+            r_ws = await client.get(f"{SB_URL}/rest/v1/workspaces?id=eq.{workspace_id}&select=name", headers=headers)
+            if r_ws.status_code == 200 and r_ws.json():
+                ws_name = (r_ws.json()[0].get("name") or "").strip()
+        except Exception as exc:
+            log.warning("failed to load workspace name: %s", exc)
+
+        # 3. Determine clinic practice name dynamically
+        ag_name_clean = (agent_info.get("name") or "").strip()
+        generic_roles = {
+            "receptionist", "assistant", "agent", "bot", "ai", "front desk",
+            "dental care receptionist", "dental receptionist", "voice agent", "new agent",
+            "virtual receptionist", "virtual assistant"
+        }
+        clinic_name = ""
+        if ag_name_clean and ag_name_clean.lower() not in generic_roles:
+            candidate = ag_name_clean
+            for suffix in [" Receptionist", " Assistant", " AI Receptionist", " Front Desk"]:
+                if candidate.lower().endswith(suffix.lower()):
+                    candidate = candidate[: -len(suffix)].strip()
+                    break
+            if candidate and candidate.lower() not in generic_roles:
+                clinic_name = candidate
+
+        if not clinic_name and ws_name and ws_name.lower() not in {"my workspace", "default", "voice agent", "databuks dental ai", "workspace"}:
+            clinic_name = ws_name
+
+        agent_info["clinic_name"] = clinic_name
+        if clinic_name:
+            agent_info["greeting"] = f"Thank you for calling {clinic_name}! My name is Sarah. How can I help you with your dental care today?"
+        else:
+            agent_info["greeting"] = "Thank you for calling! My name is Sarah. How can I help you with your dental care today?"
 
         # 2. Load verified documents & chunks balanced across ALL uploaded documents
         try:
@@ -253,10 +288,12 @@ class DeepgramAgentSession:
         agent_info, knowledge_text, keyterm_titles = await load_workspace_context(self.workspace_id, self.agent_id)
         self.agent_name = agent_info["name"]
         self.greeting = agent_info["greeting"]
+        clinic_name = agent_info.get("clinic_name", "")
+        practice_label = clinic_name if clinic_name else "our dental practice"
 
         # Build prompt: strictly grounded in verified dental knowledge & clinic procedures
         base_prompt = agent_info.get("prompt") or (
-            f"You are Sarah, the warm, caring, and highly professional American dental receptionist for {self.agent_name}. "
+            f"You are Sarah, the warm, caring, and highly professional American dental receptionist for {practice_label}. "
             "You are speaking live with a patient over the telephone in real time. "
             "Your main role is to welcome callers warmly, answer questions about dental treatments, "
             "and schedule dental care appointments smoothly and efficiently."
@@ -266,6 +303,8 @@ class DeepgramAgentSession:
             base_prompt,
             f"\nTone: {agent_info.get('tone', 'warm, professional and comforting')}. Default fallback policy: {agent_info.get('fallback', 'I would be glad to check with our clinical team and have our front desk confirm that for you.')}",
             "\nCLINIC OVERVIEW & ESSENTIAL DETAILS:",
+            f"- Practice: {practice_label}",
+            "- STRICT IDENTITY RULE: You must NEVER introduce yourself as 'Allright Dental' or 'Alright Dental' or any third-party clinic not configured by the user. If asked what clinic this is, use the configured practice name or simply say you are the dental receptionist for our dental practice.",
             "- Role: 24/7 Dental Clinic Front Desk & Appointment Receptionist",
             "- Focus: Comprehensive family, cosmetic, restorative, and emergency dental care",
             "- Operating Hours:",
@@ -355,12 +394,14 @@ class DeepgramAgentSession:
             if stt_model in ("flux-general-en", "base.en", "nova-2"):
                 stt_model = "nova-3"
 
-            # Intelligent keyterms list for Nova-3 to boost recognition of clinic, dental terms, and names
+            # Intelligent keyterms list for Nova-3 to boost recognition of dental terms, clinic, and caller names
             keyterms = [
-                "Allright Dental", "All Right Dental", "Dr. Shalini Mandapatti", "Mandapatti", "Morrisville", "Yardley",
-                "Invisalign", "cleaning", "toothache", "veneers", "implant", "crown", "Delta Dental", "CareCredit",
-                "appointment", "booking", "Piyush", "piyush", "Alex", "Sarah", "Emily"
+                "dental", "dentist", "cleaning", "toothache", "veneers", "implant", "crown",
+                "Delta Dental", "CareCredit", "appointment", "booking", "Invisalign", "cavity",
+                "Piyush", "piyush", "Alex", "Sarah", "Emily"
             ]
+            if clinic_name and clinic_name not in keyterms:
+                keyterms.append(clinic_name)
             if self.agent_name and self.agent_name not in keyterms:
                 keyterms.append(self.agent_name)
             for kt in keyterm_titles:
@@ -413,7 +454,7 @@ class DeepgramAgentSession:
                             },
                             {
                                 "name": "book_appointment",
-                                "description": "Books a dental care appointment for the patient with Dr. Mandapatti at Allright Dental.",
+                                "description": "Books a dental care appointment for the patient at the dental practice.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
@@ -590,7 +631,7 @@ class DeepgramAgentSession:
                                 if notes:
                                     combined_notes += f" | Notes: {notes}"
                                 self._save_booking_async(caller_name, dt, combined_notes, phone)
-                                result = f"Successfully scheduled dental appointment for {caller_name} on {dt} for {service} with Dr. Mandapatti."
+                                result = f"Successfully scheduled dental appointment for {caller_name} on {dt} for {service}."
                                 resp = {
                                     "type": "FunctionCallResponse",
                                     "id": call_id,

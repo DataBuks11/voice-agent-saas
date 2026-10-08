@@ -543,7 +543,7 @@ export function VoicePage() {
           if (sttModeRef.current === "browser" && browserSttAvailable) {
             setupBrowserStt(socket);
           } else {
-            pushLine("system", "Allright Dental Virtual Front Desk online (Native American Voice · Sub-400ms Turnaround)");
+            pushLine("system", "Dental Care Virtual Front Desk online (Native American Voice · Sub-400ms Turnaround)");
             startMic(socket);
           }
 

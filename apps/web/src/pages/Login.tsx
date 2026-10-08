@@ -42,7 +42,7 @@ export function LoginPage() {
         <div className="brand" style={{ padding: "0 0 18px" }}>
           <BrandLogo />
           <div>
-            <div className="brand-name">Allright Dental Voice AI</div>
+            <div className="brand-name">Dental Care Voice AI</div>
             <div className="brand-sub">Virtual Front Desk & Clinic Console</div>
           </div>
         </div>
