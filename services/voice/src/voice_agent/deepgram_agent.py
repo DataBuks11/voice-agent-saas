@@ -109,12 +109,12 @@ async def search_knowledge(workspace_id: str, query: str) -> str:
 async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str, list[str]]:
     """Fetch agent details and verified dental clinic knowledge chunks from Supabase."""
     agent_info = {
-        "name": "Allright Dental Receptionist",
+        "name": "Dental Care Receptionist",
         "prompt": "",
-        "greeting": "Thank you for calling Allright Dental! My name is Sarah. How can I help you with your dental care today?",
+        "greeting": "Thank you for calling our dental clinic! My name is Sarah. How can I help you with your dental care today?",
         "language": "en",
         "tone": "warm, professional and comforting",
-        "fallback": "I'd be happy to check with Dr. Mandapatti's team and have someone follow up with you.",
+        "fallback": "I'd be happy to check with our clinical team and have our front desk follow up with you.",
     }
     knowledge_text = ""
     keyterm_titles: list[str] = []
@@ -256,8 +256,7 @@ class DeepgramAgentSession:
 
         # Build prompt: strictly grounded in verified dental knowledge & clinic procedures
         base_prompt = agent_info.get("prompt") or (
-            f"You are Sarah, the warm, caring, and highly professional American dental receptionist for {self.agent_name} "
-            "(Allright Dental, practice of Dr. Shalini Mandapatti, DDS in Morrisville, PA). "
+            f"You are Sarah, the warm, caring, and highly professional American dental receptionist for {self.agent_name}. "
             "You are speaking live with a patient over the telephone in real time. "
             "Your main role is to welcome callers warmly, answer questions about dental treatments, "
             "and schedule dental care appointments smoothly and efficiently."
@@ -265,25 +264,22 @@ class DeepgramAgentSession:
 
         prompt_parts = [
             base_prompt,
-            f"\nTone: {agent_info.get('tone', 'warm, professional and comforting')}. Default fallback policy: {agent_info.get('fallback', 'I would be glad to check with Dr. Mandapatti and have our front desk team confirm that for you.')}",
+            f"\nTone: {agent_info.get('tone', 'warm, professional and comforting')}. Default fallback policy: {agent_info.get('fallback', 'I would be glad to check with our clinical team and have our front desk confirm that for you.')}",
             "\nCLINIC OVERVIEW & ESSENTIAL DETAILS:",
-            "- Practice Name: Allright Dental (also recognized as All Right Dental)",
-            "- Lead Dentist: Dr. Shalini Mandapatti, DDS (15+ years experience, graduate of New York University College of Dentistry; specialist in cosmetic dentistry, dental implants, restorative crowns, and gentle anxiety-free care)",
-            "- Clinic Address: 229 Plaza Blvd, Suite 23, Morrisville, PA 19067 (conveniently serving Morrisville, Yardley, Levittown, Fairless Hills, Fallsington, and Bucks County)",
-            "- Phone: (215) 295-1348",
+            "- Role: 24/7 Dental Clinic Front Desk & Appointment Receptionist",
+            "- Focus: Comprehensive family, cosmetic, restorative, and emergency dental care",
             "- Operating Hours:",
-            "  * Wednesday – Thursday: 10:00 AM – 7:00 PM",
-            "  * Friday: 10:00 AM – 6:00 PM",
-            "  * Saturday: 9:00 AM – 12:00 PM (Noon)",
-            "  * Monday, Tuesday, Sunday: Emergency dental triage & dedicated visits by appointment",
+            "  * Monday – Friday: 9:00 AM – 6:00 PM",
+            "  * Saturday: 9:00 AM – 2:00 PM",
+            "  * Sunday: Urgent emergency triage & dedicated visits by appointment",
             "  * 24/7 Virtual AI Receptionist (You): Answering patient questions and booking appointments around the clock!",
             "- Services Provided:",
             "  * General & Preventive: Comprehensive exams, gentle dental cleanings (prophylaxis), digital low-dose X-rays, oral cancer screening, deep cleaning / periodontal scaling.",
             "  * Emergency Dental Care: Urgent same-day care for severe toothaches, broken/chipped teeth, knocked-out teeth, lost fillings/crowns, swelling, or abscesses.",
-            "  * Cosmetic Dentistry: Zoom professional in-office & take-home teeth whitening, handcrafted porcelain veneers, aesthetic bonding, smile makeovers.",
+            "  * Cosmetic Dentistry: Professional in-office & take-home teeth whitening, handcrafted porcelain veneers, aesthetic bonding, smile makeovers.",
             "  * Restorative & Implants: Dental implants (single tooth, bridges, full-arch), porcelain crowns, tooth-colored composite fillings, bridges, dentures.",
             "  * Endodontics: Gentle root canal therapy to relieve tooth pain and preserve natural teeth.",
-            "  * Orthodontics: Invisalign clear aligners for adults and teens.",
+            "  * Orthodontics: Clear aligners for adults and teens.",
             "- Insurances & Financing:",
             "  * In-network with major PPO dental insurances: Delta Dental, MetLife, Cigna, Aetna, Guardian, United Healthcare, and others.",
             "  * Flexible patient financing available through CareCredit (with interest-free options), all major credit cards, and transparent self-pay pricing.",
@@ -305,15 +301,11 @@ class DeepgramAgentSession:
             "   Acknowledge it immediately without asking to spell: 'Thank you, Piyush! What day and time works best for your appointment?'",
             "\nAPPOINTMENT BOOKING EXECUTION:",
             "- When you have the patient's name, requested day/time, and visit reason, call the book_appointment tool immediately.",
-            "- Confirm warmly: 'I have scheduled your appointment with Dr. Mandapatti for [day/time]. We look forward to seeing your smile at Allright Dental!'",
+            "- Confirm warmly: 'I have scheduled your dental appointment for [day/time]. We look forward to seeing your smile!'",
             "\nEMERGENCY DENTAL CARE PROTOCOL:",
             "- If a patient reports severe tooth pain, swelling, a broken tooth, or dental trauma, express immediate empathy and prioritize urgent same-day booking.",
             "\nFOCUS BOUNDARIES:",
-            "- You represent Allright Dental clinic exclusively. If a caller asks about unrelated outside businesses, politely steer back to dental care.",
-            "\nPHONETIC CORRECTIONS & ACCENT HANDLING:",
-            "- The clinic name is Allright Dental. Speech recognition (STT) may transcribe it as 'All Right Dental', 'Alright Dental', 'All Right', or 'Allred Dental'. Recognize all of these as Allright Dental.",
-            "- Doctor name: Dr. Shalini Mandapatti. Speech recognition may hear 'Mandapatti', 'Manda Patti', or 'Shalini'.",
-            "- Caller names: Prioritize the caller's spelling confirmation.",
+            "- You represent this dental clinic exclusively. If a caller asks about unrelated outside businesses, politely steer back to dental care.",
         ]
 
         if knowledge_text:
@@ -624,7 +616,7 @@ class DeepgramAgentSession:
                 "starts_at": starts_at,
                 "notes": notes,
                 "status": "confirmed",
-                "source": "allright_dental_voice",
+                "source": "dental_voice",
             }
             headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
             async with httpx.AsyncClient(timeout=5.0) as client:

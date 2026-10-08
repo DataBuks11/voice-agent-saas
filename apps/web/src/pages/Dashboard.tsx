@@ -59,9 +59,9 @@ export function DashboardPage() {
     <>
       <div className="hero">
         <div>
-          <h3>{ws?.name || "Allright Dental Practice"} · 24/7 Virtual Front Desk</h3>
+          <h3>{ws?.name || "Dental Care Practice"} · 24/7 Virtual Front Desk</h3>
           <p>
-            Grounding Dr. Shalini Mandapatti's patient communications in verified clinical procedures,
+            Grounding dental patient communications in verified clinical procedures,
             in-network dental insurance policies, and office protocols. Every response is verified through
             our real-time dental knowledge harness and sub-400ms neural voice stream.
           </p>
@@ -116,7 +116,7 @@ export function DashboardPage() {
         </div>
         {bookings.length === 0 ? (
           <div className="hint">
-            No appointments booked yet — say “I'd like to schedule a dental checkup and cleaning with Dr. Shalini for tomorrow at 10 AM” in the console or on the Voice Receptionist page.
+            No appointments booked yet — say “I'd like to schedule a dental checkup and cleaning for tomorrow at 10 AM” in the console or on the Voice Receptionist page.
           </div>
         ) : (
           <table className="table">

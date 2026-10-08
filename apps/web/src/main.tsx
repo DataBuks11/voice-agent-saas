@@ -89,7 +89,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/", label: "Clinic Overview", ico: "fa-solid fa-house-medical" },
     { to: "/conversations", label: "Call Transcripts", ico: "fa-solid fa-phone-volume" },
   ];
-  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "Allright Dental Voice AI";
+  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "DataBuks Dental Voice AI";
 
   return (
     <ToastCtx.Provider value={push}>
@@ -100,8 +100,8 @@ function Shell({ children }: { children: React.ReactNode }) {
           <div className="brand">
             <BrandLogo />
             <div>
-              <div className="brand-name">Allright Dental</div>
-              <div className="brand-sub">Dr. Mandapatti, DDS · AI Front Desk</div>
+              <div className="brand-name">DataBuks</div>
+              <div className="brand-sub">Dental Voice AI · Front Desk</div>
             </div>
           </div>
           <div className="nav-section">Practice Console</div>
@@ -116,22 +116,22 @@ function Shell({ children }: { children: React.ReactNode }) {
               {n.label}
             </NavLink>
           ))}
-          <div className="nav-section">Clinical Info</div>
+          <div className="nav-section">Clinical Intelligence</div>
           <div className="sidebar-clinic-info">
             <div className="clinic-info-item">
-              <i className="fa-solid fa-location-dot" /> 229 Plaza Blvd, Ste 23, Morrisville, PA
+              <i className="fa-solid fa-tooth" /> Dental Practice Front Desk
             </div>
             <div className="clinic-info-item">
-              <i className="fa-solid fa-phone" /> (215) 295-1348
+              <i className="fa-solid fa-calendar-check" /> 24/7 Patient Booking
             </div>
             <div className="clinic-info-item">
-              <i className="fa-solid fa-clock" /> Wed–Sat 10am–7pm
+              <i className="fa-solid fa-shield-halved" /> PPO &amp; CareCredit Verified
             </div>
           </div>
           <div className="sidebar-footer">
             <div className="ws-chip">
               <span className="ws-dot" />
-              <span>{ws?.name ?? "Allright Dental Practice"}</span>
+              <span>{ws?.name ?? "Dental Care Practice"}</span>
             </div>
             <div className="brand-sub mono" style={{ marginTop: 6 }}>
               {user?.email ?? ""}

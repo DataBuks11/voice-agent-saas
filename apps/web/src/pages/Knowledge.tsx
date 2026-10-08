@@ -3,41 +3,40 @@ import { api, type DocumentRow, type SearchHit } from "../lib/api";
 import { useToast } from "../main";
 
 const DENTAL_PROCEDURES_SAMPLE = `---
-title: Allright Dental — Clinical Procedures & Fees
+title: Dental Care Practice — Clinical Procedures & Fees
 category: clinical_services
-provider: Dr. Shalini Mandapatti, DDS
-practice: Allright Dental
+practice: Dental Care Clinic
 ---
 
 # Practice Overview
-Allright Dental is led by Dr. Shalini Mandapatti, DDS (15+ years of clinical experience, New York University College of Dentistry graduate). Located at 229 Plaza Blvd, Suite 23, Morrisville, PA 19067. Phone: (215) 295-1348.
+Our dental clinic provides comprehensive, gentle, and modern dental care for patients of all ages. We offer full diagnostic, preventive, restorative, and cosmetic dental treatments.
 
 # Comprehensive Exams & Preventive Care
-- Comprehensive New Patient Dental Exam & Digital X-Rays: Thorough clinical evaluation, low-radiation digital imaging, and oral cancer screening.
-- Adult Dental Prophylaxis (Routine Cleaning): Gentle ultrasonic scaling, plaque/tartar removal, and enamel polishing.
-- Deep Cleaning (Scaling & Root Planing): Non-surgical periodontal gum therapy for gingivitis and periodontal disease.
+- Comprehensive New Patient Dental Exam & Digital X-Rays: Clinical examination, low-radiation digital imaging, and oral cancer screening.
+- Adult Dental Prophylaxis (Routine Cleaning): Ultrasonic tartar and plaque removal followed by enamel polishing.
+- Deep Cleaning (Scaling & Root Planing): Non-surgical periodontal gum therapy for gingivitis and periodontal care.
 
 # Emergency Dental Care (Same-Day Relief)
-- Immediate triage and same-day emergency appointments for severe toothaches, chipped/broken teeth, knocked-out teeth, lost crowns, or acute dental abscesses.
+- Same-day emergency appointments for severe toothaches, chipped or cracked teeth, knocked-out teeth, lost fillings/crowns, or acute dental abscesses.
 
 # Restorative & Implant Dentistry
-- Dental Implants: Permanent titanium posts topped with handcrafted lifelike porcelain crowns.
-- Custom Porcelain Crowns & Bridges: Natural-looking tooth restoration.
-- Tooth-Colored Composite Fillings: Mercury-free, aesthetic resin fillings matching natural tooth enamel.
+- Dental Implants: Titanium tooth root replacement with custom porcelain dental crowns.
+- Custom Porcelain Crowns & Bridges: Natural-looking tooth restoration and broken tooth repair.
+- Tooth-Colored Composite Fillings: Mercury-free, aesthetic composite fillings matching natural enamel.
 
 # Cosmetic Dentistry & Orthodontics
-- Zoom! In-Office Teeth Whitening: Brightens teeth up to 8 shades in a single 60-minute session.
-- Custom Porcelain Veneers: Fixes severe discoloration, gaps, chips, and misalignment.
-- Invisalign Clear Aligners: Discrete orthodontic straightening for teens and adults.`;
+- Professional Teeth Whitening: In-office whitening brightening enamel up to 8 shades in 60 minutes.
+- Custom Porcelain Veneers: Corrects deep discoloration, chips, minor gaps, and enamel wear.
+- Clear Aligners: Discrete orthodontic straightening for teens and adults.`;
 
 const DENTAL_INSURANCE_SAMPLE = `---
-title: Allright Dental — Insurance & Patient Financing
+title: Dental Care Practice — Insurance & Patient Financing
 category: insurance_billing
-practice: Allright Dental
+practice: Dental Care Clinic
 ---
 
 # In-Network PPO Dental Insurances
-Allright Dental proudly accepts and is in-network with premier dental insurance plans:
+We accept and work with leading dental insurance plans:
 - Delta Dental (Premier & PPO)
 - MetLife Dental
 - Cigna Dental
@@ -46,49 +45,41 @@ Allright Dental proudly accepts and is in-network with premier dental insurance 
 - United Healthcare Dental
 - Ameritas
 
-Our front desk team files all insurance claims electronically on behalf of our patients to maximize benefit coverage.
+Our front desk team files all insurance claims electronically on behalf of patients to maximize benefit coverage.
 
 # Flexible Patient Financing (CareCredit)
 - We partner with CareCredit to offer flexible monthly payment options, including 0% introductory APR financing for 6, 12, or 24 months.
 - Instant approval with no upfront prepayment penalties.
 
 # Self-Pay & Uninsured Patients
-- We believe in 100% transparent pricing with no hidden charges.
+- 100% transparent pricing with no hidden charges.
 - Transparent fee estimates provided prior to initiating any treatment.
 - Accepted payment methods: Cash, Visa, MasterCard, American Express, Discover, debit cards, and HSA / FSA health savings accounts.`;
 
 const DENTAL_HOURS_LOCATION_SAMPLE = `---
-title: Allright Dental — Office Hours & Booking Protocols
+title: Dental Care Practice — Office Hours & Booking Protocols
 category: practice_operations
-practice: Allright Dental
+practice: Dental Care Clinic
 ---
 
-# Location & Accessibility
-- Address: 229 Plaza Blvd, Suite 23, Morrisville, PA 19067.
-- Conveniently located in Bucks County, serving Morrisville, Yardley, Levittown, Fairless Hills, and Fallsington.
-- Free, accessible patient parking available right in front of the clinic.
-- Direct Contact: Phone (215) 295-1348 | Email: contact@allrightdental.com.
-
-# Clinic Operating Hours
-- Wednesday: 10:00 AM – 7:00 PM
-- Thursday: 10:00 AM – 7:00 PM
-- Friday: 10:00 AM – 6:00 PM
-- Saturday: 9:00 AM – 12:00 PM (Noon)
-- Sunday, Monday, Tuesday: Emergency triage & scheduled specialized visits.
+# Operating Hours & Availability
+- Monday – Friday: 9:00 AM – 6:00 PM
+- Saturday: 9:00 AM – 2:00 PM
+- Sunday: Emergency dental triage & urgent visits by appointment
 - 24/7 Virtual Front Desk: Round-the-clock appointment scheduling with our AI receptionist Sarah.
 
 # Patient Appointment Protocol
-- Arrive 10 to 15 minutes prior to scheduled time for check-in and health history updates.
-- Cancellations: Please give at least 24 hours advance notice so we may offer the chair to patients on our emergency waitlist.`;
+- Check-in: Please arrive 10 to 15 minutes prior to scheduled time for registration and health history review.
+- Cancellations: Please give at least 24 hours advance notice if you need to reschedule so we can offer the appointment to another patient in need.
+- Emergency Walk-ins: Please call the front desk before coming in so we can prepare a treatment room immediately.`;
 
 const isDentalContent = (text: string, titleStr: string): boolean => {
   const combined = `${titleStr} ${text}`.toLowerCase();
   const dentalKeywords = [
     "dental", "dentist", "tooth", "teeth", "hygiene", "cleaning", "prophylaxis",
-    "cavity", "crown", "implant", "veneer", "root canal", "mandapatti", "allright",
-    "all right", "enamel", "gum", "oral", "ortho", "invisalign", "caries",
-    "periodont", "extraction", "denture", "whitening", "filling", "carecredit",
-    "delta dental", "metlife", "cigna", "aetna", "plazas", "morrisville", "clinic",
+    "cavity", "crown", "implant", "veneer", "root canal", "enamel", "gum", "oral",
+    "ortho", "invisalign", "caries", "periodont", "extraction", "denture", "whitening",
+    "filling", "carecredit", "delta dental", "metlife", "cigna", "aetna", "clinic",
     "patient", "checkup", "exam", "x-ray", "braces", "copay", "doctor", "dds"
   ];
   return dentalKeywords.some((kw) => combined.includes(kw));
@@ -154,7 +145,7 @@ export function KnowledgePage() {
         if (!isDentalContent(textSample, file.name)) {
           toast({
             kind: "err",
-            text: "Validation rejected: Only dental clinic documents and clinical protocols are permitted in Allright Dental's knowledge base.",
+            text: "Validation rejected: Only dental clinic documents and clinical protocols are permitted in the knowledge base.",
           });
           setFileBusy(false);
           setFileProg(null);
@@ -207,7 +198,7 @@ export function KnowledgePage() {
     if (!isDentalContent(markdown, title)) {
       toast({
         kind: "err",
-        text: "Domain restricted: Allright Dental knowledge base only accepts dental care, clinical procedures, or practice documents.",
+        text: "Domain restricted: Only dental care, clinical procedures, or practice documents are permitted.",
       });
       return;
     }
@@ -246,9 +237,9 @@ export function KnowledgePage() {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ fontSize: 26, color: "#38bdf8" }}>🦷</span>
           <div>
-            <h2>Allright Dental — Clinical Knowledge Base</h2>
+            <h2>Dental Care Clinical Knowledge Base</h2>
             <p>
-              Strictly grounded on Allright Dental care guidelines (Dr. Shalini Mandapatti, DDS), clinical procedures,
+              Strictly grounded on dental care guidelines, clinical procedures,
               in-network dental insurance, and practice policies. Only dental documents are indexed.
             </p>
           </div>
@@ -285,7 +276,7 @@ export function KnowledgePage() {
               className="input"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Allright Dental — Cosmetic & Whitening Protocol"
+              placeholder="e.g. Dental Practice — Cosmetic & Whitening Protocol"
             />
           </div>
           <div className="field">
@@ -308,7 +299,7 @@ export function KnowledgePage() {
                 className="btn btn-sm btn-ghost quick-pill-btn"
                 type="button"
                 onClick={() => {
-                  setTitle("Allright Dental — Clinical Procedures & Fees");
+                  setTitle("Dental Care Practice — Clinical Procedures & Fees");
                   setMarkdown(DENTAL_PROCEDURES_SAMPLE);
                 }}
               >
@@ -318,7 +309,7 @@ export function KnowledgePage() {
                 className="btn btn-sm btn-ghost quick-pill-btn"
                 type="button"
                 onClick={() => {
-                  setTitle("Allright Dental — Insurance & Patient Financing");
+                  setTitle("Dental Care Practice — Insurance & Patient Financing");
                   setMarkdown(DENTAL_INSURANCE_SAMPLE);
                 }}
               >
@@ -328,7 +319,7 @@ export function KnowledgePage() {
                 className="btn btn-sm btn-ghost quick-pill-btn"
                 type="button"
                 onClick={() => {
-                  setTitle("Allright Dental — Office Hours & Booking Protocols");
+                  setTitle("Dental Care Practice — Office Hours & Booking Protocols");
                   setMarkdown(DENTAL_HOURS_LOCATION_SAMPLE);
                 }}
               >
@@ -367,9 +358,9 @@ export function KnowledgePage() {
               <button
                 type="button"
                 className="btn btn-sm btn-ghost quick-pill-btn"
-                onClick={() => setQuery("What are Dr. Shalini Mandapatti's office hours and location?")}
+                onClick={() => setQuery("What are your clinic operating hours and check-in protocols?")}
               >
-                Clinic Hours & Address?
+                Clinic Hours & Check-in?
               </button>
               <button
                 type="button"

@@ -600,18 +600,18 @@ export function VoicePage() {
   };
 
   const statusLabel: Record<Status, string> = {
-    idle: "mic off — tap the orb to call Allright Dental",
-    connecting: "connecting to Allright Dental Virtual Front Desk…",
+    idle: "mic off — tap the orb to call Dental Front Desk",
+    connecting: "connecting to Dental Front Desk…",
     live: `live · ${voiceState} (Sarah listening)`,
     error: "connection error",
   };
 
   const QUICK_PROMPTS = [
     { label: "📅 Book Cleaning & Exam", text: "I'd like to book an appointment for a routine dental cleaning and exam." },
-    { label: "🚨 Emergency Toothache", text: "I have severe toothache pain on my tooth, do you have emergency appointments today?" },
+    { label: "🚨 Emergency Toothache", text: "I have a severe toothache on my back tooth, do you have emergency appointments today?" },
     { label: "✨ Veneers & Whitening", text: "How much are porcelain veneers and do you do cosmetic consultations?" },
-    { label: "🛡️ Delta Dental & Financing", text: "Do you accept Delta Dental insurance, and what financing options do you have?" },
-    { label: "📍 Clinic Hours & Location", text: "Where is Allright Dental located and what are Dr. Mandapatti's office hours?" },
+    { label: "🛡️ Dental Insurance & Financing", text: "Do you accept Delta Dental insurance, and what financing options do you have?" },
+    { label: "📍 Clinic Hours & Protocols", text: "What are your clinic operating hours and how early should I arrive for my visit?" },
   ];
 
   return (
@@ -619,13 +619,13 @@ export function VoicePage() {
       <div className="page-head">
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
           <span className="badge info" style={{ fontSize: 12, padding: "3px 10px", background: "rgba(0, 180, 216, 0.15)", border: "1px solid rgba(0, 180, 216, 0.3)" }}>
-            <i className="fa-solid fa-tooth" /> Practice of Dr. Shalini Mandapatti, DDS
+            <i className="fa-solid fa-tooth" /> 24/7 Virtual Dental Front Desk
           </span>
-          <span className="badge" style={{ fontSize: 11 }}>Morrisville &amp; Yardley, PA</span>
+          <span className="badge" style={{ fontSize: 11 }}>AI Appointment Booking &amp; Triage</span>
         </div>
-        <h2>Allright Dental — Virtual Front Desk &amp; Appointment Booking</h2>
+        <h2>Dental Care Voice Receptionist</h2>
         <p>
-          Real-time dental care receptionist with native American voice AI and sub-400ms turnaround on laptop &amp; mobile. Schedule cleanings, triage urgent toothaches, inquire about cosmetic procedures, or verify insurance coverage.
+          Real-time dental practice voice receptionist with native American voice AI and sub-400ms turnaround on laptop &amp; mobile. Schedule cleanings, triage urgent toothaches, answer treatment FAQs, and verify dental insurance coverage.
         </p>
       </div>
 
@@ -668,7 +668,7 @@ export function VoicePage() {
                   onChange={(e) => setAgentId(e.target.value)}
                   disabled={active}
                 >
-                  <option value="">Sarah — Allright Dental</option>
+                  <option value="">Sarah — Dental Receptionist</option>
                   {agents.map((a) => (
                     <option key={a.id} value={a.id}>{a.name}</option>
                   ))}
@@ -744,7 +744,7 @@ export function VoicePage() {
                 lines.map((l) => (
                   <div key={l.id} className={`voice-line ${l.role}`}>
                     <span className="who">
-                      {l.role === "user" ? "Patient" : l.role === "assistant" ? "Sarah (Allright Dental)" : "System"}
+                      {l.role === "user" ? "Patient" : l.role === "assistant" ? "Sarah (Dental Receptionist)" : "System"}
                     </span>
                     <span className="said">{l.text}</span>
                   </div>
@@ -766,49 +766,46 @@ export function VoicePage() {
         <div className="card">
           <div className="card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <i className="fa-solid fa-tooth" style={{ color: "var(--accent)" }} />
-            Allright Dental Practice Information
+            Dental Practice Clinical Information
           </div>
           <div className="trace">
             <div className="trace-item">
-              <div className="k">Lead Dentist &amp; Director</div>
+              <div className="k">Practice Front Desk Persona</div>
               <div className="v">
-                <strong>Dr. Shalini Mandapatti, DDS</strong> — Board-certified cosmetic &amp; restorative dentist with 15+ years of clinical excellence. Graduate of New York University College of Dentistry (NYU).
+                <strong>Sarah</strong> — Professional Dental Receptionist trained in clinical dental terminology, empathetic patient bedside manner, emergency toothache triage, and calendar scheduling.
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">Practice Location</div>
+              <div className="k">Clinical Services Supported</div>
               <div className="v">
-                <strong>229 Plaza Blvd, Suite 23, Morrisville, PA 19067</strong><br />
-                Conveniently serving Morrisville, Yardley, Levittown, Fallsington, Fairless Hills, and Bucks County. Free parking available.
+                Comprehensive exams &amp; digital X-rays · Gentle ultrasonic cleanings &amp; deep scaling · Tooth-colored composite fillings · Custom porcelain crowns &amp; bridges · Dental implants · Gentle root canals · Invisalign® &amp; cosmetic teeth whitening.
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">Office Phone &amp; Emergency Line</div>
+              <div className="k">Emergency Dental Care Protocol</div>
               <div className="v">
-                <strong>(215) 295-1348</strong> · contact@allrightdental.com<br />
-                Same-day emergency dental relief for severe toothaches, broken teeth, bleeding, and facial trauma.
-              </div>
-            </div>
-            <div className="trace-item">
-              <div className="k">Clinic Operating Hours</div>
-              <div className="v">
-                <strong>Wed – Thu:</strong> 10:00 AM – 7:00 PM<br />
-                <strong>Friday:</strong> 10:00 AM – 6:00 PM<br />
-                <strong>Saturday:</strong> 9:00 AM – 12:00 PM (Noon)<br />
-                <strong>Mon, Tue, Sun:</strong> Emergency triage &amp; appointments by arrangement<br />
-                <strong>24/7 AI Receptionist:</strong> Booking &amp; emergency intake available round the clock.
+                Priority scheduling for acute dental pain, chipped or broken teeth, knocked-out teeth, lost crowns, facial swelling, or dental abscesses. Same-day emergency appointment booking.
               </div>
             </div>
             <div className="trace-item">
               <div className="k">In-Network Dental Insurances &amp; Financing</div>
               <div className="v">
-                In-network with Delta Dental (Premier &amp; PPO), MetLife, Cigna, Aetna, Guardian, United Healthcare, and Ameritas. Flexible 0% interest financing via CareCredit and transparent self-pay pricing.
+                Compatible with leading PPO dental insurance providers: Delta Dental, MetLife, Cigna, Aetna, Guardian, United Healthcare, and Ameritas. Flexible 0% interest patient financing through CareCredit and transparent self-pay fee schedules.
               </div>
             </div>
             <div className="trace-item">
-              <div className="k">Clinical Services Offered</div>
+              <div className="k">Clinic Operating Hours</div>
               <div className="v">
-                Routine cleanings &amp; exams · Emergency dentistry · Zoom! teeth whitening · Porcelain veneers · Dental implants · Zirconia crowns · Root canal therapy (Endodontics) · Invisalign® clear aligners.
+                <strong>Monday – Friday:</strong> 9:00 AM – 6:00 PM<br />
+                <strong>Saturday:</strong> 9:00 AM – 2:00 PM<br />
+                <strong>Sunday:</strong> Urgent emergency care by appointment<br />
+                <strong>24/7 Virtual Front Desk:</strong> Round-the-clock call answering and automated scheduling with Sarah.
+              </div>
+            </div>
+            <div className="trace-item">
+              <div className="k">Patient Booking Flow</div>
+              <div className="v">
+                Captures patient name, visit reason, date/time preference, callback phone, and insurance provider. One-time spelling confirmation with zero repetitive prompts.
               </div>
             </div>
           </div>

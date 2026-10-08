@@ -4,13 +4,13 @@ import { api, type AgentRow } from "../lib/api";
 import { useToast } from "../main";
 
 const DEFAULT_FORM = {
-  name: "Allright Dental Receptionist",
+  name: "Dental Care Receptionist",
   language: "en",
   tone: "warm",
   systemPrompt:
-    "You are Sarah, the dedicated front desk receptionist at Allright Dental, the practice of Dr. Shalini Mandapatti, DDS in Morrisville, PA. You speak natural Native American English with a warm, caring bedside manner. You assist patients with dental appointment bookings, cleanings, cosmetic treatments (veneers, whitening), implants, emergency toothache relief, and dental insurance queries.",
-  fallbackResponse: "I'd be glad to have Dr. Shalini's clinical team verify that directly for you at (215) 295-1348.",
-  location: "229 Plaza Blvd, Suite 23, Morrisville, PA 19067",
+    "You are Sarah, the dedicated front desk receptionist for our dental clinic. You speak natural Native American English with a warm, caring bedside manner. You assist patients with dental appointment bookings, cleanings, cosmetic treatments (veneers, whitening), implants, emergency toothache relief, and dental insurance queries.",
+  fallbackResponse: "I'd be glad to have our front desk team verify that directly for you.",
+  location: "100 Dental Care Plaza, Suite 200",
 };
 
 export function AgentsPage() {
