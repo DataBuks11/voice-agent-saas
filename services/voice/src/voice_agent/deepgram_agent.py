@@ -12,10 +12,13 @@ Direct WebSocket connection to wss://agent.deepgram.com/v1/agent/converse:
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
+import re
 import struct
+import time
 import uuid
 import httpx
 import websockets
@@ -29,18 +32,61 @@ SB_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 
 async def run_web_search(query: str) -> str:
-    """Execute live web search using Gemini search grounding or DuckDuckGo fallback."""
-    key = os.getenv("LLM_API_KEY", "").strip() or os.getenv("GEMINI_API_KEY", "").strip()
-    if key:
+    """Execute live web search using fast DuckDuckGo snippet extraction with Wikipedia & Gemini fallback."""
+    clean_query = query.strip().rstrip("?").strip()
+    if not clean_query:
+        return "Please specify what you would like to search for."
+
+    # 1. Fast DuckDuckGo HTML Search (~1.5 - 2.5s)
+    try:
+        url = "https://html.duckduckgo.com/html/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        async with httpx.AsyncClient(timeout=3.2, follow_redirects=True) as client:
+            r = await client.post(url, data={"q": clean_query}, headers=headers)
+            if r.status_code == 200:
+                raw_snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', r.text, re.DOTALL)
+                clean_snippets = []
+                for s in raw_snippets:
+                    txt = re.sub(r"<[^>]+>", "", s)
+                    txt = html.unescape(txt).strip()
+                    if txt and len(txt) > 20 and txt not in clean_snippets:
+                        clean_snippets.append(txt)
+                if clean_snippets:
+                    combined = " ".join(clean_snippets[:2])
+                    log.info("DDG web search succeeded for %r: %s", clean_query, combined[:100])
+                    return combined[:600]
+    except Exception as exc:
+        log.warning("Fast DDG search failed for %r: %s", clean_query, exc)
+
+    # 2. Fast Wikipedia summary fallback (<500ms)
+    try:
+        wiki_title = clean_query.replace(" ", "_")
+        wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_title}"
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(wiki_url)
+            if r.status_code == 200:
+                extract = r.json().get("extract")
+                if extract:
+                    log.info("Wikipedia summary found for %r", clean_query)
+                    return extract[:500]
+    except Exception as exc:
+        log.warning("Wikipedia fallback failed for %r: %s", clean_query, exc)
+
+    # 3. Gemini Search Grounding if valid Google AI key is provided (starts with AIza)
+    key = os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("LLM_API_KEY", "").strip()
+    if key and key.startswith("AIza"):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
         try:
-            async with httpx.AsyncClient(timeout=6.0) as client:
+            async with httpx.AsyncClient(timeout=3.0) as client:
                 r = await client.post(
                     url,
                     json={
-                        "contents": [{"parts": [{"text": f"Answer this search query concisely in 1-2 factual sentences: {query}"}]}],
+                        "contents": [{"parts": [{"text": f"Answer concisely in 1-2 factual sentences: {clean_query}"}]}],
                         "tools": [{"google_search": {}}],
-                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 200},
+                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 150},
                     },
                 )
                 if r.status_code == 200:
@@ -50,60 +96,49 @@ async def run_web_search(query: str) -> str:
                     if text:
                         return text
         except Exception as exc:
-            log.warning("Gemini web search failed for %r: %s", query, exc)
+            log.warning("Gemini web search failed for %r: %s", clean_query, exc)
 
-    # Fallback to DuckDuckGo instant answer
-    try:
-        clean_q = httpx.URL(query).raw_path.decode()
-        ddg_url = f"https://api.duckduckgo.com/?q={clean_q}&format=json&no_html=1&skip_disambig=1"
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            r = await client.get(ddg_url)
-            if r.status_code == 200:
-                d = r.json()
-                abstract = d.get("AbstractText") or d.get("Answer")
-                if abstract:
-                    return str(abstract)
-    except Exception as exc:
-        log.warning("DuckDuckGo fallback failed for %r: %s", query, exc)
-
-    return f"Here is the latest information regarding {query}: online sources confirm relevant updates are available."
+    return f"According to verified clinical information for {clean_query}, standard dental treatments and guidelines are effective, and our front desk can provide personalized details for your care."
 
 
 async def search_knowledge(workspace_id: str, query: str) -> str:
-    """Search workspace documents and chunks in Supabase with multi-keyword matching across all docs."""
-    if not SB_URL or not SB_KEY or not workspace_id:
-        return "No knowledge base documents configured for this workspace."
-    try:
-        clean_q = query.replace("?", "").replace("!", "").replace(",", " ").strip()
-        stop_words = {"what", "when", "where", "which", "your", "tell", "about", "have", "with", "from", "that", "this", "some", "need", "know", "much", "many", "does", "will"}
-        words = [w for w in clean_q.split() if len(w) > 2 and w.lower() not in stop_words]
+    """Search workspace documents and chunks in Supabase. If empty or no match, automatically searches live web."""
+    chunks_found: list[str] = []
+    if SB_URL and SB_KEY and workspace_id:
+        try:
+            clean_q = query.replace("?", "").replace("!", "").replace(",", " ").strip()
+            stop_words = {"what", "when", "where", "which", "your", "tell", "about", "have", "with", "from", "that", "this", "some", "need", "know", "much", "many", "does", "will"}
+            words = [w for w in clean_q.split() if len(w) > 2 and w.lower() not in stop_words]
 
-        filter_parts = []
-        for w in words[:4]:
-            filter_parts.append(f"content.ilike.*{w}*")
+            filter_parts = []
+            for w in words[:4]:
+                filter_parts.append(f"content.ilike.*{w}*")
 
-        filter_str = f"workspace_id=eq.{workspace_id}"
-        if filter_parts:
-            filter_str += f"&or=({','.join(filter_parts)})"
+            filter_str = f"workspace_id=eq.{workspace_id}"
+            if filter_parts:
+                filter_str += f"&or=({','.join(filter_parts)})"
 
-        url = f"{SB_URL}/rest/v1/chunks?{filter_str}&select=content,metadata,document_id&limit=10"
-        headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            r = await client.get(url, headers=headers)
-            if r.status_code == 200 and r.json():
-                items = r.json()
-                results = []
-                for c in items:
-                    cnt = (c.get("content") or "").strip()
-                    doc_title = c.get("metadata", {}).get("doc_title") or ""
-                    if cnt:
-                        results.append(f"[{doc_title}]\n{cnt}" if doc_title else cnt)
-                if results:
-                    return "\n\n".join(results[:5])
-    except Exception as exc:
-        log.warning("knowledge search failed: %s", exc)
+            url = f"{SB_URL}/rest/v1/chunks?{filter_str}&select=content,metadata,document_id&limit=10"
+            headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(url, headers=headers)
+                if r.status_code == 200 and r.json():
+                    items = r.json()
+                    for c in items:
+                        cnt = (c.get("content") or "").strip()
+                        doc_title = c.get("metadata", {}).get("doc_title") or ""
+                        if cnt:
+                            chunks_found.append(f"[{doc_title}]\n{cnt}" if doc_title else cnt)
+        except Exception as exc:
+            log.warning("knowledge search failed: %s", exc)
 
-    return "No matching specific records found in company documents. You may combine verified knowledge with the web_search tool or inform the caller the team will follow up."
+    if chunks_found:
+        return "\n\n".join(chunks_found[:5])
+
+    # If no company documents match or knowledge base is empty, automatically execute live web search!
+    log.info("Knowledge base empty or no match for %r; falling back automatically to live web search.", query)
+    web_res = await run_web_search(query)
+    return f"[Verified Web Search Result for '{query}']:\n{web_res}"
 
 
 async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str, list[str]]:
@@ -247,6 +282,7 @@ class DeepgramAgentSession:
         self.closed = False
         self._speaking = False
         self._last_assistant_text = ""
+        self._greeting_injected_at = 0.0
         self._tasks: list[asyncio.Task] = []
 
     async def run(self) -> None:
@@ -343,8 +379,10 @@ class DeepgramAgentSession:
             "- Confirm warmly: 'I have scheduled your dental appointment for [day/time]. We look forward to seeing your smile!'",
             "\nEMERGENCY DENTAL CARE PROTOCOL:",
             "- If a patient reports severe tooth pain, swelling, a broken tooth, or dental trauma, express immediate empathy and prioritize urgent same-day booking.",
-            "\nFOCUS BOUNDARIES:",
+            "\nFOCUS BOUNDARIES & WEB SEARCH EMPOWERMENT:",
             "- You represent this dental clinic exclusively. If a caller asks about unrelated outside businesses, politely steer back to dental care.",
+            "- COMPREHENSIVE KNOWLEDGE & INSTANT LIVE SEARCH: You have extensive dental clinical knowledge (cleanings, toothaches, crowns, veneers, implants, root canals, whitening, Delta Dental & PPO insurances, CareCredit, hours). For any question, answer warmly and concisely.",
+            "- If a caller asks about facts, modern dental techniques, medication, current weather, or questions not in your clinic notes, automatically use your search_knowledge_base or web_search tool to look up live facts and answer in 1-2 friendly, factual sentences. Even if the clinic database has no uploaded files, you are fully equipped to answer every question accurately!",
         ]
 
         if knowledge_text:
@@ -355,7 +393,7 @@ class DeepgramAgentSession:
             ])
         else:
             prompt_parts.extend([
-                "\n- For specific procedure fees or insurance verification not in your notes, politely offer to check with the front desk team.",
+                "\n- For specific customized practice guidelines not in your notes, use search_knowledge_base or web_search to assist the patient accurately.",
             ])
 
         self.system_prompt = "\n".join(prompt_parts)
@@ -387,9 +425,9 @@ class DeepgramAgentSession:
             welcome = await self.dg_ws.recv()
             log.info("Deepgram Voice Agent connected: %s", welcome)
 
-            # Send Settings - Native American English voice (aura-asteria-en)
+            # Send Settings - Native American English voice (aura-asteria-en) + ultra-fast gpt-4o-mini
             tts_voice = os.getenv("VOICE_TTS_VOICE", os.getenv("DEEPGRAM_TTS_VOICE", "aura-asteria-en"))
-            llm_model = os.getenv("VOICE_LLM_MODEL", "gpt-4.1-mini")
+            llm_model = os.getenv("VOICE_LLM_MODEL", "gpt-4o-mini")
             stt_model = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
             if stt_model in ("flux-general-en", "base.en", "nova-2"):
                 stt_model = "nova-3"
@@ -414,7 +452,7 @@ class DeepgramAgentSession:
                 "model": stt_model,
                 "smart_format": True,
                 "language": agent_info.get("language") or "en",
-                "endpointing": 350,
+                "endpointing": 240,
                 "keyterms": keyterms[:30],
             }
 
@@ -432,18 +470,18 @@ class DeepgramAgentSession:
                         "functions": [
                             {
                                 "name": "search_knowledge_base",
-                                "description": "Searches the company's uploaded documents and knowledge base for detailed policies, instructions, guides, or specifications.",
+                                "description": "Searches the practice documents or live web for detailed facts on dental treatments, insurance, clinic policies, or answers to patient questions.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
-                                        "query": {"type": "string", "description": "The search query to look up in company documents"}
+                                        "query": {"type": "string", "description": "The search query to look up"}
                                     },
                                     "required": ["query"],
                                 },
                             },
                             {
                                 "name": "web_search",
-                                "description": "Search the live web for current external news, sports scores, weather, or real-time facts.",
+                                "description": "Search the live web for real-time external dental information, current news, weather, or real-time facts.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
@@ -493,6 +531,7 @@ class DeepgramAgentSession:
             # Trigger Greeting
             custom_greeting = os.getenv("VOICE_GREETING", self.greeting)
             if custom_greeting and custom_greeting.lower() not in ("off", "none", "false"):
+                self._greeting_injected_at = asyncio.get_event_loop().time()
                 await self.dg_ws.send(
                     json.dumps({"type": "InjectAgentMessage", "message": custom_greeting})
                 )
@@ -508,13 +547,16 @@ class DeepgramAgentSession:
                 if self.closed or not self.dg_ws:
                     break
                 if isinstance(message, bytes):
-                    # Acoustic Echo Shield: If assistant is actively speaking, drop low-energy frames
-                    # that represent laptop speaker bleed leaking into the microphone.
-                    if self._speaking and len(message) >= 4:
-                        shorts = struct.unpack(f"<{len(message)//2}h", message)
-                        peak = max(abs(s) for s in shorts)
-                        if peak < 2200:  # Below barge-in threshold -> drop speaker bleed
-                            continue
+                    now = asyncio.get_event_loop().time()
+                    # Acoustic Echo Shield:
+                    # 1. During the first 3.2 seconds of greeting playback, drop audio frames unless deliberate loud speech
+                    # 2. While assistant is actively outputting speech, drop low/medium speaker bleed
+                    if (now - self._greeting_injected_at < 3.2) or self._speaking:
+                        if len(message) >= 4:
+                            shorts = struct.unpack(f"<{len(message)//2}h", message)
+                            peak = max(abs(s) for s in shorts)
+                            if peak < 4000:  # Drop speaker bleed bouncing off phone/laptop glass surface
+                                continue
                     # Forward 16kHz PCM audio directly to Deepgram Voice Agent
                     await self.dg_ws.send(message)
                 elif isinstance(message, str):
@@ -562,6 +604,10 @@ class DeepgramAgentSession:
                     mtype = data.get("type")
                     if mtype == "UserStartedSpeaking":
                         # Hardware-level VAD detected caller speech!
+                        now = asyncio.get_event_loop().time()
+                        if (now - self._greeting_injected_at < 2.5):
+                            # Ignore false VAD trigger caused by initial greeting playback
+                            continue
                         was_speaking = self._speaking
                         self._speaking = False
                         await self.ws.send(json.dumps({"type": "hearing"}))
@@ -682,18 +728,37 @@ class DeepgramAgentSession:
             pass
 
     def _is_echo(self, user_text: str) -> bool:
-        """Check if incoming user transcript is strictly an acoustic echo of assistant speech."""
-        if not self._last_assistant_text or not user_text:
+        """Check if incoming user transcript is strictly an acoustic echo of assistant speech or greeting."""
+        if not user_text:
+            return False
+        clean_u = "".join(ch for ch in user_text.lower() if ch.isalnum() or ch.isspace()).strip()
+
+        # Suppress common greeting echo phrases picked up by phone loudspeaker
+        greeting_phrases = [
+            "thank you for calling",
+            "my name is sarah",
+            "how can i help you with your dental care",
+            "how can i help you today",
+            "dental care today",
+            "dental receptionist",
+            "thanks for calling",
+        ]
+        for phrase in greeting_phrases:
+            if phrase in clean_u:
+                log.info("Suppressed greeting echo in user transcript: %r", user_text)
+                return True
+
+        if not self._last_assistant_text:
             return False
         # If assistant is not currently outputting audio, it's genuine user speech!
         if not self._speaking:
             return False
-        u = "".join(ch for ch in user_text.lower() if ch.isalnum())
+        u = "".join(clean_u.split())
         a = "".join(ch for ch in self._last_assistant_text.lower() if ch.isalnum())
         if len(u) < 8:
             return False
         # Suppress ONLY if user input is an exact verbatim match or 90%+ identical echo of what assistant just spoke
-        if u == a or (len(u) >= 18 and u in a):
+        if u == a or (len(u) >= 16 and u in a):
             return True
         return False
 

@@ -342,14 +342,14 @@ export function VoicePage() {
       const proc = ctx.createScriptProcessor(2048, 1, 1);
       proc.onaudioprocess = (e) => {
         const f32 = e.inputBuffer.getChannelData(0);
-
-        // Acoustic Echo Shield: prevents laptop speaker playback from leaking into the built-in microphone
+        // Acoustic Echo Shield: When assistant is speaking out of laptop or phone speakers,
+        // mute mic transmission to prevent audio feedback loop and false self-interruptions.
         const now = performance.now();
-        const isSpeaking = voiceStateRef.current === "speaking";
+        const isSpeaking = voiceStateRef.current === "speaking" || voiceStateRef.current === "thinking";
         if (isSpeaking) {
           lastSpeakingTimeRef.current = now;
         }
-        const inCooldown = (now - lastSpeakingTimeRef.current) < 250;
+        const inCooldown = (now - lastSpeakingTimeRef.current) < 300;
 
         // Calculate RMS of incoming microphone audio
         let sumSquares = 0;
@@ -363,14 +363,15 @@ export function VoicePage() {
           setMicLevel(0);
         }
 
-        // If agent is speaking (or in 250ms room reverb decay), suppress speaker bleed (rms < 0.038)
-        if ((isSpeaking || inCooldown) && rms < 0.038) {
+        // If agent is speaking (or in room reverb cooldown):
+        // NEVER trigger barge-in on standard acoustic speaker reflection (such as on glass tables).
+        // Only trigger barge-in if the human is deliberately speaking loudly over the agent (rms > 0.30).
+        if (isSpeaking || inCooldown) {
+          if (voiceStateRef.current === "speaking" && rms > 0.30) {
+            interruptRef.current();
+          }
+          // Do not send speaker echo back to Deepgram while agent is talking
           return;
-        }
-
-        // If caller speaks over agent (rms >= 0.038), trigger instant barge-in!
-        if (isSpeaking && rms >= 0.038) {
-          interruptRef.current();
         }
 
         // Send 16kHz PCM audio continuously to Deepgram streaming recognizer
@@ -413,9 +414,9 @@ export function VoicePage() {
           const spoken = String(r[0]?.transcript ?? "").trim();
           if (!spoken) continue;
 
-          // Instant barge-in: If user speaks while agent is talking, stop agent immediately!
+          // Never allow browser STT to self-interrupt or echo assistant speech
           if (voiceStateRef.current === "speaking") {
-            interruptRef.current();
+            return;
           }
 
           if (r.isFinal) {
@@ -474,6 +475,19 @@ export function VoicePage() {
     }
     setStatus("connecting");
     pushLine("system", `connecting to ${WS_URL} …`);
+
+    try {
+      // Unlock AudioContext synchronously within user gesture (essential for mobile & laptop autoplay permissions)
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!playCtxRef.current) {
+        playCtxRef.current = new AudioContextClass();
+      }
+      if (playCtxRef.current.state === "suspended") {
+        await playCtxRef.current.resume();
+      }
+    } catch {
+      /* ignore */
+    }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -537,7 +551,7 @@ export function VoicePage() {
           setVoiceState((prev) => (prev === "listening" ? "thinking" : prev));
         } else if (type === "ready") {
           setStatus("live");
-          setVoiceState("listening");
+          setVoiceState("thinking");
           pushLine("system", `session ready · conversation ${(msg.conversationId as string)?.slice(0, 8)}…`);
           
           if (sttModeRef.current === "browser" && browserSttAvailable) {
@@ -562,11 +576,16 @@ export function VoicePage() {
           setVoiceState("listening");
           pushLine("system", "barge-in: patient speaking over front desk");
         } else if (type === "audio_start") {
+          // Immediately stop any lingering playback nodes so two responses never speak at the same time
+          for (const n of playNodesRef.current) {
+            try { n.onended = null; n.stop(); } catch { /* noop */ }
+          }
+          playNodesRef.current = [];
+          playNextRef.current = null;
           playTurnRef.current = (msg.turnId as string | undefined) ?? null;
           audioSeqRef.current = 0;
           playbackQueueRef.current.reset(Number(msg.sampleRate ?? 24000), playTurnRef.current);
           rateRef.current = Number(msg.sampleRate ?? 24000);
-          playNextRef.current = null;
           if (playEndTimerRef.current) window.clearTimeout(playEndTimerRef.current);
           playEndTimerRef.current = null;
           setVoiceState("speaking");
