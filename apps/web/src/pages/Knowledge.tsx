@@ -234,33 +234,37 @@ export function KnowledgePage() {
   return (
     <>
       <div className="page-head">
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontSize: 26, color: "#38bdf8" }}>🦷</span>
-          <div>
-            <h2>Dental Care Clinical Knowledge Base</h2>
-            <p>
-              Strictly grounded on dental care guidelines, clinical procedures,
-              in-network dental insurance, and practice policies. Only dental documents are indexed.
-            </p>
-          </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#000000", color: "#ffffff", border: "1px solid #000000", fontWeight: 700 }}>
+            <i className="fa-solid fa-tooth" style={{ marginRight: 4 }} /> Dental Knowledge Harness
+          </span>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#ffffff", color: "#000000", border: "1px solid #e4e4e7", fontWeight: 600 }}>
+            <span className="ws-dot" style={{ display: "inline-block", marginRight: 6 }} /> pgvector Embeddings Active
+          </span>
         </div>
+        <h2>Dental Care Clinical Knowledge Base</h2>
+        <p>
+          Strictly grounded on dental care guidelines, clinical procedures,
+          in-network dental insurance, and practice policies. Only dental documents are indexed.
+        </p>
       </div>
 
       <div className="dental-notice-bar" style={{
-        background: "rgba(14, 165, 233, 0.08)",
-        border: "1px solid rgba(56, 189, 248, 0.25)",
-        borderRadius: 14,
-        padding: "12px 18px",
-        marginBottom: 18,
+        background: "#ffffff",
+        border: "1px solid #e4e4e7",
+        borderRadius: 16,
+        padding: "14px 20px",
+        marginBottom: 20,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
         gap: 12,
-        flexWrap: "wrap"
+        flexWrap: "wrap",
+        boxShadow: "var(--shadow-sm)"
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <i className="fa-solid fa-shield-halved" style={{ color: "#38bdf8", fontSize: 16 }} />
-          <span style={{ fontSize: 13, color: "#e2e8f0" }}>
+          <i className="fa-solid fa-shield-halved" style={{ color: "#000000", fontSize: 16 }} />
+          <span style={{ fontSize: 13, color: "#18181b" }}>
             <strong>Dental Care Domain Filter Active:</strong> Only dental procedures, insurance coverage, oral hygiene, and clinic operating policies are indexed to guarantee 100% accurate patient communication.
           </span>
         </div>
@@ -291,8 +295,8 @@ export function KnowledgePage() {
           </div>
           
           <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#94a3b8", marginBottom: 6 }}>
-              Quick Dental Clinical Templates:
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "#71717a", fontWeight: 700, marginBottom: 8 }}>
+              Quick Clinical Dental Templates:
             </div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <button
@@ -439,7 +443,7 @@ export function KnowledgePage() {
                 <tr key={d.id}>
                   <td>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ color: "#38bdf8" }}>🦷</span>
+                      <span style={{ fontSize: 16 }}>🦷</span>
                       <strong>{d.title}</strong>
                     </div>
                   </td>

@@ -113,8 +113,16 @@ export function ConversationsPage() {
   return (
     <>
       <div className="page-head">
-        <h2>Conversations</h2>
-        <p>Live turn pipeline: decision → pgvector retrieval → context → LLM → harness verdict → persist.</p>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#000000", color: "#ffffff", border: "1px solid #000000", fontWeight: 700 }}>
+            <i className="fa-solid fa-phone-volume" style={{ marginRight: 4 }} /> Patient Call Transcripts
+          </span>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#ffffff", color: "#000000", border: "1px solid #e4e4e7", fontWeight: 600 }}>
+            <span className="ws-dot" style={{ display: "inline-block", marginRight: 6 }} /> Clinical RAG Turn Tracing
+          </span>
+        </div>
+        <h2>Patient Inquiries &amp; Call Logs</h2>
+        <p>Live turn pipeline: patient inquiry → clinical pgvector retrieval → context harness → Sarah LLM voice stream → appointment booking.</p>
       </div>
 
       <div className="split">

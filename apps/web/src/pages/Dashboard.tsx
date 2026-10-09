@@ -59,7 +59,12 @@ export function DashboardPage() {
     <>
       <div className="hero">
         <div>
-          <h3>{ws?.name || "Dental Care Practice"} · 24/7 Virtual Front Desk</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.14em", fontWeight: 800, background: "rgba(255, 255, 255, 0.15)", padding: "4px 12px", borderRadius: 9999 }}>
+              Virtual Front Desk Operations
+            </span>
+          </div>
+          <h3>{ws?.name || "Dental Health"} · Practice Overview</h3>
           <p>
             Grounding dental patient communications in verified clinical procedures,
             in-network dental insurance policies, and office protocols. Every response is verified through
@@ -78,32 +83,44 @@ export function DashboardPage() {
             <span className="pipe-arrow">→</span>
             <span className="pipe-step">Aura Voice</span>
           </div>
-          <Link className="btn btn-primary" to="/voice">
+          <Link className="btn btn-primary" to="/voice" style={{ background: "#ffffff", color: "#000000" }}>
             <i className="fa-solid fa-microphone" /> Speak with Sarah (AI Receptionist)
           </Link>
         </div>
       </div>
 
-      <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <div className="card">
-          <div className="stat-value">{stats ? stats.agents : "—"}</div>
-          <div className="stat-label">Agents</div>
-          <div className="stat-delta"><Link to="/agents">configure →</Link></div>
+      <div className="grid grid-4" style={{ marginBottom: 20 }}>
+        <div className="card" style={{ position: "relative" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div className="stat-value">{stats ? stats.agents : "—"}</div>
+            <span style={{ width: 26, height: 26, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, color: "#000000" }}>01</span>
+          </div>
+          <div className="stat-label">AI Receptionists</div>
+          <div className="stat-delta"><Link to="/agents" style={{ color: "#000000", fontWeight: 700, textDecoration: "underline" }}>configure →</Link></div>
         </div>
-        <div className="card">
-          <div className="stat-value">{stats ? stats.documents : "—"}</div>
-          <div className="stat-label">Documents</div>
-          <div className="stat-delta"><Link to="/knowledge">ingest →</Link></div>
+        <div className="card" style={{ position: "relative" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div className="stat-value">{stats ? stats.documents : "—"}</div>
+            <span style={{ width: 26, height: 26, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, color: "#000000" }}>02</span>
+          </div>
+          <div className="stat-label">Clinical Documents</div>
+          <div className="stat-delta"><Link to="/knowledge" style={{ color: "#000000", fontWeight: 700, textDecoration: "underline" }}>ingest →</Link></div>
         </div>
-        <div className="card">
-          <div className="stat-value">{stats ? stats.chunks : "—"}</div>
-          <div className="stat-label">Vector chunks</div>
-          <div className="stat-delta">pgvector · cosine</div>
+        <div className="card" style={{ position: "relative" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div className="stat-value">{stats ? stats.chunks : "—"}</div>
+            <span style={{ width: 26, height: 26, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, color: "#000000" }}>03</span>
+          </div>
+          <div className="stat-label">Vector Knowledge Chunks</div>
+          <div className="stat-delta" style={{ color: "#71717a" }}>pgvector · cosine</div>
         </div>
-        <div className="card">
-          <div className="stat-value">{stats ? stats.conversations : "—"}</div>
-          <div className="stat-label">Conversations</div>
-          <div className="stat-delta"><Link to="/conversations">open console →</Link></div>
+        <div className="card" style={{ position: "relative" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div className="stat-value">{stats ? stats.conversations : "—"}</div>
+            <span style={{ width: 26, height: 26, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, color: "#000000" }}>04</span>
+          </div>
+          <div className="stat-label">Patient Calls</div>
+          <div className="stat-delta"><Link to="/conversations" style={{ color: "#000000", fontWeight: 700, textDecoration: "underline" }}>transcripts →</Link></div>
         </div>
       </div>
 

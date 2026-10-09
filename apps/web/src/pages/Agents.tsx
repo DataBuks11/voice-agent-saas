@@ -93,8 +93,16 @@ export function AgentsPage() {
   return (
     <>
       <div className="page-head">
-        <h2>Agents</h2>
-        <p>Tenant-scoped agent configs: language, tone, system prompt and fallback policy.</p>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#000000", color: "#ffffff", border: "1px solid #000000", fontWeight: 700 }}>
+            <i className="fa-solid fa-user-doctor" style={{ marginRight: 4 }} /> AI Front Desk Receptionist
+          </span>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#ffffff", color: "#000000", border: "1px solid #e4e4e7", fontWeight: 600 }}>
+            <span className="ws-dot" style={{ display: "inline-block", marginRight: 6 }} /> Native American Voice AI
+          </span>
+        </div>
+        <h2>AI Receptionist Personality &amp; Protocols</h2>
+        <p>Tenant-scoped voice agent configuration: clinical dental persona, bedside manner, appointment booking prompts, and practice fallback protocols.</p>
       </div>
 
       <div className="split">
@@ -123,7 +131,7 @@ export function AgentsPage() {
               </thead>
               <tbody>
                 {items.map((a) => (
-                  <tr key={a.id} style={editingId === a.id ? { background: "rgba(255, 255, 255, 0.05)" } : undefined}>
+                  <tr key={a.id} style={editingId === a.id ? { background: "#f4f4f5" } : undefined}>
                     <td>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <strong>{a.name}</strong>

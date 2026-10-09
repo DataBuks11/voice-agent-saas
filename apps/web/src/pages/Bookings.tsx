@@ -44,10 +44,17 @@ export function BookingsPage() {
   return (
     <>
       <div className="page-head">
-        <h2>Bookings</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#000000", color: "#ffffff", border: "1px solid #000000", fontWeight: 700 }}>
+            <i className="fa-solid fa-tooth" style={{ marginRight: 4 }} /> Front Desk Calendar
+          </span>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#ffffff", color: "#000000", border: "1px solid #e4e4e7", fontWeight: 600 }}>
+            <span className="ws-dot" style={{ display: "inline-block", marginRight: 6 }} /> Real-time Patient Ingestion
+          </span>
+        </div>
+        <h2>Patient Appointments &amp; Triage Records</h2>
         <p>
-          Every appointment the agent booked, with the details it captured while talking — including the ones
-          the caller could not provide (shown as <em>not available</em>).
+          Live dental appointment scheduling stream. Captures patient symptoms (toothaches, cleanings, cosmetic veneers), contact details, and dental insurance in real-time.
         </p>
       </div>
 

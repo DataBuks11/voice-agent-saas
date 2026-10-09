@@ -30,23 +30,36 @@ const LOGO = `${import.meta.env.BASE_URL}logo.webp`;
 const BG_VIDEO =
   "https://d8j0ntlcm91z4.cloudfront.net/user_38xzZboKViGWJOttwIXH07lWA1P/hf_20260809_012548_ef22562c-c0ae-4816-ad9d-f8922af4e6a7.mp4";
 
-export function BrandLogo({ size = 38 }: { size?: number }) {
+export function BrandLogo() {
   return (
-    <div
-      className="brand-logo"
-      style={{
-        width: size,
-        height: size,
-        background: "linear-gradient(135deg, #0284c7 0%, #00b4d8 50%, #06d6a0 100%)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: "12px",
-        boxShadow: "0 0 16px rgba(0, 180, 216, 0.4)",
-      }}
-    >
-      <i className="fa-solid fa-tooth" style={{ color: "#ffffff", fontSize: size * 0.52 }} />
-    </div>
+    <a href="/" style={{ textDecoration: "none", color: "inherit", display: "flex", alignItems: "center", gap: 10 }}>
+      <div
+        style={{
+          width: 38,
+          height: 38,
+          borderRadius: "50%",
+          background: "#000000",
+          color: "#ffffff",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: "0 4px 12px rgba(0, 0, 0, 0.15)",
+        }}
+      >
+        <i className="fa-solid fa-tooth" style={{ color: "#ffffff", fontSize: 17 }} />
+      </div>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        <span style={{ fontSize: 15, fontWeight: 900, textTransform: "uppercase", letterSpacing: "-0.03em", lineHeight: 0.95, color: "#000000" }}>
+          Dental
+        </span>
+        <span style={{ fontSize: 15, fontWeight: 900, textTransform: "uppercase", letterSpacing: "-0.03em", lineHeight: 0.95, color: "#000000", marginTop: 2 }}>
+          Health
+        </span>
+        <span style={{ fontSize: 8, fontWeight: 700, letterSpacing: "0.06em", color: "#71717a", marginTop: 3 }}>
+          QUALITY HEALTHCARE
+        </span>
+      </div>
+    </a>
   );
 }
 
@@ -89,7 +102,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/overview", label: "Clinic Overview", ico: "fa-solid fa-house-medical" },
     { to: "/conversations", label: "Call Transcripts", ico: "fa-solid fa-phone-volume" },
   ];
-  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "DataBuks Dental Voice AI";
+  const title = nav.find((n) => n.to === loc.pathname)?.label ?? "Dental Health Voice AI";
 
   return (
     <ToastCtx.Provider value={push}>
@@ -97,19 +110,15 @@ function Shell({ children }: { children: React.ReactNode }) {
       <div className={`app${menuOpen ? " menu-open" : ""}`}>
         <div className="menu-scrim" onClick={() => setMenuOpen(false)} />
         <aside className="sidebar">
-          <div className="brand">
+          <div className="brand" style={{ padding: "4px 4px 16px" }}>
             <BrandLogo />
-            <div>
-              <div className="brand-name">DataBuks</div>
-              <div className="brand-sub">Dental Voice AI · Front Desk</div>
-            </div>
           </div>
           <div className="nav-section">Practice Console</div>
           {nav.map((n) => (
             <NavLink
               key={n.to}
               to={n.to}
-              end={n.to === "/"}
+              end={n.to === "/overview"}
               className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}
             >
               <span className="ico"><i className={n.ico} /></span>
@@ -133,8 +142,8 @@ function Shell({ children }: { children: React.ReactNode }) {
               <span className="ws-dot" />
               <span>{ws?.name ?? "Dental Care Practice"}</span>
             </div>
-            <div className="brand-sub mono" style={{ marginTop: 6 }}>
-              {user?.email ?? ""}
+            <div className="brand-sub mono" style={{ marginTop: 2 }}>
+              {user?.email ?? "guest@dentalcare.com"}
             </div>
             <button
               className="link-btn"
@@ -142,7 +151,8 @@ function Shell({ children }: { children: React.ReactNode }) {
                 location.reload();
               }}
             >
-              Restart session
+              <i className="fa-solid fa-rotate" style={{ fontSize: 11 }} />
+              <span>Restart session</span>
             </button>
           </div>
         </aside>
@@ -160,14 +170,18 @@ function Shell({ children }: { children: React.ReactNode }) {
               <h1>{title}</h1>
             </div>
             <div className="topbar-right">
+              <a href="/" className="topbar-landing-link" title="Return to Dental Health Clinic Landing Page">
+                <i className="fa-solid fa-arrow-left" style={{ fontSize: 10 }} />
+                <span>Clinic Landing</span>
+              </a>
               <div className="topbar-clinic-banner">
                 <span className="clinic-pill"><i className="fa-solid fa-shield-halved" /> Delta Dental &amp; PPO</span>
                 <span className="clinic-pill"><i className="fa-solid fa-bolt" /> Sub-400ms Turnaround</span>
               </div>
               <span className={`badge ${health === "up" ? "ok" : health === "down" ? "danger" : "muted"}`}>
-                {health === "checking" ? "checking…" : health === "up" ? "front desk online" : "front desk offline"}
+                <span className="ws-dot" />
+                {health === "checking" ? "checking…" : health === "up" ? "Front Desk Online" : "Front Desk Offline"}
               </span>
-              <span className="badge muted">Direct Test Mode</span>
             </div>
           </header>
           <main className="content">{children}</main>

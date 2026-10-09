@@ -617,11 +617,13 @@ export function VoicePage() {
   return (
     <>
       <div className="page-head">
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-          <span className="badge info" style={{ fontSize: 12, padding: "3px 10px", background: "rgba(0, 180, 216, 0.15)", border: "1px solid rgba(0, 180, 216, 0.3)" }}>
-            <i className="fa-solid fa-tooth" /> 24/7 Virtual Dental Front Desk
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#000000", color: "#ffffff", border: "1px solid #000000", fontWeight: 700 }}>
+            <i className="fa-solid fa-tooth" style={{ marginRight: 4 }} /> 24/7 Virtual Dental Front Desk
           </span>
-          <span className="badge" style={{ fontSize: 11 }}>AI Appointment Booking &amp; Triage</span>
+          <span className="badge" style={{ fontSize: 11, padding: "5px 14px", background: "#ffffff", color: "#000000", border: "1px solid #e4e4e7", fontWeight: 600 }}>
+            <span className="ws-dot" style={{ display: "inline-block", marginRight: 6 }} /> Instant Patient Triage &amp; Booking
+          </span>
         </div>
         <h2>Dental Care Voice Receptionist</h2>
         <p>
@@ -764,37 +766,54 @@ export function VoicePage() {
         </div>
 
         <div className="card">
-          <div className="card-title" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <i className="fa-solid fa-tooth" style={{ color: "var(--accent)" }} />
-            Dental Practice Clinical Information
+          <div className="card-title" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 8, color: "#000000", fontWeight: 800, fontSize: 13, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              <i className="fa-solid fa-tooth" /> Clinical Front Desk Protocol
+            </span>
+            <span className="badge ok" style={{ fontSize: 10, padding: "3px 10px" }}>Verified</span>
           </div>
           <div className="trace">
-            <div className="trace-item">
-              <div className="k">Practice Front Desk Persona</div>
+            <div className="trace-item" style={{ background: "#ffffff", border: "1px solid #e4e4e7" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span className="k" style={{ margin: 0, color: "#000000", fontWeight: 800 }}>Front Desk Persona</span>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#000000" }}>01</span>
+              </div>
               <div className="v">
                 <strong>Sarah</strong> — Professional Dental Receptionist trained in clinical dental terminology, empathetic patient bedside manner, emergency toothache triage, and calendar scheduling.
               </div>
             </div>
-            <div className="trace-item">
-              <div className="k">Clinical Services Supported</div>
+            <div className="trace-item" style={{ background: "#ffffff", border: "1px solid #e4e4e7" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span className="k" style={{ margin: 0, color: "#000000", fontWeight: 800 }}>Clinical Services Supported</span>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#000000" }}>02</span>
+              </div>
               <div className="v">
                 Comprehensive exams &amp; digital X-rays · Gentle ultrasonic cleanings &amp; deep scaling · Tooth-colored composite fillings · Custom porcelain crowns &amp; bridges · Dental implants · Gentle root canals · Invisalign® &amp; cosmetic teeth whitening.
               </div>
             </div>
-            <div className="trace-item">
-              <div className="k">Emergency Dental Care Protocol</div>
+            <div className="trace-item" style={{ background: "#ffffff", border: "1px solid #e4e4e7" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span className="k" style={{ margin: 0, color: "#000000", fontWeight: 800 }}>Emergency Care Protocol</span>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#000000" }}>03</span>
+              </div>
               <div className="v">
                 Priority scheduling for acute dental pain, chipped or broken teeth, knocked-out teeth, lost crowns, facial swelling, or dental abscesses. Same-day emergency appointment booking.
               </div>
             </div>
-            <div className="trace-item">
-              <div className="k">In-Network Dental Insurances &amp; Financing</div>
+            <div className="trace-item" style={{ background: "#ffffff", border: "1px solid #e4e4e7" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span className="k" style={{ margin: 0, color: "#000000", fontWeight: 800 }}>In-Network Insurance &amp; Financing</span>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#000000" }}>04</span>
+              </div>
               <div className="v">
                 Compatible with leading PPO dental insurance providers: Delta Dental, MetLife, Cigna, Aetna, Guardian, United Healthcare, and Ameritas. Flexible 0% interest patient financing through CareCredit and transparent self-pay fee schedules.
               </div>
             </div>
-            <div className="trace-item">
-              <div className="k">Clinic Operating Hours</div>
+            <div className="trace-item" style={{ background: "#ffffff", border: "1px solid #e4e4e7" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span className="k" style={{ margin: 0, color: "#000000", fontWeight: 800 }}>Clinic Operating Hours</span>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#000000" }}>05</span>
+              </div>
               <div className="v">
                 <strong>Monday – Friday:</strong> 9:00 AM – 6:00 PM<br />
                 <strong>Saturday:</strong> 9:00 AM – 2:00 PM<br />
@@ -802,8 +821,11 @@ export function VoicePage() {
                 <strong>24/7 Virtual Front Desk:</strong> Round-the-clock call answering and automated scheduling with Sarah.
               </div>
             </div>
-            <div className="trace-item">
-              <div className="k">Patient Booking Flow</div>
+            <div className="trace-item" style={{ background: "#ffffff", border: "1px solid #e4e4e7" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span className="k" style={{ margin: 0, color: "#000000", fontWeight: 800 }}>Patient Booking Flow</span>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid #000000", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, color: "#000000" }}>06</span>
+              </div>
               <div className="v">
                 Captures patient name, visit reason, date/time preference, callback phone, and insurance provider. One-time spelling confirmation with zero repetitive prompts.
               </div>
