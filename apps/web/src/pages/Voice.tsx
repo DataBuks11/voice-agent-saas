@@ -95,6 +95,9 @@ export function VoicePage() {
 
   const sendPromptText = (promptText: string) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      if (voiceStateRef.current === "speaking") {
+        interruptRef.current();
+      }
       wsRef.current.send(JSON.stringify({ type: "text", text: promptText }));
       pushLine("user", promptText);
       setVoiceState("thinking");
@@ -377,15 +380,25 @@ export function VoicePage() {
           setMicLevel(0);
         }
 
-        // If assistant is actively speaking (or during 200ms room reverb cooldown):
-        // Mute mic to prevent speaker audio from looping into Deepgram.
-        // Only trigger barge-in if the human is deliberately speaking loudly over the agent (rms > 0.30).
-        if (isSpeaking || inCooldown) {
-          if (isSpeaking && rms > 0.30) {
+        // Natural Conversational Barge-In:
+        // When assistant is speaking, if the caller starts speaking (normal human voice rms >= 0.028),
+        // instantly interrupt the agent:
+        // 1. Immediately cut off local speaker playback so Sarah stops speaking instantly.
+        // 2. Set voice state to "listening".
+        // 3. DO NOT drop the audio — stream it immediately to Deepgram so Sarah hears the user's interruption!
+        if (isSpeaking) {
+          if (rms >= 0.028) {
             interruptRef.current();
+            // Proceed to send the audio frame so Deepgram captures the words immediately!
+          } else {
+            // Drop low-level speaker bleed or room silence while agent is talking
+            return;
           }
-          // Do not send speaker echo back to Deepgram while agent is talking
-          return;
+        } else if (inCooldown) {
+          // 200ms room reverb cooldown: drop only if silence/residual echo
+          if (rms < 0.028) {
+            return;
+          }
         }
 
         // Send 16kHz PCM audio continuously to Deepgram streaming recognizer
@@ -428,9 +441,9 @@ export function VoicePage() {
           const spoken = String(r[0]?.transcript ?? "").trim();
           if (!spoken) continue;
 
-          // Never allow browser STT to self-interrupt or echo assistant speech
+          // If speaking, interrupt assistant playback immediately so caller can speak
           if (voiceStateRef.current === "speaking") {
-            return;
+            interruptRef.current();
           }
 
           if (r.isFinal) {

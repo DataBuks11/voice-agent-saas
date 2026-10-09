@@ -281,6 +281,7 @@ class DeepgramAgentSession:
         self.greeting = "Hello, thanks for calling! How can I help you today?"
         self.closed = False
         self._speaking = False
+        self._interrupted = False
         self._last_assistant_text = ""
         self._greeting_injected_at = 0.0
         self._tasks: list[asyncio.Task] = []
@@ -559,15 +560,26 @@ class DeepgramAgentSession:
                     break
                 if isinstance(message, bytes):
                     now = asyncio.get_event_loop().time()
+                    # If caller has interrupted, immediately stream all speech frames directly to Deepgram!
+                    if self._interrupted:
+                        await self.dg_ws.send(message)
+                        continue
+
                     # Acoustic Echo Shield:
-                    # 1. During the full greeting playback (~4.8s), drop audio frames unless deliberate loud speech
-                    # 2. While assistant is actively outputting speech, drop low/medium speaker bleed
-                    if (now - self._greeting_injected_at < 4.8) or self._speaking:
+                    # While assistant is actively outputting speech, drop low ambient room noise (peak < 1000)
+                    if (now - self._greeting_injected_at < 3.5) or self._speaking:
                         if len(message) >= 4:
                             shorts = struct.unpack(f"<{len(message)//2}h", message)
                             peak = max(abs(s) for s in shorts)
-                            if peak < 3500:  # Drop speaker bleed bouncing off phone/laptop glass surface
+                            if peak < 1000:
                                 continue
+                            else:
+                                # Genuine caller speech detected over assistant! Trigger barge-in immediately
+                                if self._speaking:
+                                    self._speaking = False
+                                    self._interrupted = True
+                                    await self.ws.send(json.dumps({"type": "interrupted"}))
+
                     # Forward 16kHz PCM audio directly to Deepgram Voice Agent
                     await self.dg_ws.send(message)
                 elif isinstance(message, str):
@@ -583,15 +595,16 @@ class DeepgramAgentSession:
                                 if self._is_echo(text):
                                     log.info("Ignored self-echo text turn: %r", text)
                                     continue
+                                self._speaking = False
+                                self._interrupted = True
                                 await self.dg_ws.send(
                                     json.dumps({"type": "InjectUserMessage", "content": text})
                                 )
                         elif mtype == "interrupt":
-                            # Client explicitly clicked Interrupt button or detected local speech
-                            was_speaking = self._speaking
+                            # Client explicitly interrupted agent (clicked button, spacebar, or voice barge-in)
                             self._speaking = False
-                            if was_speaking:
-                                await self.ws.send(json.dumps({"type": "interrupted"}))
+                            self._interrupted = True
+                            await self.ws.send(json.dumps({"type": "interrupted"}))
                         elif mtype == "ping":
                             await self.ws.send(json.dumps({"type": "pong"}))
                     except Exception:
@@ -605,6 +618,9 @@ class DeepgramAgentSession:
             while not self.closed and self.dg_ws:
                 msg = await self.dg_ws.recv()
                 if isinstance(msg, bytes):
+                    # If this turn was interrupted by caller, DISCARD leftover TTS audio!
+                    if self._interrupted:
+                        continue
                     # Outgoing 24kHz PCM audio from Aura TTS
                     if not self._speaking:
                         self._speaking = True
@@ -615,18 +631,14 @@ class DeepgramAgentSession:
                     mtype = data.get("type")
                     if mtype == "UserStartedSpeaking":
                         # Hardware-level VAD detected caller speech!
-                        now = asyncio.get_event_loop().time()
-                        if (now - self._greeting_injected_at < 4.2):
-                            # Ignore false VAD trigger caused by initial greeting playback
-                            continue
-                        was_speaking = self._speaking
+                        self._interrupted = True
                         self._speaking = False
                         await self.ws.send(json.dumps({"type": "hearing"}))
-                        # ONLY send interrupted to the client if the agent was actually speaking!
-                        if was_speaking:
-                            await self.ws.send(json.dumps({"type": "interrupted"}))
+                        await self.ws.send(json.dumps({"type": "interrupted"}))
                     elif mtype == "ConversationText":
                         role = data.get("role")
+                        if role == "user":
+                            self._interrupted = False
                         content = str(data.get("content") or "").strip()
                         if content:
                             if role == "assistant":
@@ -641,6 +653,7 @@ class DeepgramAgentSession:
                                 self._save_message_async("user", content)
                     elif mtype == "AgentAudioDone":
                         self._speaking = False
+                        self._interrupted = False
                         await self.ws.send(json.dumps({"type": "audio_end"}))
                     elif mtype == "FunctionCallRequest":
                         # Handle tool calling
