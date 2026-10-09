@@ -380,23 +380,22 @@ export function VoicePage() {
           setMicLevel(0);
         }
 
-        // Natural Conversational Barge-In:
-        // When assistant is speaking, if the caller starts speaking (normal human voice rms >= 0.028),
-        // instantly interrupt the agent:
-        // 1. Immediately cut off local speaker playback so Sarah stops speaking instantly.
-        // 2. Set voice state to "listening".
-        // 3. DO NOT drop the audio — stream it immediately to Deepgram so Sarah hears the user's interruption!
+        // Acoustic Echo Shield & Intentional Barge-In:
+        // When assistant is actively speaking, device speakers are outputting sound into the room.
+        // Speaker bleed picked up by laptop/phone mic typically has rms between 0.02 and 0.06.
+        // To prevent Sarah from cutting herself off mid-sentence:
+        // 1. Only trigger voice barge-in if the caller deliberately speaks loudly over the agent (rms >= 0.14).
+        // 2. Caller can also tap the glowing Orb, click "Interrupt", press Spacebar, or click any prompt.
+        // 3. Otherwise, pause mic transmission while assistant is talking so her voice plays completely without cutting off!
         if (isSpeaking) {
-          if (rms >= 0.028) {
+          if (rms >= 0.14) {
             interruptRef.current();
-            // Proceed to send the audio frame so Deepgram captures the words immediately!
           } else {
-            // Drop low-level speaker bleed or room silence while agent is talking
             return;
           }
         } else if (inCooldown) {
-          // 200ms room reverb cooldown: drop only if silence/residual echo
-          if (rms < 0.028) {
+          // 200ms room reverb cooldown: drop residual room echo
+          if (rms < 0.04) {
             return;
           }
         }

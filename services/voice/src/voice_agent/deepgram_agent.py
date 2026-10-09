@@ -560,25 +560,16 @@ class DeepgramAgentSession:
                     break
                 if isinstance(message, bytes):
                     now = asyncio.get_event_loop().time()
-                    # If caller has interrupted, immediately stream all speech frames directly to Deepgram!
+                    # If caller has explicitly interrupted, stream speech frames directly to Deepgram!
                     if self._interrupted:
                         await self.dg_ws.send(message)
                         continue
 
                     # Acoustic Echo Shield:
-                    # While assistant is actively outputting speech, drop low ambient room noise (peak < 1000)
-                    if (now - self._greeting_injected_at < 3.5) or self._speaking:
-                        if len(message) >= 4:
-                            shorts = struct.unpack(f"<{len(message)//2}h", message)
-                            peak = max(abs(s) for s in shorts)
-                            if peak < 1000:
-                                continue
-                            else:
-                                # Genuine caller speech detected over assistant! Trigger barge-in immediately
-                                if self._speaking:
-                                    self._speaking = False
-                                    self._interrupted = True
-                                    await self.ws.send(json.dumps({"type": "interrupted"}))
+                    # While assistant is actively outputting speech or during initial greeting (~4s),
+                    # do not loop speaker audio back to Deepgram Nova-3 to prevent self-interruption.
+                    if (now - self._greeting_injected_at < 4.0) or self._speaking:
+                        continue
 
                     # Forward 16kHz PCM audio directly to Deepgram Voice Agent
                     await self.dg_ws.send(message)
@@ -601,7 +592,7 @@ class DeepgramAgentSession:
                                     json.dumps({"type": "InjectUserMessage", "content": text})
                                 )
                         elif mtype == "interrupt":
-                            # Client explicitly interrupted agent (clicked button, spacebar, or voice barge-in)
+                            # Client explicitly interrupted agent (clicked button, spacebar, or deliberate barge-in)
                             self._speaking = False
                             self._interrupted = True
                             await self.ws.send(json.dumps({"type": "interrupted"}))
@@ -618,7 +609,7 @@ class DeepgramAgentSession:
             while not self.closed and self.dg_ws:
                 msg = await self.dg_ws.recv()
                 if isinstance(msg, bytes):
-                    # If this turn was interrupted by caller, DISCARD leftover TTS audio!
+                    # If this turn was explicitly interrupted by caller, discard leftover TTS audio
                     if self._interrupted:
                         continue
                     # Outgoing 24kHz PCM audio from Aura TTS
@@ -630,11 +621,12 @@ class DeepgramAgentSession:
                     data = json.loads(msg)
                     mtype = data.get("type")
                     if mtype == "UserStartedSpeaking":
-                        # Hardware-level VAD detected caller speech!
-                        self._interrupted = True
-                        self._speaking = False
+                        # Hardware-level VAD detected genuine caller speech when agent is listening!
+                        now = asyncio.get_event_loop().time()
+                        if (now - self._greeting_injected_at < 4.0) or self._speaking:
+                            # Do not self-interrupt on speaker audio bleed!
+                            continue
                         await self.ws.send(json.dumps({"type": "hearing"}))
-                        await self.ws.send(json.dumps({"type": "interrupted"}))
                     elif mtype == "ConversationText":
                         role = data.get("role")
                         if role == "user":
@@ -642,6 +634,7 @@ class DeepgramAgentSession:
                         content = str(data.get("content") or "").strip()
                         if content:
                             if role == "assistant":
+                                self._interrupted = False
                                 self._last_assistant_text = content
                                 await self.ws.send(json.dumps({"type": "assistant", "text": content}))
                                 self._save_message_async("assistant", content)
