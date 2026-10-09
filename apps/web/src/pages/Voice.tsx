@@ -103,8 +103,8 @@ export function VoicePage() {
     }
   };
 
-  // Ordered assistant audio queue (2048 bytes = 42ms block size for ultra-low latency onset)
-  const playbackQueueRef = React.useRef(new PlaybackQueue(2048));
+  // Ordered assistant audio queue (4096 bytes = 85ms block size for silky smooth jitter-free playback)
+  const playbackQueueRef = React.useRef(new PlaybackQueue(4096));
   const audioSeqRef = React.useRef(0);
   const playTurnRef = React.useRef<string | null>(null);
 
@@ -283,7 +283,9 @@ export function VoicePage() {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         const ctx = playCtxRef.current ?? new AudioContextClass();
         playCtxRef.current = ctx;
-        void ctx.resume();
+        if (ctx.state === "suspended") {
+          void ctx.resume();
+        }
         const samples = new Int16Array(pcm.buffer, pcm.byteOffset, pcm.byteLength / 2);
         const buffer = ctx.createBuffer(1, samples.length, rate);
         const ch = buffer.getChannelData(0);
@@ -292,10 +294,20 @@ export function VoicePage() {
         node.buffer = buffer;
         node.connect(ctx.destination);
         const now = ctx.currentTime;
-        if (playNextRef.current == null || playNextRef.current < now) playNextRef.current = now + 0.01;
+        if (playNextRef.current == null) {
+          // 120ms lead-time jitter buffer guarantees continuous seamless playback over WiFi/cellular networks
+          playNextRef.current = now + 0.12;
+        } else if (playNextRef.current < now) {
+          // Immediate zero-gap resume on network packet delay
+          playNextRef.current = now;
+        }
         node.start(playNextRef.current);
         playNextRef.current += buffer.duration;
         playNodesRef.current.push(node);
+        node.onended = () => {
+          const idx = playNodesRef.current.indexOf(node);
+          if (idx !== -1) playNodesRef.current.splice(idx, 1);
+        };
         if (final) schedulePlayEnd((playNextRef.current - ctx.currentTime) * 1000 + 100);
       } catch (err) {
         pushLine("system", `playback failed: ${(err as Error).message}`);
