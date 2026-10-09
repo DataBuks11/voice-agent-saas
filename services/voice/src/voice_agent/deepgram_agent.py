@@ -303,14 +303,26 @@ class DeepgramAgentSession:
 
             client_task = asyncio.create_task(self._client_to_deepgram())
             dg_task = asyncio.create_task(self._deepgram_to_client())
-            self._tasks = [client_task, dg_task]
-            done, pending = await asyncio.wait(self._tasks, return_when=asyncio.FIRST_COMPLETED)
-            for t in pending:
+            ka_task = asyncio.create_task(self._deepgram_keepalive())
+            self._tasks = [client_task, dg_task, ka_task]
+            done, pending = await asyncio.wait([client_task, dg_task], return_when=asyncio.FIRST_COMPLETED)
+            for t in self._tasks:
                 t.cancel()
         except Exception:
             log.exception("Deepgram session loop error")
         finally:
             await self.close()
+
+    async def _deepgram_keepalive(self) -> None:
+        """Keep Deepgram WebSocket alive every 3.5 seconds to prevent the 10-second idle disconnect."""
+        try:
+            while not self.closed and self.dg_ws:
+                await asyncio.sleep(3.5)
+                if self.closed or not self.dg_ws:
+                    break
+                await self.dg_ws.send(json.dumps({"type": "KeepAlive"}))
+        except Exception:
+            pass
 
     async def _handle_start(self, msg: dict) -> None:
         self.token = msg.get("token") or ""
@@ -600,8 +612,8 @@ class DeepgramAgentSession:
                             await self.ws.send(json.dumps({"type": "pong"}))
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as exc:
+            log.info("_client_to_deepgram loop ended: %s", exc)
 
     async def _deepgram_to_client(self) -> None:
         """Receive audio streams, transcripts, barge-in, and tool calls from Deepgram."""
@@ -623,10 +635,15 @@ class DeepgramAgentSession:
                     if mtype == "UserStartedSpeaking":
                         # Hardware-level VAD detected genuine caller speech when agent is listening!
                         now = asyncio.get_event_loop().time()
-                        if (now - self._greeting_injected_at < 4.0) or self._speaking:
-                            # Do not self-interrupt on speaker audio bleed!
+                        if (now - self._greeting_injected_at < 3.0):
                             continue
-                        await self.ws.send(json.dumps({"type": "hearing"}))
+                        if self._speaking:
+                            log.info("Deepgram UserStartedSpeaking during speech -> barge-in triggered")
+                            self._speaking = False
+                            self._interrupted = True
+                            await self.ws.send(json.dumps({"type": "interrupted"}))
+                        else:
+                            await self.ws.send(json.dumps({"type": "hearing"}))
                     elif mtype == "ConversationText":
                         role = data.get("role")
                         if role == "user":
@@ -702,8 +719,8 @@ class DeepgramAgentSession:
                                     "content": result,
                                 }
                                 await self.dg_ws.send(json.dumps(resp))
-        except Exception:
-            pass
+        except Exception as exc:
+            log.info("_deepgram_to_client loop ended: %s", exc)
 
     def _save_booking_async(self, customer_name: str, starts_at: str, notes: str, contact: str = "") -> None:
         if not SB_URL or not SB_KEY or not self.workspace_id:

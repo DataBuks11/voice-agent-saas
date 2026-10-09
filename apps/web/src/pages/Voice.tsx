@@ -382,13 +382,13 @@ export function VoicePage() {
 
         // Acoustic Echo Shield & Intentional Barge-In:
         // When assistant is actively speaking, device speakers are outputting sound into the room.
-        // Speaker bleed picked up by laptop/phone mic typically has rms between 0.02 and 0.06.
-        // To prevent Sarah from cutting herself off mid-sentence:
-        // 1. Only trigger voice barge-in if the caller deliberately speaks loudly over the agent (rms >= 0.14).
+        // Speaker bleed picked up by laptop/phone mic typically has rms between 0.015 and 0.045.
+        // To prevent Sarah from cutting herself off mid-sentence while allowing natural caller interruptions:
+        // 1. Trigger voice barge-in if caller speaks over the agent at normal conversational volume (rms >= 0.085).
         // 2. Caller can also tap the glowing Orb, click "Interrupt", press Spacebar, or click any prompt.
         // 3. Otherwise, pause mic transmission while assistant is talking so her voice plays completely without cutting off!
         if (isSpeaking) {
-          if (rms >= 0.14) {
+          if (rms >= 0.085) {
             interruptRef.current();
           } else {
             return;
