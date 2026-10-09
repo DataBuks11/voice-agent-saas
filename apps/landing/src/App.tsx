@@ -704,6 +704,153 @@ export default function App() {
         </div>
       </section>
 
+      {/* SECTION 4 - EDITORIAL FOOTER */}
+      <footer className="w-full bg-stone-50 border-t border-neutral-200 pt-16 md:pt-24 pb-12 px-4 md:px-8 mt-1.5 md:mt-2">
+        <div className="max-w-7xl mx-auto flex flex-col gap-12 md:gap-16">
+          {/* Top Banner / Call to Action */}
+          <div className="bg-white rounded-2xl md:rounded-3xl p-6 md:p-12 border border-neutral-200 shadow-sm flex flex-col lg:flex-row items-start lg:items-center justify-between gap-8">
+            <div className="max-w-2xl">
+              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-100 border border-neutral-200 text-xs font-semibold text-black uppercase tracking-wider mb-3">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" /> 24/7 Front Desk Online
+              </span>
+              <h3 className="text-2xl md:text-5xl font-bold tracking-tight text-black leading-tight">
+                Ready for a healthier, brighter smile?
+              </h3>
+              <p className="text-neutral-600 text-sm md:text-base mt-2 md:mt-3 leading-relaxed">
+                Schedule your routine cleaning, cosmetic smile makeover, or emergency toothache consultation. Speak directly with our virtual dental receptionist anytime.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 md:gap-4 shrink-0">
+              <a
+                href="/app/voice"
+                className="px-6 md:px-8 py-3.5 md:py-4 bg-black text-white rounded-full text-sm md:text-base font-bold hover:bg-neutral-800 transition-colors shadow-md"
+              >
+                Book Appointment
+              </a>
+              <a
+                href="tel:5553429900"
+                className="px-6 md:px-8 py-3.5 md:py-4 bg-white text-black border border-black rounded-full text-sm md:text-base font-bold hover:bg-black hover:text-white transition-colors"
+              >
+                Call (555) 342-9900
+              </a>
+            </div>
+          </div>
+
+          {/* 4 Column Footer Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 md:gap-10">
+            {/* Column 1: Brand & Ethos */}
+            <div className="flex flex-col gap-4">
+              <a href="/" className="flex flex-col select-none">
+                <span className="text-2xl md:text-3xl font-extrabold uppercase tracking-tight leading-none text-black">
+                  Dental
+                </span>
+                <span className="text-2xl md:text-3xl font-extrabold uppercase tracking-tight leading-none text-black -mt-1.5 md:-mt-2">
+                  Health
+                </span>
+                <span className="text-[9px] md:text-[10px] font-semibold uppercase tracking-wider leading-none mt-2 text-neutral-500">
+                  quality healthcare
+                </span>
+              </a>
+              <p className="text-neutral-600 text-xs md:text-sm leading-relaxed mt-1">
+                Modern dental healthcare combining clinical precision, compassionate care, and seamless 24/7 voice AI appointment scheduling.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-2">
+                <span className="px-2.5 py-1 rounded-full bg-white border border-neutral-200 text-[10px] font-semibold text-neutral-700">
+                  🛡️ HIPAA Compliant
+                </span>
+                <span className="px-2.5 py-1 rounded-full bg-white border border-neutral-200 text-[10px] font-semibold text-neutral-700">
+                  💳 CareCredit Partner
+                </span>
+                <span className="px-2.5 py-1 rounded-full bg-white border border-neutral-200 text-[10px] font-semibold text-neutral-700">
+                  ⭐ Delta Dental PPO
+                </span>
+              </div>
+            </div>
+
+            {/* Column 2: Clinical Services */}
+            <div className="flex flex-col gap-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-black">
+                Clinical Treatments
+              </h4>
+              <ul className="flex flex-col gap-2 text-xs md:text-sm text-neutral-600">
+                <li><a href="#services" className="hover:text-black transition-colors">Dental Veneers &amp; Bonding</a></li>
+                <li><a href="#services" className="hover:text-black transition-colors">Custom Porcelain Crowns</a></li>
+                <li><a href="#services" className="hover:text-black transition-colors">In-Office Teeth Whitening</a></li>
+                <li><a href="#services" className="hover:text-black transition-colors">Titanium Dental Implants</a></li>
+                <li><a href="/app/voice" className="hover:text-black transition-colors font-medium text-black">🚨 Emergency Toothache Relief</a></li>
+                <li><a href="/app/voice" className="hover:text-black transition-colors">Ultrasonic Cleanings &amp; Deep Scaling</a></li>
+                <li><a href="/app/voice" className="hover:text-black transition-colors">Invisalign® Clear Aligners</a></li>
+              </ul>
+            </div>
+
+            {/* Column 3: Hours & Emergency */}
+            <div className="flex flex-col gap-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-black">
+                Practice Hours
+              </h4>
+              <div className="flex flex-col gap-2 text-xs md:text-sm text-neutral-600">
+                <div className="flex justify-between py-1 border-b border-neutral-200">
+                  <span className="font-semibold text-black">Mon – Fri</span>
+                  <span>9:00 AM – 6:00 PM</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-neutral-200">
+                  <span className="font-semibold text-black">Saturday</span>
+                  <span>9:00 AM – 2:00 PM</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-neutral-200">
+                  <span className="font-semibold text-black">Sunday</span>
+                  <span>Emergency by Appt</span>
+                </div>
+                <div className="flex justify-between py-1">
+                  <span className="font-semibold text-black">Virtual Front Desk</span>
+                  <span className="text-emerald-700 font-semibold">Open 24/7</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Column 4: Location & Console Navigation */}
+            <div className="flex flex-col gap-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-black">
+                Location &amp; Portal
+              </h4>
+              <p className="text-neutral-600 text-xs md:text-sm leading-relaxed">
+                100 Dental Care Plaza, Suite 200<br />
+                West New York, NJ 07093<br />
+                Phone: <a href="tel:5553429900" className="text-black font-semibold hover:underline">(555) 342-9900</a><br />
+                Email: care@dentalhealth.com
+              </p>
+              <div className="mt-2 pt-2 border-t border-neutral-200 flex flex-col gap-1.5 text-xs">
+                <a href="/app/voice" className="font-bold text-black hover:underline flex items-center gap-1.5">
+                  <span>🎙️ Voice Receptionist Console</span> →
+                </a>
+                <a href="/app/overview" className="text-neutral-600 hover:text-black transition-colors">
+                  Clinic Overview &amp; KPIs
+                </a>
+                <a href="/app/bookings" className="text-neutral-600 hover:text-black transition-colors">
+                  Patient Bookings Stream
+                </a>
+                <a href="/app/knowledge" className="text-neutral-600 hover:text-black transition-colors">
+                  Dental Clinical Knowledge Base
+                </a>
+              </div>
+            </div>
+          </div>
+
+          {/* Bottom Copyright & Legal */}
+          <div className="border-t border-neutral-200 pt-8 flex flex-col md:flex-row items-center justify-between gap-4 text-xs text-neutral-500">
+            <div>
+              © {new Date().getFullYear()} Dental Health · Quality Healthcare. All clinical rights reserved.
+            </div>
+            <div className="flex flex-wrap items-center gap-6">
+              <a href="#" className="hover:text-black transition-colors">Privacy Policy</a>
+              <a href="#" className="hover:text-black transition-colors">Terms of Treatment</a>
+              <a href="#" className="hover:text-black transition-colors">Notice of Privacy Practices (NPP)</a>
+              <a href="/app/voice" className="text-black font-semibold hover:underline">Patient Portal</a>
+            </div>
+          </div>
+        </div>
+      </footer>
+
       {/* Floating Quick Live Voice Test Button for Clients */}
       <a
         href="/app/voice"
