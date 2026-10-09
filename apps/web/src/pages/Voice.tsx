@@ -74,7 +74,9 @@ export function VoicePage() {
     _setVoiceState((prev) => {
       const next = typeof val === "function" ? val(prev) : val;
       voiceStateRef.current = next;
-      lastSpeakingTimeRef.current = performance.now();
+      if (next === "speaking") {
+        lastSpeakingTimeRef.current = performance.now();
+      }
       return next;
     });
   }, []);
@@ -345,11 +347,11 @@ export function VoicePage() {
         // Acoustic Echo Shield: When assistant is speaking out of laptop or phone speakers,
         // mute mic transmission to prevent audio feedback loop and false self-interruptions.
         const now = performance.now();
-        const isSpeaking = voiceStateRef.current === "speaking" || voiceStateRef.current === "thinking";
+        const isSpeaking = voiceStateRef.current === "speaking";
         if (isSpeaking) {
           lastSpeakingTimeRef.current = now;
         }
-        const inCooldown = (now - lastSpeakingTimeRef.current) < 300;
+        const inCooldown = !isSpeaking && (now - lastSpeakingTimeRef.current) < 200;
 
         // Calculate RMS of incoming microphone audio
         let sumSquares = 0;
@@ -363,11 +365,11 @@ export function VoicePage() {
           setMicLevel(0);
         }
 
-        // If agent is speaking (or in room reverb cooldown):
-        // NEVER trigger barge-in on standard acoustic speaker reflection (such as on glass tables).
+        // If assistant is actively speaking (or during 200ms room reverb cooldown):
+        // Mute mic to prevent speaker audio from looping into Deepgram.
         // Only trigger barge-in if the human is deliberately speaking loudly over the agent (rms > 0.30).
         if (isSpeaking || inCooldown) {
-          if (voiceStateRef.current === "speaking" && rms > 0.30) {
+          if (isSpeaking && rms > 0.30) {
             interruptRef.current();
           }
           // Do not send speaker echo back to Deepgram while agent is talking
@@ -548,10 +550,9 @@ export function VoicePage() {
         const type = msg.type as string;
         if (type === "hearing") {
           setInterim("");
-          setVoiceState((prev) => (prev === "listening" ? "thinking" : prev));
         } else if (type === "ready") {
           setStatus("live");
-          setVoiceState("thinking");
+          setVoiceState("listening");
           pushLine("system", `session ready · conversation ${(msg.conversationId as string)?.slice(0, 8)}…`);
           
           if (sttModeRef.current === "browser" && browserSttAvailable) {

@@ -549,13 +549,13 @@ class DeepgramAgentSession:
                 if isinstance(message, bytes):
                     now = asyncio.get_event_loop().time()
                     # Acoustic Echo Shield:
-                    # 1. During the first 3.2 seconds of greeting playback, drop audio frames unless deliberate loud speech
+                    # 1. During the full greeting playback (~4.8s), drop audio frames unless deliberate loud speech
                     # 2. While assistant is actively outputting speech, drop low/medium speaker bleed
-                    if (now - self._greeting_injected_at < 3.2) or self._speaking:
+                    if (now - self._greeting_injected_at < 4.8) or self._speaking:
                         if len(message) >= 4:
                             shorts = struct.unpack(f"<{len(message)//2}h", message)
                             peak = max(abs(s) for s in shorts)
-                            if peak < 4000:  # Drop speaker bleed bouncing off phone/laptop glass surface
+                            if peak < 3500:  # Drop speaker bleed bouncing off phone/laptop glass surface
                                 continue
                     # Forward 16kHz PCM audio directly to Deepgram Voice Agent
                     await self.dg_ws.send(message)
@@ -605,7 +605,7 @@ class DeepgramAgentSession:
                     if mtype == "UserStartedSpeaking":
                         # Hardware-level VAD detected caller speech!
                         now = asyncio.get_event_loop().time()
-                        if (now - self._greeting_injected_at < 2.5):
+                        if (now - self._greeting_injected_at < 4.2):
                             # Ignore false VAD trigger caused by initial greeting playback
                             continue
                         was_speaking = self._speaking
