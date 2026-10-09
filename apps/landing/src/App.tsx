@@ -703,6 +703,16 @@ export default function App() {
           </div>
         </div>
       </section>
+
+      {/* Floating Quick Live Voice Test Button for Clients */}
+      <a
+        href="/app/voice"
+        aria-label="Directly test the AI voice receptionist"
+        className="fixed bottom-6 right-6 z-50 flex items-center gap-3 px-6 py-4 bg-black text-white hover:bg-neutral-800 rounded-full shadow-2xl transition-all duration-300 hover:scale-105 border border-white/20 select-none group"
+      >
+        <span className="w-3.5 h-3.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+        <span className="text-sm md:text-base font-bold tracking-tight">🎙️ Test Front Desk Voice</span>
+      </a>
     </div>
   );
 }

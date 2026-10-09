@@ -42,10 +42,35 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
+  app.get("/auth/demo", async (_req, reply) => {
+    return reply.send({
+      token: "demo-token",
+      user: {
+        id: "ce329a05-b139-43c0-a54f-b3950a212139",
+        email: "guest@dentalcare.com",
+        display_name: "Dental Practice Guest",
+      },
+      workspace: {
+        id: "14a6e54a-a071-4756-92a5-24600e630d1a",
+        name: "DataBuks Dental AI",
+        role: "owner",
+      },
+    });
+  });
+
   app.get("/auth/me", async (req, reply) => {
     const headers = req.headers as Record<string, string | undefined>;
     const auth = headers.authorization ?? "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (token === "demo-token" || token === "guest-token") {
+      return reply.send({
+        user: {
+          id: "ce329a05-b139-43c0-a54f-b3950a212139",
+          email: "guest@dentalcare.com",
+          display_name: "Dental Practice Guest",
+        },
+      });
+    }
     const payload = token ? (await import("../lib/jwt.js")).verifyJwt(token, app.jwtSecret) : null;
     if (!payload) throw Object.assign(new Error("invalid or missing token"), { status: 401 });
     const db = getSupabase();

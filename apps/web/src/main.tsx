@@ -86,7 +86,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     { to: "/bookings", label: "Patient Bookings", ico: "fa-solid fa-calendar-check" },
     { to: "/knowledge", label: "Dental Knowledge", ico: "fa-solid fa-tooth" },
     { to: "/agents", label: "AI Receptionist", ico: "fa-solid fa-user-doctor" },
-    { to: "/", label: "Clinic Overview", ico: "fa-solid fa-house-medical" },
+    { to: "/overview", label: "Clinic Overview", ico: "fa-solid fa-house-medical" },
     { to: "/conversations", label: "Call Transcripts", ico: "fa-solid fa-phone-volume" },
   ];
   const title = nav.find((n) => n.to === loc.pathname)?.label ?? "DataBuks Dental Voice AI";
@@ -139,12 +139,10 @@ function Shell({ children }: { children: React.ReactNode }) {
             <button
               className="link-btn"
               onClick={() => {
-                clearSession();
-                clearWorkspace();
-                location.href = BASENAME + "/login";
+                location.reload();
               }}
             >
-              Sign out
+              Restart session
             </button>
           </div>
         </aside>
@@ -169,7 +167,7 @@ function Shell({ children }: { children: React.ReactNode }) {
               <span className={`badge ${health === "up" ? "ok" : health === "down" ? "danger" : "muted"}`}>
                 {health === "checking" ? "checking…" : health === "up" ? "front desk online" : "front desk offline"}
               </span>
-              <span className="badge muted">{user?.email ?? "reception"}</span>
+              <span className="badge muted">Direct Test Mode</span>
             </div>
           </header>
           <main className="content">{children}</main>
@@ -184,24 +182,19 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function RequireAuth({ children }: { children: React.ReactNode }) {
-  if (!getToken()) return <Navigate to="/login" replace />;
-  if (!getWorkspace()) return <Navigate to="/setup" replace />;
-  return <>{children}</>;
-}
-
 createRoot(document.getElementById("root")!).render(
   <BrowserRouter basename={BASENAME}>
     <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/setup" element={<SetupPage />} />
-      <Route path="/" element={<Shell><RequireAuth><DashboardPage /></RequireAuth></Shell>} />
-      <Route path="/voice" element={<Shell><RequireAuth><VoicePage /></RequireAuth></Shell>} />
-      <Route path="/agents" element={<Shell><RequireAuth><AgentsPage /></RequireAuth></Shell>} />
-      <Route path="/knowledge" element={<Shell><RequireAuth><KnowledgePage /></RequireAuth></Shell>} />
-      <Route path="/conversations" element={<Shell><RequireAuth><ConversationsPage /></RequireAuth></Shell>} />
-  <Route path="/bookings" element={<Shell><RequireAuth><BookingsPage /></RequireAuth></Shell>} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="/login" element={<Navigate to="/voice" replace />} />
+      <Route path="/setup" element={<Navigate to="/voice" replace />} />
+      <Route path="/" element={<Navigate to="/voice" replace />} />
+      <Route path="/voice" element={<Shell><VoicePage /></Shell>} />
+      <Route path="/overview" element={<Shell><DashboardPage /></Shell>} />
+      <Route path="/agents" element={<Shell><AgentsPage /></Shell>} />
+      <Route path="/knowledge" element={<Shell><KnowledgePage /></Shell>} />
+      <Route path="/conversations" element={<Shell><ConversationsPage /></Shell>} />
+      <Route path="/bookings" element={<Shell><BookingsPage /></Shell>} />
+      <Route path="*" element={<Navigate to="/voice" replace />} />
     </Routes>
   </BrowserRouter>,
 );
