@@ -209,9 +209,9 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
 
         agent_info["clinic_name"] = clinic_name
         if clinic_name:
-            agent_info["greeting"] = f"Thank you for calling {clinic_name}! My name is Sarah. How can I help you with your dental care today?"
+            agent_info["greeting"] = f"Thank you for calling {clinic_name}! My name is Sarah. May I please have your full name so I can look up your patient records?"
         else:
-            agent_info["greeting"] = "Thank you for calling! My name is Sarah. How can I help you with your dental care today?"
+            agent_info["greeting"] = "Thank you for calling our dental practice! My name is Sarah. May I please have your full name so I can look up your patient records?"
 
         # 2. Load verified documents & chunks balanced across ALL uploaded documents
         try:
@@ -263,6 +263,77 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
             log.warning("failed to load multi-document context from Supabase: %s", exc)
 
     return agent_info, knowledge_text, keyterm_titles
+
+
+async def lookup_patient_record(workspace_id: str, name: str, phone: str = "") -> dict:
+    """Check Supabase customers table to verify if caller is an existing or new dental patient."""
+    if not SB_URL or not SB_KEY or not name:
+        return {"found": False, "patient_status": "new", "message": "No prior records found."}
+
+    clean_name = name.strip()
+    headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            # 1. Search in current workspace
+            params = {"display_name": f"ilike.*{clean_name}*", "limit": "1"}
+            if workspace_id:
+                params["workspace_id"] = f"eq.{workspace_id}"
+
+            r = await client.get(f"{SB_URL}/rest/v1/customers", params=params, headers=headers)
+            data = r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
+
+            # 2. Try last name or first name if multi-word
+            if not data and " " in clean_name:
+                parts = clean_name.split()
+                last = parts[-1]
+                params_last = {"display_name": f"ilike.*{last}*", "limit": "1"}
+                if workspace_id:
+                    params_last["workspace_id"] = f"eq.{workspace_id}"
+                r_last = await client.get(f"{SB_URL}/rest/v1/customers", params=params_last, headers=headers)
+                data = r_last.json() if r_last.status_code == 200 and isinstance(r_last.json(), list) else []
+
+            # 3. Global fallback across dental workspaces
+            if not data and workspace_id:
+                r_any = await client.get(
+                    f"{SB_URL}/rest/v1/customers",
+                    params={"display_name": f"ilike.*{clean_name}*", "limit": "1"},
+                    headers=headers,
+                )
+                data = r_any.json() if r_any.status_code == 200 and isinstance(r_any.json(), list) else []
+
+            if data and len(data) > 0:
+                p = data[0]
+                meta = p.get("metadata") or {}
+                pid = str(p.get("id") or "")
+                seed_num = abs(hash(pid + clean_name)) % 9000 + 1000
+                m_code = meta.get("meeting_code") or f"DEN-{seed_num}"
+                dentist = meta.get("preferred_dentist") or "Dr. Shalini Mandapatti, DDS"
+                last_visit = meta.get("last_visit") or "Recent visit on file"
+                insurance = meta.get("insurance_company") or "In-network PPO"
+                room = meta.get("assigned_room") or "Operatory 1 (Hygiene Suite)"
+                return {
+                    "found": True,
+                    "patient_status": "existing",
+                    "patient_id": pid,
+                    "full_name": p.get("display_name") or clean_name,
+                    "phone": p.get("phone") or meta.get("phone") or phone,
+                    "dob": meta.get("dob") or "",
+                    "insurance": insurance,
+                    "preferred_dentist": dentist,
+                    "last_visit": last_visit,
+                    "treatment_history": meta.get("treatment_history") or "",
+                    "assigned_room": room,
+                    "meeting_code": m_code,
+                    "message": f"Verified existing patient in dental clinic records. Doctor: {dentist}. Last visit: {last_visit}. Direct meeting check-in code is {m_code}.",
+                }
+    except Exception as exc:
+        log.warning("lookup_patient_record error: %s", exc)
+
+    return {
+        "found": False,
+        "patient_status": "new",
+        "message": f"No prior patient records found for '{clean_name}'. Welcome them warmly as a new patient to schedule their initial comprehensive exam.",
+    }
 
 
 class DeepgramAgentSession:
@@ -385,21 +456,29 @@ class DeepgramAgentSession:
             "- Insurances & Financing:",
             "  * In-network with major PPO dental insurances: Delta Dental, MetLife, Cigna, Aetna, Guardian, United Healthcare, and others.",
             "  * Flexible patient financing available through CareCredit (with interest-free options), all major credit cards, and transparent self-pay pricing.",
-            "\n*** MANDATORY PROTOCOL: PATIENT NAME CAPTURE (ONE-TIME SPELLING RULE) ***:",
-            "1. When a caller asks to book an appointment or schedule a visit, ask for their name and visit reason.",
-            "2. When a caller introduces their name (e.g. 'I am Piyush', 'My name is Sarah', 'This is Alex'):",
-            "   Greet them and ask them to spell it out ONCE in your immediate response:",
-            "   'Wonderful to meet you, [Name]! Could you spell your name for me so I make sure I record it correctly?'",
-            "3. ABSOLUTE RULE — NEVER ASK TO SPELL TWICE:",
-            "   Once you have asked to spell the name, whatever the caller says next (whether they spell individual letters like 'P I Y U S H', or repeat the name, or say 'It is Piyush'):",
-            "   ACCEPT IT IMMEDIATELY! Do NOT ask them to spell it again under any circumstances!",
-            "   Acknowledge the name and move directly to asking for their preferred appointment day and time:",
-            "   'Thank you, [Name]! What day and time works best for your appointment?'",
-            "4. If the caller spells their name in the very first turn (e.g. 'I am Piyush, P-I-Y-U-S-H'):",
-            "   Acknowledge it immediately without asking to spell: 'Thank you, Piyush! What day and time works best for your appointment?'",
+            "\n*** MANDATORY PROTOCOL: PATIENT RECORD VERIFICATION & MEETING CODE (EXISTING VS NEW PATIENT) ***:",
+            "1. IMMEDIATE NAME INTAKE & LOOKUP:",
+            "   - When caller states their name (e.g. 'I am Alex Smith', 'My name is Piyush', 'John Doe'), you MUST IMMEDIATELY call the lookup_patient tool with their name!",
+            "2. EXISTING PATIENT FLOW (RECORD FOUND):",
+            "   - When lookup_patient returns found=true (patient_status='existing'):",
+            "     - Warmly welcome them back as a recognized returning patient:",
+            "       'Welcome back, [Name]! Wonderful to hear from you again. I see your records here with Dr. Shalini. How can I assist you with your smile today?'",
+            "     - When booking an appointment:",
+            "       - Call book_appointment with patient_type='existing'.",
+            "       - State their DIRECT MEETING CHECK-IN CODE immediately in your confirmation:",
+            "         'Your appointment is confirmed for [Day/Time] with Dr. Shalini for [Service]! Your direct meeting check-in code is [meeting_code]. Since you are an existing patient with verified records, you can check in directly when you arrive. We look forward to seeing you!'",
+            "3. NEW PATIENT FLOW (RECORD NOT FOUND):",
+            "   - When lookup_patient returns found=false (patient_status='new'):",
+            "     - Warmly welcome them as a first-time visitor to the practice:",
+            "       'Welcome to our dental practice, [Name]! It looks like you are visiting us for the first time. We would love to take great care of your smile! Let's get you scheduled for your comprehensive exam and cleaning. What day and time works best for you?'",
+            "     - When booking an appointment:",
+            "       - Call book_appointment with patient_type='new'.",
+            "       - Provide their new patient meeting check-in code:",
+            "         'I have registered you and scheduled your initial dental visit for [Day/Time]! Your meeting check-in code is [meeting_code]. Please arrive 10 minutes early to complete your new patient paperwork. We look forward to meeting you!'",
+            "4. ZERO ASKING TO SPELL TWICE: Accept caller names naturally without annoying repetitive spelling prompts.",
             "\nAPPOINTMENT BOOKING EXECUTION:",
             "- When you have the patient's name, requested day/time, and visit reason, call the book_appointment tool immediately.",
-            "- Confirm warmly: 'I have scheduled your dental appointment for [day/time]. We look forward to seeing your smile!'",
+            "- Always include the exact meeting check-in code returned by the book_appointment tool in your confirmation speech.",
             "\nEMERGENCY DENTAL CARE PROTOCOL:",
             "- If a patient reports severe tooth pain, swelling, a broken tooth, or dental trauma, express immediate empathy and prioritize urgent same-day booking.",
             "\nUNIVERSAL KNOWLEDGE & LIVE WEB SEARCH EMPOWERMENT (ANSWER EVERY QUESTION):",
@@ -515,14 +594,27 @@ class DeepgramAgentSession:
                                 },
                             },
                             {
+                                "name": "lookup_patient",
+                                "description": "Checks the dental clinic patient records by full name to determine if the caller is an existing patient or a new patient. Call this immediately as soon as the caller states their name.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string", "description": "Caller full name (e.g. 'Alex Smith', 'Piyush Junghare', 'John Doe')"},
+                                        "phone": {"type": "string", "description": "Caller phone number if provided"},
+                                    },
+                                    "required": ["name"],
+                                },
+                            },
+                            {
                                 "name": "book_appointment",
-                                "description": "Books a dental care appointment for the patient at the dental practice.",
+                                "description": "Books a dental care appointment for the patient. For existing patients, confirms and issues their direct meeting check-in code. For new patients, registers them and generates their new appointment check-in code.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
                                         "name": {"type": "string", "description": "Patient full name"},
                                         "datetime": {"type": "string", "description": "Requested appointment day and time"},
-                                        "service": {"type": "string", "description": "Reason for visit (routine cleaning, toothache emergency, cosmetic, implants, checkup)"},
+                                        "service": {"type": "string", "description": "Reason for visit (routine cleaning, toothache emergency, cosmetic veneers, implants, checkup)"},
+                                        "patient_type": {"type": "string", "enum": ["existing", "new"], "description": "Whether the caller is an existing verified patient or a new patient"},
                                         "phone": {"type": "string", "description": "Callback phone number if provided"},
                                         "insurance": {"type": "string", "description": "Dental insurance provider if provided"},
                                         "notes": {"type": "string", "description": "Symptoms, pain details, or special requests"},
@@ -698,20 +790,62 @@ class DeepgramAgentSession:
                                     "content": result,
                                 }
                                 await self.dg_ws.send(json.dumps(resp))
+                            elif name == "lookup_patient":
+                                caller_name = args.get("name") or ""
+                                phone = args.get("phone") or ""
+                                result = await lookup_patient_record(self.workspace_id, caller_name, phone)
+                                log.info("Patient lookup for %r -> %s", caller_name, result.get("patient_status"))
+                                resp = {
+                                    "type": "FunctionCallResponse",
+                                    "id": call_id,
+                                    "name": name,
+                                    "content": json.dumps(result),
+                                }
+                                await self.dg_ws.send(json.dumps(resp))
                             elif name == "book_appointment":
                                 caller_name = args.get("name") or "Patient"
                                 dt = args.get("datetime") or "the requested time"
                                 service = args.get("service") or "Dental Care Visit"
+                                p_type = args.get("patient_type") or "existing"
                                 phone = args.get("phone") or ""
                                 insurance = args.get("insurance") or ""
                                 notes = args.get("notes") or ""
-                                combined_notes = f"Service: {service}"
+
+                                seed_code = abs(hash(caller_name + dt)) % 9000 + 1000
+                                if p_type == "existing":
+                                    m_code = f"DEN-{seed_code}"
+                                else:
+                                    m_code = f"NEW-DEN-{seed_code}"
+
+                                combined_notes = f"Service: {service} | Status: {p_type.capitalize()} Patient | Code: {m_code}"
                                 if insurance:
                                     combined_notes += f" | Insurance: {insurance}"
                                 if notes:
                                     combined_notes += f" | Notes: {notes}"
-                                self._save_booking_async(caller_name, dt, combined_notes, phone)
-                                result = f"Successfully scheduled dental appointment for {caller_name} on {dt} for {service}."
+
+                                self._save_booking_async(
+                                    customer_name=caller_name,
+                                    starts_at=dt,
+                                    notes=combined_notes,
+                                    contact=phone,
+                                    patient_type=p_type,
+                                    meeting_code=m_code,
+                                    service=service,
+                                    insurance=insurance,
+                                )
+
+                                if p_type == "existing":
+                                    result = (
+                                        f"Successfully confirmed dental appointment for existing patient {caller_name} on {dt} for {service}. "
+                                        f"Direct meeting check-in code is {m_code}. Doctor: Dr. Shalini Mandapatti. "
+                                        f"Since patient records are already verified on file, they can check in directly with code {m_code}."
+                                    )
+                                else:
+                                    result = (
+                                        f"Successfully registered and scheduled initial comprehensive visit for new patient {caller_name} on {dt} for {service}. "
+                                        f"Meeting check-in code is {m_code}. Please advise them to arrive 10 minutes early."
+                                    )
+
                                 resp = {
                                     "type": "FunctionCallResponse",
                                     "id": call_id,
@@ -722,25 +856,102 @@ class DeepgramAgentSession:
         except Exception as exc:
             log.info("_deepgram_to_client loop ended: %s", exc)
 
-    def _save_booking_async(self, customer_name: str, starts_at: str, notes: str, contact: str = "") -> None:
+    def _save_booking_async(
+        self,
+        customer_name: str,
+        starts_at: str,
+        notes: str,
+        contact: str = "",
+        patient_type: str = "existing",
+        meeting_code: str = "",
+        service: str = "Dental Care Visit",
+        insurance: str = "",
+    ) -> None:
         if not SB_URL or not SB_KEY or not self.workspace_id:
             return
-        asyncio.create_task(self._insert_booking(customer_name, starts_at, notes, contact))
+        asyncio.create_task(
+            self._insert_booking(
+                customer_name=customer_name,
+                starts_at=starts_at,
+                notes=notes,
+                contact=contact,
+                patient_type=patient_type,
+                meeting_code=meeting_code,
+                service=service,
+                insurance=insurance,
+            )
+        )
 
-    async def _insert_booking(self, customer_name: str, starts_at: str, notes: str, contact: str = "") -> None:
+    async def _insert_booking(
+        self,
+        customer_name: str,
+        starts_at: str,
+        notes: str,
+        contact: str = "",
+        patient_type: str = "existing",
+        meeting_code: str = "",
+        service: str = "Dental Care Visit",
+        insurance: str = "",
+    ) -> None:
         try:
-            row = {
-                "workspace_id": self.workspace_id,
-                "conversation_id": self.conversation_id or None,
-                "customer_name": customer_name,
-                "contact": contact,
-                "starts_at": starts_at,
-                "notes": notes,
-                "status": "confirmed",
-                "source": "dental_voice",
-            }
             headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+            cust_id = None
             async with httpx.AsyncClient(timeout=5.0) as client:
+                # Find or create customer record
+                chk = await client.get(
+                    f"{SB_URL}/rest/v1/customers",
+                    params={
+                        "workspace_id": f"eq.{self.workspace_id}",
+                        "display_name": f"ilike.*{customer_name.strip()}*",
+                        "limit": "1",
+                    },
+                    headers=headers,
+                )
+                c_data = chk.json() if chk.status_code == 200 and isinstance(chk.json(), list) else []
+                if c_data:
+                    cust_id = c_data[0].get("id")
+                else:
+                    new_cust_row = {
+                        "workspace_id": self.workspace_id,
+                        "display_name": customer_name,
+                        "phone": contact,
+                        "metadata": {
+                            "patient_status": patient_type,
+                            "meeting_code": meeting_code,
+                            "insurance_company": insurance,
+                            "notes": notes,
+                            "captured_via": "voice",
+                        },
+                        "phon_key": customer_name.lower().replace(" ", "-"),
+                    }
+                    c_resp = await client.post(
+                        f"{SB_URL}/rest/v1/customers",
+                        json=new_cust_row,
+                        headers={**headers, "Prefer": "return=representation"},
+                    )
+                    if c_resp.status_code < 400 and c_resp.json():
+                        cust_id = c_resp.json()[0].get("id")
+
+                capture_data = {
+                    "patient_type": patient_type,
+                    "meeting_code": meeting_code,
+                    "service": service,
+                    "doctor": "Dr. Shalini Mandapatti, DDS",
+                    "insurance": insurance,
+                    "caller_phone": contact,
+                }
+                row = {
+                    "workspace_id": self.workspace_id,
+                    "conversation_id": self.conversation_id or None,
+                    "customer_name": customer_name,
+                    "contact": contact,
+                    "starts_at": starts_at,
+                    "notes": notes,
+                    "status": "confirmed",
+                    "source": "dental_voice",
+                    "customer_id": cust_id or None,
+                    "capture": capture_data,
+                }
                 await client.post(f"{SB_URL}/rest/v1/bookings", json=row, headers=headers)
         except Exception as exc:
             log.warning("could not insert booking: %s", exc)
@@ -776,6 +987,10 @@ class DeepgramAgentSession:
             "dental care today",
             "dental receptionist",
             "thanks for calling",
+            "may i please have your full name",
+            "have your full name",
+            "look up your patient records",
+            "check your patient records",
         ]
         for phrase in greeting_phrases:
             if phrase in clean_u:

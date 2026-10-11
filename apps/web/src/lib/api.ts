@@ -70,6 +70,12 @@ export interface CapturePayload {
   data?: Record<string, string>;
   skipped?: string[];
   summary?: string;
+  patient_type?: string;
+  meeting_code?: string;
+  service?: string;
+  doctor?: string;
+  insurance?: string;
+  [key: string]: unknown;
 }
 
 export interface ToolResultRow {
