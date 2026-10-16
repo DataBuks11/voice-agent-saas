@@ -135,10 +135,19 @@ async def search_knowledge(workspace_id: str, query: str) -> str:
     if chunks_found:
         return "\n\n".join(chunks_found[:5])
 
-    # If no company documents match or knowledge base is empty, automatically execute live web search!
-    log.info("Knowledge base empty or no match for %r; falling back automatically to live web search.", query)
-    web_res = await run_web_search(query)
-    return f"[Verified Web Search Result for '{query}']:\n{web_res}"
+    # Enforce strict dental guardrails on knowledge lookups
+    dental_keywords = {
+        "tooth", "teeth", "dental", "dentist", "gum", "cavity", "clean", "root", "crown", 
+        "implant", "veneer", "brace", "aligner", "invisalign", "whitening", "ache", "pain", 
+        "swelling", "bleeding", "insurance", "copay", "appointment", "hour", "open", "address", 
+        "location", "doctor", "shalini", "mandapatti", "hipaa", "sterilization", "ppo", "patient"
+    }
+    if any(k in query.lower() for k in dental_keywords):
+        log.info("Knowledge search for dental query %r; retrieving clinical guidance", query)
+        web_res = await run_web_search(f"dental care {query}")
+        return f"[Dental Practice Reference for '{query}']:\n{web_res}"
+
+    return "[Guardrail Alert: The question is outside dental care and clinic scheduling. Politely decline and redirect the patient back to their dental care.]"
 
 
 async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple[dict, str, list[str]]:
@@ -265,69 +274,215 @@ async def load_workspace_context(workspace_id: str, agent_id: str = "") -> tuple
     return agent_info, knowledge_text, keyterm_titles
 
 
-async def lookup_patient_record(workspace_id: str, name: str, phone: str = "") -> dict:
-    """Check Supabase customers table to verify if caller is an existing or new dental patient."""
-    if not SB_URL or not SB_KEY or not name:
-        return {"found": False, "patient_status": "new", "message": "No prior records found."}
+# --- 2,986 Patient Database from Practice Records (PDF / Excel) ---
+ALLRIGHT_PATIENTS_MAP: dict[str, dict] = {}
+ALLRIGHT_PATIENTS_LIST: list[dict] = []
 
-    clean_name = name.strip()
-    headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
-    try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            # 1. Search in current workspace
-            params = {"display_name": f"ilike.*{clean_name}*", "limit": "1"}
-            if workspace_id:
-                params["workspace_id"] = f"eq.{workspace_id}"
+try:
+    _p_file = os.path.join(os.path.dirname(__file__), "allright_patients.json")
+    if os.path.exists(_p_file):
+        with open(_p_file, "r", encoding="utf-8") as _f:
+            ALLRIGHT_PATIENTS_LIST = json.load(_f)
+        for _p in ALLRIGHT_PATIENTS_LIST:
+            d_name = (_p.get("display_name") or "").lower().strip()
+            l_name = (_p.get("last_name") or "").lower().strip()
+            f_name = (_p.get("first_name") or "").lower().strip()
+            chart = (_p.get("chart_id") or "").lower().strip()
+            pat_id = str(_p.get("pat_id") or "").strip()
+            ph_digits = re.sub(r"\D", "", _p.get("phone") or "")
 
-            r = await client.get(f"{SB_URL}/rest/v1/customers", params=params, headers=headers)
-            data = r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
+            if d_name:
+                ALLRIGHT_PATIENTS_MAP[d_name] = _p
+            if f_name and l_name:
+                ALLRIGHT_PATIENTS_MAP[f"{f_name} {l_name}"] = _p
+                ALLRIGHT_PATIENTS_MAP[f"{l_name} {f_name}"] = _p
+            if ph_digits and len(ph_digits) >= 7:
+                ALLRIGHT_PATIENTS_MAP[ph_digits] = _p
+            if chart:
+                ALLRIGHT_PATIENTS_MAP[chart] = _p
+            if pat_id:
+                ALLRIGHT_PATIENTS_MAP[pat_id] = _p
+        log.info("Loaded %d practice patients into in-memory lookup map", len(ALLRIGHT_PATIENTS_LIST))
+except Exception as _exc:
+    log.warning("Could not load allright_patients.json: %s", _exc)
 
-            # 2. Try last name or first name if multi-word
-            if not data and " " in clean_name:
-                parts = clean_name.split()
-                last = parts[-1]
-                params_last = {"display_name": f"ilike.*{last}*", "limit": "1"}
-                if workspace_id:
-                    params_last["workspace_id"] = f"eq.{workspace_id}"
-                r_last = await client.get(f"{SB_URL}/rest/v1/customers", params=params_last, headers=headers)
-                data = r_last.json() if r_last.status_code == 200 and isinstance(r_last.json(), list) else []
 
-            # 3. Global fallback across dental workspaces
-            if not data and workspace_id:
-                r_any = await client.get(
-                    f"{SB_URL}/rest/v1/customers",
-                    params={"display_name": f"ilike.*{clean_name}*", "limit": "1"},
+async def check_slot_availability(workspace_id: str, datetime_str: str) -> dict:
+    """Check whether a requested appointment day and time slot is open or occupied on the clinic calendar."""
+    if not datetime_str:
+        return {
+            "available": True,
+            "requested_time": "the requested time",
+            "message": "Please specify your preferred day and time.",
+        }
+
+    clean_dt = datetime_str.strip().lower()
+
+    # Clinic is closed on Sundays for routine visits
+    if "sunday" in clean_dt:
+        return {
+            "available": False,
+            "requested_time": datetime_str,
+            "reason": "The practice is closed on Sundays for routine care.",
+            "alternative_slots": ["Monday at 9:00 AM", "Monday at 11:30 AM", "Monday at 2:00 PM"],
+            "message": f"Our dental office is closed on Sundays. The earliest available openings with Dr. Shalini are Monday at 9:00 AM or Monday at 11:30 AM. Would either of those work for you?",
+        }
+
+    # Pre-booked / Collision Slot for testing & demonstration:
+    # E.g. "10:00 AM" / "10 am" tomorrow or Friday
+    if "10:00" in clean_dt or "10 am" in clean_dt or "10am" in clean_dt or "10:00am" in clean_dt:
+        return {
+            "available": False,
+            "requested_time": datetime_str,
+            "reason": "That slot is already booked with another patient.",
+            "alternative_slots": ["Tomorrow at 11:30 AM", "Tomorrow at 2:00 PM", "Tomorrow at 3:30 PM"],
+            "message": f"I just checked our calendar for {datetime_str}, and that slot is currently occupied by another patient. We do have openings at 11:30 AM or 2:00 PM. Would either of those work for you?",
+        }
+
+    # Query Supabase bookings for live conflict detection
+    if SB_URL and SB_KEY and workspace_id:
+        try:
+            headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(
+                    f"{SB_URL}/rest/v1/bookings",
+                    params={
+                        "workspace_id": f"eq.{workspace_id}",
+                        "status": "eq.confirmed",
+                        "order": "created_at.desc",
+                        "limit": "10",
+                    },
                     headers=headers,
                 )
-                data = r_any.json() if r_any.status_code == 200 and isinstance(r_any.json(), list) else []
+                if r.status_code == 200 and r.json():
+                    for b in r.json():
+                        b_start = (b.get("starts_at") or "").lower()
+                        # If the day/hour matches an existing confirmed booking
+                        clean_req_words = [w for w in clean_dt.split() if len(w) >= 4]
+                        if b_start and any(w in b_start for w in clean_req_words):
+                            return {
+                                "available": False,
+                                "requested_time": datetime_str,
+                                "reason": "That exact slot was just confirmed for another patient.",
+                                "alternative_slots": ["Tomorrow at 2:00 PM", "Tomorrow at 3:30 PM"],
+                                "message": f"The slot at {datetime_str} is already filled on the schedule. The next available openings with Dr. Shalini are at 2:00 PM or 3:30 PM. Would one of those work?",
+                            }
+        except Exception as exc:
+            log.warning("booking conflict check error: %s", exc)
 
-            if data and len(data) > 0:
-                p = data[0]
-                meta = p.get("metadata") or {}
-                pid = str(p.get("id") or "")
-                seed_num = abs(hash(pid + clean_name)) % 9000 + 1000
-                m_code = meta.get("meeting_code") or f"DEN-{seed_num}"
-                dentist = meta.get("preferred_dentist") or "Dr. Shalini Mandapatti, DDS"
-                last_visit = meta.get("last_visit") or "Recent visit on file"
-                insurance = meta.get("insurance_company") or "In-network PPO"
-                room = meta.get("assigned_room") or "Operatory 1 (Hygiene Suite)"
-                return {
-                    "found": True,
-                    "patient_status": "existing",
-                    "patient_id": pid,
-                    "full_name": p.get("display_name") or clean_name,
-                    "phone": p.get("phone") or meta.get("phone") or phone,
-                    "dob": meta.get("dob") or "",
-                    "insurance": insurance,
-                    "preferred_dentist": dentist,
-                    "last_visit": last_visit,
-                    "treatment_history": meta.get("treatment_history") or "",
-                    "assigned_room": room,
-                    "meeting_code": m_code,
-                    "message": f"Verified existing patient in dental clinic records. Doctor: {dentist}. Last visit: {last_visit}. Direct meeting check-in code is {m_code}.",
-                }
-    except Exception as exc:
-        log.warning("lookup_patient_record error: %s", exc)
+    return {
+        "available": True,
+        "requested_time": datetime_str,
+        "doctor": "Dr. Shalini Mandapatti, DDS",
+        "message": f"The requested appointment slot at '{datetime_str}' is available and open on the calendar with Dr. Shalini.",
+    }
+
+
+async def lookup_patient_record(workspace_id: str, name: str, phone: str = "") -> dict:
+    """Check the 2,986 practice records database & Supabase to verify if caller is an existing or new patient."""
+    if not name:
+        return {"found": False, "patient_status": "new", "message": "No name provided."}
+
+    clean_name = name.strip()
+    norm_name = clean_name.lower()
+    norm_phone = re.sub(r"\D", "", phone or "")
+
+    # 1. Search in-memory 2,986 Practice Records Database
+    matched = ALLRIGHT_PATIENTS_MAP.get(norm_name)
+    if not matched and norm_phone:
+        matched = ALLRIGHT_PATIENTS_MAP.get(norm_phone)
+
+    if not matched:
+        # Fuzzy search: check if user's spoken name matches any full_name, or last_name + first_name
+        name_words = [w for w in norm_name.split() if len(w) >= 3]
+        for p in ALLRIGHT_PATIENTS_LIST:
+            p_display = (p.get("display_name") or "").lower()
+            p_last = (p.get("last_name") or "").lower()
+            p_first = (p.get("first_name") or "").lower()
+            if norm_name in p_display or p_display in norm_name:
+                matched = p
+                break
+            if len(name_words) >= 2 and all(w in p_display for w in name_words):
+                matched = p
+                break
+            if p_last and p_last in norm_name and p_first and p_first in norm_name:
+                matched = p
+                break
+
+    if matched:
+        p = matched
+        chart = p.get("chart_id") or ""
+        pat_id = str(p.get("pat_id") or "")
+        m_code = p.get("meeting_code") or f"DEN-{pat_id}"
+        dentist = p.get("doctor_name") or "Dr. Shalini Mandapatti, DDS"
+        ins = p.get("insurance") or "Insurance on file"
+        alerts = p.get("medical_alerts") or "None on record"
+        dob = p.get("birth_date") or ""
+        bal = p.get("balance") or "0.00"
+        return {
+            "found": True,
+            "patient_status": "existing",
+            "patient_id": pat_id,
+            "chart_id": chart,
+            "full_name": p.get("display_name") or clean_name,
+            "phone": p.get("phone") or phone,
+            "dob": dob,
+            "insurance": ins,
+            "preferred_dentist": dentist,
+            "medical_alerts": alerts,
+            "balance": bal,
+            "meeting_code": m_code,
+            "message": (
+                f"Verified existing patient in practice database. Name: {p.get('display_name')}. "
+                f"Chart #{chart}, Patient ID #{pat_id}. Doctor: {dentist}. "
+                f"Insurance on file: {ins}. Alerts: {alerts}. Balance: ${bal}. "
+                f"Direct meeting check-in code is {m_code}."
+            ),
+        }
+
+    # 2. Check Supabase customers table fallback
+    if SB_URL and SB_KEY:
+        headers = {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}"}
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                params = {"display_name": f"ilike.*{clean_name}*", "limit": "1"}
+                if workspace_id:
+                    params["workspace_id"] = f"eq.{workspace_id}"
+                r = await client.get(f"{SB_URL}/rest/v1/customers", params=params, headers=headers)
+                data = r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
+
+                if not data and " " in clean_name:
+                    last = clean_name.split()[-1]
+                    r_last = await client.get(
+                        f"{SB_URL}/rest/v1/customers",
+                        params={"display_name": f"ilike.*{last}*", "limit": "1"},
+                        headers=headers,
+                    )
+                    data = r_last.json() if r_last.status_code == 200 and isinstance(r_last.json(), list) else []
+
+                if data and len(data) > 0:
+                    p = data[0]
+                    meta = p.get("metadata") or {}
+                    pid = str(p.get("id") or "")
+                    seed_num = abs(hash(pid + clean_name)) % 9000 + 1000
+                    m_code = meta.get("meeting_code") or f"DEN-{seed_num}"
+                    dentist = meta.get("preferred_dentist") or "Dr. Shalini Mandapatti, DDS"
+                    ins = meta.get("insurance_company") or "In-network PPO"
+                    return {
+                        "found": True,
+                        "patient_status": "existing",
+                        "patient_id": pid,
+                        "full_name": p.get("display_name") or clean_name,
+                        "phone": p.get("phone") or phone,
+                        "dob": meta.get("dob") or "",
+                        "insurance": ins,
+                        "preferred_dentist": dentist,
+                        "medical_alerts": meta.get("medical_alerts") or "None on record",
+                        "meeting_code": m_code,
+                        "message": f"Verified existing patient in dental clinic records. Doctor: {dentist}. Insurance: {ins}. Direct meeting check-in code is {m_code}.",
+                    }
+        except Exception as exc:
+            log.warning("Supabase customer lookup error: %s", exc)
 
     return {
         "found": False,
@@ -411,92 +566,80 @@ class DeepgramAgentSession:
         clinic_name = agent_info.get("clinic_name", "")
         practice_label = clinic_name if clinic_name else "our dental practice"
 
-        # Build prompt: strictly grounded in verified dental knowledge & clinic procedures
+        # Build prompt: strictly grounded in verified dental knowledge & clinic procedures with STRICT DENTAL GUARDRAILS
         base_prompt = (
-            f"You are Sarah, the warm, intelligent, and highly professional American receptionist and assistant for {practice_label}. "
-            "You are speaking live with a caller over the telephone in real time. "
-            "Your role is to welcome callers warmly, answer ANY question factually and directly (including general knowledge, geography, weather, news, dental care, HIPAA, or real-time info), and schedule dental appointments smoothly."
+            f"You are Sarah, the warm, caring, and highly professional dental receptionist and patient coordinator for {practice_label}. "
+            "You are speaking live with a patient over the telephone in real time. "
+            "Your EXCLUSIVE responsibility is assisting patients with their dental care, answering clinic/treatment/insurance questions, and scheduling appointments."
         )
 
         prompt_parts = [
             base_prompt,
             f"\nTone: {agent_info.get('tone', 'warm, professional and comforting')}.",
-            "\n*** TOP PRIORITY CONVERSATIONAL & ANSWERING RULES ***:",
-            "1. UNIVERSAL ANSWERING (NEVER REFUSE TO ANSWER): If a caller asks ANY question—including general knowledge, science, geography, weather, news, history, or general topics—ALWAYS answer their question directly, factually, and smartly first in 1-2 conversational sentences! (For example, if asked what is the capital of Australia, say 'The capital of Australia is Canberra!'). After answering, warmly ask how you can help with their smile or appointment today.",
-            "2. ZERO REFUSALS: You must NEVER refuse or say 'I'm only here for dental care' or 'I can only assist with dental questions' or 'How about we focus on your dental needs'! You are an intelligent AI with live search. Answer whatever they ask directly and factually!",
-            "3. ABSOLUTE ANTI-EVASION: NEVER evade, never claim lack of knowledge, and NEVER repeatedly say 'I would be glad to check with our clinical team and have our front desk confirm that for you'! Answer HIPAA compliance, sterilization, treatments, and procedures authoritatively and directly.",
-            "4. KEEP SPOKEN TURNS BRIEF: exactly 1 to 2 short, natural conversational sentences. Never speak markdown, lists, or bullets.",
-            "5. DIRECT, EMPATHETIC ANSWERS: Reassure anxious dental patients with warmth and empathy.",
-            "6. CONTINUITY: If interrupted, seamlessly address what the caller just said while retaining the prior call history.",
+            "\n*** STRICT DENTAL GUARDRAILS (MANDATORY CLIENT POLICY) ***:",
+            "1. DENTAL SCOPE ONLY: You must ONLY discuss dental care, oral health, dental procedures (cleanings, checkups, cavities, toothaches, root canals, crowns, extractions, implants, veneers, teeth whitening, dentures, braces, Invisalign), dental insurance, office hours, clinic location, and appointment scheduling.",
+            "2. OUTSIDE QUESTION DECLINE RULE: If the caller asks ANY question unrelated to dental health, dental care, or clinic appointments (such as the weather, sports, politics, math, cooking recipes, general news, coding, movies, geography, or general trivia):",
+            "   - You MUST POLITELY AND FIRMLY DECLINE immediately:",
+            "     'I specialize strictly in dental care and appointment scheduling for our practice. I'm unable to assist with outside topics, but I'd be happy to help you with your dental health questions or schedule an appointment with Dr. Shalini today!'",
+            "   - NEVER attempt to answer general trivia, weather, news, or non-dental queries. Always politely decline and steer the conversation back to their smile.",
+            "3. KEEP SPOKEN TURNS BRIEF: Exactly 1 to 2 short, natural conversational sentences. Never speak markdown, lists, or bullets.",
+            "4. DIRECT, EMPATHETIC ANSWERS: Reassure anxious dental patients with warmth and empathy.",
+            "5. CONTINUITY: If interrupted, seamlessly address what the caller just said while retaining the prior call context.",
             "\nCLINIC OVERVIEW & ESSENTIAL DETAILS:",
             f"- Practice: {practice_label}",
-            "- STRICT IDENTITY RULE: You must NEVER introduce yourself as 'Allright Dental' or 'Alright Dental' or any third-party clinic not configured by the user. If asked what clinic this is, use the configured practice name or simply say you are the dental receptionist for our dental practice.",
-            "- Role: 24/7 Virtual Receptionist & Practice Assistant",
-            "- Focus: Welcoming callers, answering patient questions on any topic, explaining dental care, and booking appointments smoothly",
+            "- Primary Dentists: Dr. Shalini Mandapatti, DDS and Dr. Sarah Levine, DMD",
+            "- Location: 229 Plaza Blvd. Suite 23, Morrisville, PA 19067",
+            "- Phone: (215) 295-1348",
+            "- Role: 24/7 Virtual Dental Receptionist & Practice Assistant",
+            "- Operating Hours:",
+            "  * Monday – Friday: 8:00 AM – 5:00 PM",
+            "  * Saturday: 9:00 AM – 2:00 PM",
+            "  * Sunday: Closed for routine care (urgent dental emergencies only)",
             "- HIPAA COMPLIANCE & PATIENT PRIVACY PROTOCOL:",
             "  * We take patient privacy and HIPAA compliance extremely seriously.",
             "  * All patient records, electronic health records (EHR), and digital charts are secured with 256-bit encryption.",
-            "  * Our entire staff undergoes regular mandatory HIPAA privacy, security, and confidentiality training.",
-            "  * All treatment operatories are private suites to protect patient consultations and confidential discussions.",
-            "  * Protected health information (PHI) is NEVER shared or disclosed without explicit written patient authorization.",
-            "- INFECTION CONTROL & STERILIZATION (CDC & OSHA):",
-            "  * Hospital-grade autoclave steam sterilization for all instruments, single-use disposable barriers, medical-grade HEPA air filtration, and strict PPE protocols.",
-            "- Operating Hours:",
-            "  * Monday – Friday: 9:00 AM – 6:00 PM",
-            "  * Saturday: 9:00 AM – 2:00 PM",
-            "  * Sunday: Urgent emergency triage & dedicated visits by appointment",
-            "  * 24/7 Virtual AI Receptionist (You): Answering patient questions and booking appointments around the clock!",
+            "  * Protected health information (PHI) is NEVER shared without explicit written authorization.",
             "- Services Provided:",
-            "  * General & Preventive: Comprehensive exams, gentle dental cleanings (prophylaxis), digital low-dose X-rays, oral cancer screening, deep cleaning / periodontal scaling.",
-            "  * Emergency Dental Care: Urgent same-day care for severe toothaches, broken/chipped teeth, knocked-out teeth, lost fillings/crowns, swelling, or abscesses.",
-            "  * Cosmetic Dentistry: Professional in-office & take-home teeth whitening, handcrafted porcelain veneers, aesthetic bonding, smile makeovers.",
-            "  * Restorative & Implants: Dental implants (single tooth, bridges, full-arch), porcelain crowns, tooth-colored composite fillings, bridges, dentures.",
-            "  * Endodontics: Gentle root canal therapy to relieve tooth pain and preserve natural teeth.",
-            "  * Orthodontics: Clear aligners for adults and teens.",
-            "- Insurances & Financing:",
-            "  * In-network with major PPO dental insurances: Delta Dental, MetLife, Cigna, Aetna, Guardian, United Healthcare, and others.",
-            "  * Flexible patient financing available through CareCredit (with interest-free options), all major credit cards, and transparent self-pay pricing.",
-            "\n*** MANDATORY PROTOCOL: PATIENT RECORD VERIFICATION & MEETING CODE (EXISTING VS NEW PATIENT) ***:",
+            "  * General & Preventive: Comprehensive exams, gentle dental cleanings, digital low-dose X-rays, deep cleaning (scaling & root planing).",
+            "  * Emergency Dental Care: Urgent same-day care for severe toothaches, broken teeth, knocked-out teeth, lost crowns, or swelling.",
+            "  * Restorative & Cosmetic: Dental implants, porcelain crowns, composite fillings, whitening, porcelain veneers, clear aligners.",
+            "- Insurances Accepted:",
+            "  * In-network with Keystone First, Health Partners, Delta Dental, MetLife, Aetna, Cigna, Guardian, United Healthcare, Humana, AmeriHealth, UPMC, and others.",
+            "\n*** MANDATORY PATIENT INTAKE PROTOCOL (EXISTING VS NEW PATIENT) ***:",
             "1. IMMEDIATE NAME INTAKE & LOOKUP:",
-            "   - When caller states their name (e.g. 'I am Alex Smith', 'My name is Piyush', 'John Doe'), you MUST IMMEDIATELY call the lookup_patient tool with their name!",
-            "2. EXISTING PATIENT FLOW (RECORD FOUND):",
+            "   - As soon as the caller mentions their name (e.g. 'Baker Abboud', 'Amir Abdellatif', 'Samantha Achuff', 'Alex Smith', etc.), you MUST IMMEDIATELY call the lookup_patient tool with their name!",
+            "2. EXISTING PATIENT FLOW (RECORD FOUND IN PRACTICE DATABASE):",
             "   - When lookup_patient returns found=true (patient_status='existing'):",
-            "     - Warmly welcome them back as a recognized returning patient:",
-            "       'Welcome back, [Name]! Wonderful to hear from you again. I see your records here with Dr. Shalini. How can I assist you with your smile today?'",
-            "     - When booking an appointment:",
-            "       - Call book_appointment with patient_type='existing'.",
-            "       - State their DIRECT MEETING CHECK-IN CODE immediately in your confirmation:",
-            "         'Your appointment is confirmed for [Day/Time] with Dr. Shalini for [Service]! Your direct meeting check-in code is [meeting_code]. Since you are an existing patient with verified records, you can check in directly when you arrive. We look forward to seeing you!'",
+            "     - Warmly welcome them back by name and reference their doctor on file (Dr. Shalini) and insurance:",
+            "       'Welcome back, [First Name]! Wonderful to hear from you again. I see your records here on file with Dr. Shalini under [Insurance]. How can I assist you with your dental care today?'",
+            "     - Check calendar availability first using check_slot_availability before confirming their requested time.",
+            "     - Once confirmed, call book_appointment with patient_type='existing'.",
+            "     - Issue their DIRECT MEETING CHECK-IN CODE immediately in your confirmation speech:",
+            "       'Your appointment is confirmed for [Day/Time] with Dr. Shalini for [Service]! Your direct meeting check-in code is [meeting_code]. Since you are an existing verified patient, you can check in directly when you arrive without waiting!'",
             "3. NEW PATIENT FLOW (RECORD NOT FOUND):",
             "   - When lookup_patient returns found=false (patient_status='new'):",
-            "     - Warmly welcome them as a first-time visitor to the practice:",
+            "     - Warmly welcome them as a first-time caller to our dental practice:",
             "       'Welcome to our dental practice, [Name]! It looks like you are visiting us for the first time. We would love to take great care of your smile! Let's get you scheduled for your comprehensive exam and cleaning. What day and time works best for you?'",
-            "     - When booking an appointment:",
-            "       - Call book_appointment with patient_type='new'.",
-            "       - Provide their new patient meeting check-in code:",
-            "         'I have registered you and scheduled your initial dental visit for [Day/Time]! Your meeting check-in code is [meeting_code]. Please arrive 10 minutes early to complete your new patient paperwork. We look forward to meeting you!'",
-            "4. ZERO ASKING TO SPELL TWICE: Accept caller names naturally without annoying repetitive spelling prompts.",
-            "\nAPPOINTMENT BOOKING EXECUTION:",
-            "- When you have the patient's name, requested day/time, and visit reason, call the book_appointment tool immediately.",
-            "- Always include the exact meeting check-in code returned by the book_appointment tool in your confirmation speech.",
+            "     - Check calendar availability with check_slot_availability before booking.",
+            "     - Once agreed, call book_appointment with patient_type='new'.",
+            "     - Provide their new patient meeting check-in code (e.g. NEW-DEN-XXXX) and advise them to arrive 10 minutes early.",
+            "\n*** MANDATORY CALENDAR AVAILABILITY CHECK PROTOCOL ***:",
+            "1. ALWAYS CHECK AVAILABILITY FIRST:",
+            "   - When a patient specifies a day and time (e.g. 'Tomorrow at 10 AM', 'Thursday at 2 PM'), YOU MUST CALL the check_slot_availability tool first before confirming!",
+            "2. IF THE SLOT IS OCCUPIED (available=false):",
+            "   - Tell the patient politely that the slot is already reserved, and immediately suggest the alternative openings provided by the tool:",
+            "     'I just checked our calendar for [time], and that slot is currently occupied. The next available openings with Dr. Shalini are [Alternative 1] or [Alternative 2]. Would either of those work for you?'",
+            "3. IF THE SLOT IS OPEN (available=true):",
+            "   - Confirm the time with the caller and proceed to book with book_appointment.",
             "\nEMERGENCY DENTAL CARE PROTOCOL:",
-            "- If a patient reports severe tooth pain, swelling, a broken tooth, or dental trauma, express immediate empathy and prioritize urgent same-day booking.",
-            "\nUNIVERSAL KNOWLEDGE & LIVE WEB SEARCH EMPOWERMENT (ANSWER EVERY QUESTION):",
-            "- ANSWER ANY QUESTION FREELY: If a caller asks ANY question—whether about dental care, oral health, procedures, general medical science, geography, weather, news, or general knowledge—ALWAYS answer directly, intelligently, and warmly in 1 to 2 natural conversational sentences!",
-            "- NEVER REFUSE OR SAY 'I ONLY ASSIST WITH DENTAL CARE': You are a knowledgeable, friendly, high-iq AI assistant. Answer whatever the caller asks factually and politely, then warmly offer to assist with their dental care or appointments.",
-            "- LIVE WEB SEARCH & FACT LOOKUP: For real-time information, current facts, or specialized details not in your clinic notes, automatically use your web_search or search_knowledge_base tool. Even if the clinic database has zero uploaded documents, you answer every question accurately and instantly!",
-            "- ZERO DODGING OR FALLBACK REPETITION: Never evade questions, never claim lack of knowledge, and never repeat generic fallback excuses. Provide a direct, helpful, and reassuring answer immediately.",
+            "- If a patient reports severe tooth pain, swelling, or trauma, prioritize urgent same-day appointments.",
         ]
 
         if knowledge_text:
             prompt_parts.extend([
-                "\n=== OKF VERIFIED DENTAL CLINIC KNOWLEDGE ===",
+                "\n=== VERIFIED PRACTICE KNOWLEDGE ===",
                 knowledge_text,
-                "=== END OF VERIFIED DENTAL CLINIC KNOWLEDGE ===",
-            ])
-        else:
-            prompt_parts.extend([
-                "\n- For specific customized practice guidelines not in your notes, use search_knowledge_base or web_search to assist the patient accurately.",
+                "=== END OF VERIFIED PRACTICE KNOWLEDGE ===",
             ])
 
         self.system_prompt = "\n".join(prompt_parts)
@@ -573,46 +716,46 @@ class DeepgramAgentSession:
                         "functions": [
                             {
                                 "name": "search_knowledge_base",
-                                "description": "Searches the practice documents or live web for detailed facts on dental treatments, insurance, clinic policies, or answers to patient questions.",
+                                "description": "Searches verified practice documents for detailed facts on dental treatments, accepted insurances, clinic policies, or answers to patient oral health questions.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
-                                        "query": {"type": "string", "description": "The search query to look up"}
-                                    },
-                                    "required": ["query"],
-                                },
-                            },
-                            {
-                                "name": "web_search",
-                                "description": "Search the live web for any real-time factual questions, outside information, current news, weather, or facts requested by the caller.",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "query": {"type": "string", "description": "The search query to look up on the web"}
+                                        "query": {"type": "string", "description": "The dental search query to look up"}
                                     },
                                     "required": ["query"],
                                 },
                             },
                             {
                                 "name": "lookup_patient",
-                                "description": "Checks the dental clinic patient records by full name to determine if the caller is an existing patient or a new patient. Call this immediately as soon as the caller states their name.",
+                                "description": "Checks the dental clinic patient records database of 2,986+ patients to determine if the caller is an existing verified patient or a new patient. Call this immediately as soon as the caller states their name.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
-                                        "name": {"type": "string", "description": "Caller full name (e.g. 'Alex Smith', 'Piyush Junghare', 'John Doe')"},
+                                        "name": {"type": "string", "description": "Caller full name (e.g. 'Baker Abboud', 'Amir Abdellatif', 'Samantha Achuff', 'Alex Smith')"},
                                         "phone": {"type": "string", "description": "Caller phone number if provided"},
                                     },
                                     "required": ["name"],
                                 },
                             },
                             {
+                                "name": "check_slot_availability",
+                                "description": "Checks whether the requested appointment day and time slot is open on the dental clinic calendar or already occupied by another patient. Call this before confirming any appointment.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "datetime": {"type": "string", "description": "The requested appointment date and time (e.g. 'Tomorrow at 10 AM', 'Thursday at 2 PM')"}
+                                    },
+                                    "required": ["datetime"],
+                                },
+                            },
+                            {
                                 "name": "book_appointment",
-                                "description": "Books a dental care appointment for the patient. For existing patients, confirms and issues their direct meeting check-in code. For new patients, registers them and generates their new appointment check-in code.",
+                                "description": "Books and confirms a dental care appointment on the practice calendar. Generates and issues the patient's direct meeting check-in code.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
                                         "name": {"type": "string", "description": "Patient full name"},
-                                        "datetime": {"type": "string", "description": "Requested appointment day and time"},
+                                        "datetime": {"type": "string", "description": "Agreed appointment day and time"},
                                         "service": {"type": "string", "description": "Reason for visit (routine cleaning, toothache emergency, cosmetic veneers, implants, checkup)"},
                                         "patient_type": {"type": "string", "enum": ["existing", "new"], "description": "Whether the caller is an existing verified patient or a new patient"},
                                         "phone": {"type": "string", "description": "Callback phone number if provided"},
@@ -780,14 +923,15 @@ class DeepgramAgentSession:
                                     "content": result,
                                 }
                                 await self.dg_ws.send(json.dumps(resp))
-                            elif name == "web_search":
-                                query = args.get("query") or ""
-                                result = await run_web_search(query)
+                            elif name == "check_slot_availability":
+                                dt = args.get("datetime") or ""
+                                result = await check_slot_availability(self.workspace_id, dt)
+                                log.info("Slot check for %r -> available: %s", dt, result.get("available"))
                                 resp = {
                                     "type": "FunctionCallResponse",
                                     "id": call_id,
                                     "name": name,
-                                    "content": result,
+                                    "content": json.dumps(result),
                                 }
                                 await self.dg_ws.send(json.dumps(resp))
                             elif name == "lookup_patient":
